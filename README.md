@@ -74,6 +74,12 @@ thrawn-nnue export --checkpoint runs/default/checkpoints/best.pt --out runs/defa
 thrawn-nnue verify-export --checkpoint runs/default/checkpoints/step_00010000.pt --nnue runs/default/model.nnue
 ```
 
+8. Summarize the run and generate plots:
+
+```bash
+thrawn-nnue metrics --run-dir runs/default
+```
+
 ## Documentation
 
 - Tests: [docs/testing.md](/Users/feiyulin/Code/thrawn-nnue/docs/testing.md)
@@ -94,3 +100,4 @@ thrawn-nnue verify-export --checkpoint runs/default/checkpoints/step_00010000.pt
 - This repository is trainer-only.
 - The engine-side loader/inference code belongs in your engine repo.
 - The exported `.nnue` format is trainer-owned and documented in [docs/nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md).
+- Training metrics are logged to `metrics.jsonl`, and `thrawn-nnue metrics --run-dir ...` generates summary output plus PNG plots in `plots/`.

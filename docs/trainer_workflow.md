@@ -120,6 +120,7 @@ Outputs go under the configured `output_dir`, including:
 
 - `checkpoints/`
 - `metrics.jsonl`
+- `plots/` after running the metrics report command
 
 Validation uses only `validation_datasets`. Those shards should be held out from `train_datasets`.
 
@@ -131,7 +132,24 @@ Each validation pass:
 - logs a validation record to `metrics.jsonl`
 - updates `checkpoints/best.pt` if blended validation loss is the best seen so far
 
-## 5. Resume
+## 5. Inspect metrics and plots
+
+After or during a run, summarize the run and generate PNG plots:
+
+```bash
+thrawn-nnue metrics --run-dir runs/my_first_run
+```
+
+This reads `metrics.jsonl`, prints a compact summary, and writes plots under `runs/my_first_run/plots/`.
+
+The first version generates:
+
+- `train_loss.png`
+- `validation_loss.png` if validation metrics exist
+- `lr.png`
+- `loss_overview.png` if both train and validation metrics exist
+
+## 6. Resume
 
 Resume from a saved checkpoint with:
 
@@ -152,7 +170,7 @@ Checkpoints contain:
 
 That makes resume suitable for continuing a run exactly, not just reloading weights.
 
-## 6. Export
+## 7. Export
 
 Export a trained checkpoint to `.nnue`:
 
@@ -162,7 +180,7 @@ thrawn-nnue export --checkpoint runs/my_first_run/checkpoints/best.pt --out runs
 
 The binary format is documented in [nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md).
 
-## 7. Verify the export
+## 8. Verify the export
 
 Compare exported inference to checkpoint inference:
 

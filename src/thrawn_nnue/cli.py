@@ -6,6 +6,7 @@ import json
 
 from .config import load_config
 from .export import export_checkpoint, verify_export
+from .metrics import generate_run_plots, load_metrics_run, render_summary_text, summarize_run
 from .native import inspect_binpack
 from .training import resume_training, train_from_config
 
@@ -31,6 +32,9 @@ def main() -> None:
 
     inspect_parser = subparsers.add_parser("inspect-binpack", help="Inspect a .binpack dataset")
     inspect_parser.add_argument("--path", required=True)
+
+    metrics_parser = subparsers.add_parser("metrics", help="Summarize a training run and generate plots")
+    metrics_parser.add_argument("--run-dir", required=True)
 
     args = parser.parse_args()
 
@@ -58,6 +62,18 @@ def main() -> None:
     if args.command == "inspect-binpack":
         stats = inspect_binpack(args.path)
         print(json.dumps(stats, indent=2, sort_keys=True))
+        return
+
+    if args.command == "metrics":
+        run = load_metrics_run(args.run_dir)
+        summary = summarize_run(run)
+        plots = generate_run_plots(run)
+        output = {
+            "summary": summary,
+            "plots": [str(path) for path in plots],
+            "text": render_summary_text(summary),
+        }
+        print(output["text"])
         return
 
     raise ValueError(f"Unhandled command: {args.command}")

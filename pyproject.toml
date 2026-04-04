@@ -9,6 +9,7 @@ description = "Dual-perspective NNUE training scaffold for chess engines"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "matplotlib>=3.8",
   "numpy>=1.26",
   "torch>=2.2",
 ]
