@@ -54,19 +54,21 @@ thrawn-nnue inspect-binpack --path /absolute/path/to/train.binpack
 thrawn-nnue train --config configs/default.toml
 ```
 
-4. Resume later if needed:
+4. Validation runs automatically every `validation_every` steps if `validation_datasets` is configured, and the best validation checkpoint is written to `runs/.../checkpoints/best.pt`.
+
+5. Resume later if needed:
 
 ```bash
 thrawn-nnue resume --checkpoint runs/default/checkpoints/step_00001000.pt
 ```
 
-5. Export:
+6. Export the best checkpoint:
 
 ```bash
-thrawn-nnue export --checkpoint runs/default/checkpoints/step_00010000.pt --out runs/default/model.nnue
+thrawn-nnue export --checkpoint runs/default/checkpoints/best.pt --out runs/default/model.nnue
 ```
 
-6. Verify:
+7. Verify:
 
 ```bash
 thrawn-nnue verify-export --checkpoint runs/default/checkpoints/step_00010000.pt --nnue runs/default/model.nnue

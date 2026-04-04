@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import json
+import math
 
 from .checkpoint import load_checkpoint, restore_rng_state, save_checkpoint
 from .config import TrainConfig
@@ -27,6 +28,8 @@ class TrainState:
     device: str
     run_dir: Path
     metrics_path: Path
+    best_validation_loss: float | None = None
+    best_validation_step: int | None = None
     epoch: int = 0
     step_in_epoch: int = 0
     global_step: int = 0
@@ -44,9 +47,6 @@ def train_from_config(config: TrainConfig) -> Path:
 
 
 def resume_training(checkpoint_path: str | Path) -> Path:
-    torch = _require_torch()
-    from .model import DualPerspectiveA768NNUE
-
     payload = load_checkpoint(checkpoint_path, map_location="cpu")
     config = TrainConfig.from_dict(dict(payload["config"]))
     state = _create_state(config)
@@ -57,6 +57,8 @@ def resume_training(checkpoint_path: str | Path) -> Path:
     if state.scaler is not None and payload["scaler_state"] is not None:
         state.scaler.load_state_dict(payload["scaler_state"])
     restore_rng_state(payload["rng_state"])
+    state.best_validation_loss = payload.get("best_validation_loss")
+    state.best_validation_step = payload.get("best_validation_step")
     state.epoch = int(payload["epoch"])
     state.step_in_epoch = int(payload["step_in_epoch"])
     state.global_step = int(payload["global_step"])
@@ -153,6 +155,7 @@ def _run_training_loop(state: TrainState) -> None:
                     _log_metrics(
                         state,
                         {
+                            "event": "train",
                             "epoch": epoch,
                             "step_in_epoch": step_in_epoch,
                             "global_step": state.global_step,
@@ -166,6 +169,12 @@ def _run_training_loop(state: TrainState) -> None:
                 if state.global_step % state.config.checkpoint_every == 0:
                     checkpoint_path = state.run_dir / "checkpoints" / f"step_{state.global_step:08d}.pt"
                     _save_training_checkpoint(state, checkpoint_path, epoch=epoch, step_in_epoch=state.step_in_epoch)
+
+                if state.config.validation_datasets and state.global_step % state.config.validation_every == 0:
+                    metrics = _run_validation(state)
+                    is_best = _maybe_update_best_checkpoint(state, float(metrics["validation_loss"]))
+                    metrics["is_best"] = is_best
+                    _log_metrics(state, metrics)
 
             state.epoch = epoch + 1
             state.step_in_epoch = 0
@@ -188,6 +197,8 @@ def _save_training_checkpoint(
         epoch=state.epoch if epoch is None else epoch,
         step_in_epoch=state.step_in_epoch if step_in_epoch is None else step_in_epoch,
         global_step=state.global_step,
+        best_validation_loss=state.best_validation_loss,
+        best_validation_step=state.best_validation_step,
     )
 
 
@@ -198,6 +209,80 @@ def _blended_loss(prediction_cp, target_cp, result_wdl, wdl_scale: float, result
     result_loss = torch.mean((pred_wdl - result_wdl) ** 2)
     loss = result_lambda * eval_loss + (1.0 - result_lambda) * result_loss
     return loss, eval_loss, result_loss
+
+
+def _run_validation(state: TrainState) -> dict[str, object]:
+    torch = _require_torch()
+    autocast_enabled = _cuda_amp_enabled(state.config, state.device)
+
+    total_loss = 0.0
+    total_eval_loss = 0.0
+    total_result_loss = 0.0
+    batches = 0
+
+    was_training = state.model.training
+    state.model.eval()
+    with BinpackStream(
+        state.config.validation_datasets,
+        num_threads=state.config.num_loader_threads,
+        cyclic=False,
+    ) as validation_stream:
+        with torch.no_grad():
+            for _ in range(state.config.validation_steps):
+                batch = validation_stream.next_batch(state.config.batch_size)
+                if batch is None:
+                    break
+
+                tensors = batch.to_torch(state.device)
+                with torch.cuda.amp.autocast(enabled=autocast_enabled):
+                    prediction_cp = state.model(
+                        tensors["white_indices"],
+                        tensors["black_indices"],
+                        tensors["stm"],
+                    )
+                    loss, eval_loss, result_loss = _blended_loss(
+                        prediction_cp,
+                        tensors["score_cp"],
+                        tensors["result_wdl"],
+                        state.config.wdl_scale,
+                        state.config.result_lambda,
+                        torch,
+                    )
+
+                total_loss += float(loss.detach().cpu().item())
+                total_eval_loss += float(eval_loss.detach().cpu().item())
+                total_result_loss += float(result_loss.detach().cpu().item())
+                batches += 1
+
+    if was_training:
+        state.model.train()
+
+    average_loss = math.inf if batches == 0 else total_loss / batches
+    average_eval_loss = math.inf if batches == 0 else total_eval_loss / batches
+    average_result_loss = math.inf if batches == 0 else total_result_loss / batches
+
+    return {
+        "event": "validation",
+        "global_step": state.global_step,
+        "validation_loss": average_loss,
+        "validation_eval_loss": average_eval_loss,
+        "validation_result_loss": average_result_loss,
+        "validation_batches": batches,
+    }
+
+
+def _maybe_update_best_checkpoint(state: TrainState, validation_loss: float) -> bool:
+    if not math.isfinite(validation_loss):
+        return False
+
+    if state.best_validation_loss is not None and validation_loss >= state.best_validation_loss:
+        return False
+
+    state.best_validation_loss = validation_loss
+    state.best_validation_step = state.global_step
+    best_checkpoint_path = state.run_dir / "checkpoints" / "best.pt"
+    _save_training_checkpoint(state, best_checkpoint_path)
+    return True
 
 
 def _log_metrics(state: TrainState, metrics: dict[str, object]) -> None:

@@ -25,6 +25,8 @@ Edit [default.toml](/Users/feiyulin/Code/thrawn-nnue/configs/default.toml) and s
 
 - `train_datasets`
 - `validation_datasets` if you have validation data
+- `validation_every`
+- `validation_steps`
 - `output_dir`
 - `batch_size`
 - `steps_per_epoch`
@@ -38,6 +40,8 @@ train_datasets = ["/absolute/path/to/train_01.binpack", "/absolute/path/to/train
 validation_datasets = ["/absolute/path/to/valid.binpack"]
 output_dir = "runs/my_first_run"
 device = "auto"
+validation_every = 500
+validation_steps = 16
 ```
 
 ## Device configuration
@@ -88,6 +92,8 @@ This prints:
 - average absolute score
 - average piece count
 
+`inspect-binpack` is a manual preflight step. It is not automatically run by `train`.
+
 ## 4. Train
 
 Start training with:
@@ -105,12 +111,25 @@ During training the trainer:
 5. Runs the `512 -> 32 -> 1` network.
 6. Converts centipawn predictions into WDL space.
 7. Blends eval loss and result loss using `result_lambda`.
-8. Writes checkpoints and JSONL metrics.
+8. Saves periodic training checkpoints.
+9. Runs validation every `validation_every` steps if `validation_datasets` is configured.
+10. Updates `checkpoints/best.pt` when validation loss improves.
+11. Writes JSONL training and validation metrics.
 
 Outputs go under the configured `output_dir`, including:
 
 - `checkpoints/`
 - `metrics.jsonl`
+
+Validation uses only `validation_datasets`. Those shards should be held out from `train_datasets`.
+
+Each validation pass:
+
+- opens the held-out `.binpack` files in non-cyclic mode
+- evaluates `validation_steps` batches or stops earlier at dataset exhaustion
+- averages blended loss, eval loss, and result loss
+- logs a validation record to `metrics.jsonl`
+- updates `checkpoints/best.pt` if blended validation loss is the best seen so far
 
 ## 5. Resume
 
@@ -129,6 +148,7 @@ Checkpoints contain:
 - config snapshot
 - RNG state
 - epoch and step counters
+- current best validation loss and best validation step
 
 That makes resume suitable for continuing a run exactly, not just reloading weights.
 
@@ -137,7 +157,7 @@ That makes resume suitable for continuing a run exactly, not just reloading weig
 Export a trained checkpoint to `.nnue`:
 
 ```bash
-thrawn-nnue export --checkpoint runs/my_first_run/checkpoints/step_00010000.pt --out runs/my_first_run/model.nnue
+thrawn-nnue export --checkpoint runs/my_first_run/checkpoints/best.pt --out runs/my_first_run/model.nnue
 ```
 
 The binary format is documented in [nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md).

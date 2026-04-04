@@ -16,6 +16,7 @@ class TrainConfig:
     num_loader_threads: int = 2
     batch_size: int = 256
     steps_per_epoch: int = 1000
+    validation_every: int = 500
     validation_steps: int = 0
     max_epochs: int = 10
     checkpoint_every: int = 250
@@ -78,6 +79,8 @@ class TrainConfig:
             raise ValueError("batch_size must be positive")
         if self.steps_per_epoch <= 0:
             raise ValueError("steps_per_epoch must be positive")
+        if self.validation_every <= 0:
+            raise ValueError("validation_every must be positive")
         if self.max_epochs <= 0:
             raise ValueError("max_epochs must be positive")
         if not 0.0 <= self.result_lambda <= 1.0:
@@ -88,6 +91,8 @@ class TrainConfig:
             raise ValueError("network sizes must be positive")
         if self.device not in {"auto", "cuda", "mps", "cpu"}:
             raise ValueError("device must be one of: auto, cuda, mps, cpu")
+        if self.validation_datasets and self.validation_steps <= 0:
+            raise ValueError("validation_steps must be positive when validation_datasets are configured")
 
 
 def load_config(path: str | Path) -> TrainConfig:

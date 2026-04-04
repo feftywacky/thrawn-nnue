@@ -9,6 +9,10 @@ device = "auto"
 num_loader_threads = 2
 batch_size = 256
 steps_per_epoch = 1000
+# run validation every N training steps when validation_datasets is non-empty
+validation_every = 500
+# number of validation batches to average per validation pass
+validation_steps = 16
 max_epochs = 10
 checkpoint_every = 250
 log_every = 25

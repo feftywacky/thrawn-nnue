@@ -46,6 +46,8 @@ def save_checkpoint(
     epoch: int,
     step_in_epoch: int,
     global_step: int,
+    best_validation_loss: float | None = None,
+    best_validation_step: int | None = None,
 ) -> Path:
     torch = _require_torch()
     output_path = Path(path)
@@ -60,6 +62,8 @@ def save_checkpoint(
         "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
         "scaler_state": scaler.state_dict() if scaler is not None else None,
         "rng_state": capture_rng_state(),
+        "best_validation_loss": best_validation_loss,
+        "best_validation_step": best_validation_step,
     }
     torch.save(payload, output_path)
     return output_path
