@@ -1,0 +1,93 @@
+# Using the Trained `.nnue` In Your Engine Repo
+
+This repository is trainer-only. The output artifact your engine needs is the exported `.nnue` file.
+
+## What the native code in this repo is for
+
+The code in [native_binpack/](/Users/feiyulin/Code/thrawn-nnue/native_binpack) is trainer-side infrastructure, not engine inference code.
+
+Its job is to:
+
+- read Stockfish-style `.binpack` files efficiently
+- decode packed positions using upstream-compatible logic
+- extract white-perspective and black-perspective A-768 feature indices
+- return batched arrays to Python for training
+- generate a tiny `.binpack` fixture for smoke tests
+
+The split of responsibilities is:
+
+- native C++: dataset parsing and feature extraction
+- Python/PyTorch: model definition, training loop, checkpoints, export, verification
+
+## What your engine repo needs to do
+
+Your engine needs four pieces.
+
+## 1. Load the exported file
+
+Read the header documented in [nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md), then read tensors in this order:
+
+- `ft_bias`
+- `ft_weight`
+- `l1_bias`
+- `l1_weight`
+- `out_bias`
+- `out_weight`
+
+Validate:
+
+- magic is `THNNUE\0\1`
+- version is `1`
+- feature set is `a768_dual_v1`
+- dimensions match your engine build
+
+## 2. Recreate the same feature extraction
+
+Your engine must generate the same A-768 features as the trainer:
+
+- 6 piece types
+- own/opponent color relative to the perspective
+- 64 oriented squares
+- one pass from White's perspective
+- one pass from Black's perspective
+
+That means your position state should maintain:
+
+- one White-perspective accumulator
+- one Black-perspective accumulator
+
+and update both incrementally on make/unmake.
+
+## 3. Recreate the same forward pass
+
+At evaluation time:
+
+1. Start each accumulator from `ft_bias`.
+2. Add FT rows for each active feature in that perspective.
+3. Order them as `[stm_acc, nstm_acc]`.
+4. Apply clipped ReLU to `[0, 1]`.
+5. Apply the first dense layer.
+6. Apply clipped ReLU again.
+7. Apply the final output layer.
+
+If you want integer inference, keep the quantized weights and use the scales defined in [nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md).
+
+## 4. Interpret the output
+
+The exported network predicts a side-to-move-relative scalar.
+
+In practice your engine will usually:
+
+- treat positive values as good for side to move
+- map the scalar to your internal eval scale
+- let the side-to-move ordering handle the sign naturally
+
+## Practical integration plan
+
+In your engine repo, the simplest path is:
+
+1. Add a `ThrawnNnue` file loader.
+2. Add A-768 feature extraction shared by full refresh and incremental update code.
+3. Add a two-accumulator state object to your position/search stack.
+4. Add the forward pass over the exported tensors.
+5. Replace or blend your current evaluator with the NNUE output.

@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+import tempfile
+import unittest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
+
+from thrawn_nnue.checkpoint import load_checkpoint, save_checkpoint
+from thrawn_nnue.model import DualPerspectiveA768NNUE
+
+
+@unittest.skipUnless(torch is not None, "PyTorch is required for checkpoint metadata tests")
+class CheckpointMetadataTests(unittest.TestCase):
+    def test_checkpoint_round_trip_preserves_resume_metadata(self) -> None:
+        model = DualPerspectiveA768NNUE()
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+        scaler = torch.cuda.amp.GradScaler(enabled=False)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint_path = Path(tmpdir) / "checkpoint.pt"
+            save_checkpoint(
+                checkpoint_path,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=scaler,
+                config={"run_name": "test"},
+                epoch=3,
+                step_in_epoch=17,
+                global_step=3017,
+            )
+            payload = load_checkpoint(checkpoint_path)
+            self.assertEqual(payload["epoch"], 3)
+            self.assertEqual(payload["step_in_epoch"], 17)
+            self.assertEqual(payload["global_step"], 3017)
+            self.assertIn("rng_state", payload)
+
+
+if __name__ == "__main__":
+    unittest.main()
