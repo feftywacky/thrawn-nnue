@@ -1,6 +1,6 @@
 # thrawn-nnue
 
-`thrawn-nnue` is a training scaffold for a dual-perspective chess NNUE using a simple A-768 feature set, shared feature-transformer weights, two accumulators, resumable PyTorch training, and an `.nnue` export format for [thrawn](https://github.com/feftywacky/thrawn).
+`thrawn-nnue` is a training scaffold for a dual-perspective chess NNUE using a simple A-768 feature set and a `.nnue` export format for [thrawn](https://github.com/feftywacky/thrawn).
 
 ## What is included
 
