@@ -1,5 +1,5 @@
-run_name = "test80_a768_v0"
-output_dir = "runs/test80_a768_v0"
+run_name = "test80_a768_v1"
+output_dir = "runs/test80_a768_v1"
 
 train_datasets = [
   "/Users/flin/src/thrawn-nnue/data/test80-2024-01-jan-2tb7p.min-v2.v6.binpack",
@@ -15,14 +15,14 @@ validation_datasets = [
 # auto prefers cuda, then mps, then cpu
 device = "mps"
 num_loader_threads = 4
-batch_size = 1024
-steps_per_epoch = 2000
+batch_size = 2048
+steps_per_epoch = 10000
 # run validation every N training steps when validation_datasets is non-empty
-validation_every = 500
+validation_every = 2000
 # number of validation batches to average per validation pass
-validation_steps = 16
-max_epochs = 20
-checkpoint_every = 500
+validation_steps = 64
+max_epochs = 50
+checkpoint_every = 10000
 log_every = 25
 console_mode = "progress"
 
@@ -42,7 +42,7 @@ output_perspective = "stm"
 # optional teacher-score preprocessing before WDL target transform
 # tuned for the large-magnitude test80 v6 teacher scores
 score_clip = 16000.0
-score_scale = 10.0
+score_scale = 1.0
 wdl_scale = 8000.0
 result_lambda = 0.8
 
