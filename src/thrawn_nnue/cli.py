@@ -37,6 +37,7 @@ def main() -> None:
 
     metrics_parser = subparsers.add_parser("metrics", help="Summarize a training run and generate plots")
     metrics_parser.add_argument("--run-dir", required=True)
+    metrics_parser.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
 
@@ -75,7 +76,10 @@ def main() -> None:
             "plots": [str(path) for path in plots],
             "text": render_summary_text(summary),
         }
-        print(output["text"])
+        if args.json:
+            print(json.dumps(output, indent=2, sort_keys=True))
+        else:
+            print(output["text"])
         return
 
     raise ValueError(f"Unhandled command: {args.command}")
