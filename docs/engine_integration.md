@@ -37,7 +37,7 @@ Read the header documented in [nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/
 Validate:
 
 - magic is `THNNUE\0\1`
-- version is `1`
+- version is `2` for current exports
 - feature set is `a768_dual_v1`
 - dimensions match your engine build
 

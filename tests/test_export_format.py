@@ -35,7 +35,7 @@ class ExportFormatTests(unittest.TestCase):
             l1_bias=np.array([7, -3], dtype=np.int32),
             l1_weight=np.arange(8 * 2, dtype=np.int8).reshape(8, 2),
             out_bias=np.array([11], dtype=np.int32),
-            out_weight=np.array([[5], [-2]], dtype=np.int8),
+            out_weight=np.array([[5], [-2]], dtype=np.int16),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -104,6 +104,7 @@ class ExportFormatTests(unittest.TestCase):
         self.assertEqual(diagnostics["l1_weight"]["negative_limit_hits"], 0.0)
         self.assertEqual(diagnostics["out_weight"]["positive_limit_hits"], 0.0)
         self.assertEqual(diagnostics["out_weight"]["negative_limit_hits"], 0.0)
+        self.assertGreater(diagnostics["out_weight"]["max_abs_quantized"], 127.0)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ from .features import active_feature_indices
 
 
 MAGIC = b"THNNUE\x00\x01"
-VERSION = 1
+VERSION = 2
 FEATURE_SET_ID = "a768_dual_v1"
 OUTPUT_PERSPECTIVE_STM = 1
 HEADER_STRUCT = struct.Struct("<8sI16sIIIIfffI")
@@ -93,7 +93,7 @@ def load_export(path: str | Path) -> ExportedNetwork:
 
         if magic != MAGIC:
             raise ValueError("Unexpected .nnue magic")
-        if version != VERSION:
+        if version not in {1, VERSION}:
             raise ValueError(f"Unsupported .nnue version: {version}")
         if feature_set.rstrip(b"\x00").decode("ascii") != FEATURE_SET_ID:
             raise ValueError("Unexpected feature-set identifier")
@@ -108,7 +108,10 @@ def load_export(path: str | Path) -> ExportedNetwork:
         l1_weight = np.frombuffer(handle.read(ft_size * 2 * hidden_size), dtype=np.int8).copy()
         l1_weight = l1_weight.reshape(ft_size * 2, hidden_size)
         out_bias = np.frombuffer(handle.read(4), dtype="<i4").copy()
-        out_weight = np.frombuffer(handle.read(hidden_size), dtype=np.int8).copy().reshape(hidden_size, 1)
+        if version == 1:
+            out_weight = np.frombuffer(handle.read(hidden_size), dtype=np.int8).copy().reshape(hidden_size, 1)
+        else:
+            out_weight = np.frombuffer(handle.read(hidden_size * 2), dtype="<i2").copy().reshape(hidden_size, 1)
         return ExportedNetwork(
             description=description,
             num_features=num_features,
@@ -205,7 +208,7 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
     out_weight = model.output.weight.detach().cpu().numpy().T
     out_bias = model.output.bias.detach().cpu().numpy()
     ft_scale = _fit_quantization_scale([ft_bias, ft_weight], config.export_ft_scale, np.int16)
-    dense_scale = _fit_quantization_scale([l1_weight, out_weight], config.export_dense_scale, np.int8)
+    dense_scale = _fit_quantization_scale([l1_weight], config.export_dense_scale, np.int8)
 
     return ExportedNetwork(
         description=config.export_description,
@@ -220,7 +223,7 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
         l1_bias=_quantize(l1_bias, dense_scale, np.int32),
         l1_weight=_quantize(l1_weight, dense_scale, np.int8),
         out_bias=_quantize(out_bias, dense_scale, np.int32),
-        out_weight=_quantize(out_weight, dense_scale, np.int8),
+        out_weight=_quantize(out_weight, dense_scale, np.int16),
     )
 
 
@@ -291,7 +294,7 @@ def _write_export(handle, exported: ExportedNetwork) -> None:
     handle.write(exported.l1_bias.astype("<i4").tobytes())
     handle.write(exported.l1_weight.astype(np.int8).tobytes())
     handle.write(exported.out_bias.astype("<i4").tobytes())
-    handle.write(exported.out_weight.astype(np.int8).tobytes())
+    handle.write(exported.out_weight.astype("<i2").tobytes())
 
 
 def _batch_arrays_from_fens(fens: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

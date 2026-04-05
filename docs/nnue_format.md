@@ -9,7 +9,7 @@ All multi-byte values are little-endian.
 | Field | Type | Value |
 | --- | --- | --- |
 | magic | 8 bytes | `THNNUE\0\1` |
-| version | `u32` | `1` |
+| version | `u32` | `2` |
 | feature_set | 16 bytes | ASCII, NUL-padded, `a768_dual_v1` |
 | num_features | `u32` | `768` |
 | ft_size | `u32` | usually `256` |
@@ -27,7 +27,7 @@ The description bytes come next, followed by packed tensors in this order:
 3. `l1_bias`: `int32[hidden_size]`
 4. `l1_weight`: `int8[ft_size * 2][hidden_size]`
 5. `out_bias`: `int32[1]`
-6. `out_weight`: `int8[hidden_size][1]`
+6. `out_weight`: `int16[hidden_size][1]` in version 2, `int8[hidden_size][1]` in version 1
 
 ## Semantics
 
@@ -38,5 +38,6 @@ The description bytes come next, followed by packed tensors in this order:
 ## Quantization
 
 - Feature-transformer weights and bias are rounded to `int16` using `ft_scale`.
-- Dense-layer weights are rounded to `int8` using `dense_scale`.
+- First dense-layer weights are rounded to `int8` using `dense_scale`.
+- Output-layer weights are rounded to `int16` using `dense_scale` in version 2.
 - Dense-layer biases are rounded to `int32` using the product of the upstream activation scale and `dense_scale`.
