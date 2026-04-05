@@ -287,6 +287,7 @@ def generate_run_plots(run: MetricsRun) -> list[Path]:
                 "global_step",
                 [("lr", "lr")],
                 "Learning Rate",
+                smooth_primary=False,
             )
         )
 
