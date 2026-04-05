@@ -71,4 +71,6 @@ def save_checkpoint(
 
 def load_checkpoint(path: str | Path, *, map_location: str = "cpu") -> dict[str, object]:
     torch = _require_torch()
-    return torch.load(Path(path), map_location=map_location)
+    # Checkpoints store optimizer state and RNG snapshots, so they must be loaded
+    # as full objects rather than with the newer weights-only default.
+    return torch.load(Path(path), map_location=map_location, weights_only=False)

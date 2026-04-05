@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -13,7 +14,25 @@ except ModuleNotFoundError:
     torch = None
 
 from thrawn_nnue.checkpoint import load_checkpoint, save_checkpoint
-from thrawn_nnue.model import DualPerspectiveA768NNUE
+
+if torch is not None:
+    from thrawn_nnue.model import DualPerspectiveA768NNUE
+
+
+class CheckpointLoadBehaviorTests(unittest.TestCase):
+    def test_load_checkpoint_disables_weights_only_mode(self) -> None:
+        fake_torch = Mock()
+        fake_torch.load.return_value = {"ok": True}
+
+        with patch("thrawn_nnue.checkpoint._require_torch", return_value=fake_torch):
+            payload = load_checkpoint("/tmp/checkpoint.pt", map_location="cpu")
+
+        self.assertEqual(payload, {"ok": True})
+        fake_torch.load.assert_called_once_with(
+            Path("/tmp/checkpoint.pt"),
+            map_location="cpu",
+            weights_only=False,
+        )
 
 
 @unittest.skipUnless(torch is not None, "PyTorch is required for checkpoint metadata tests")

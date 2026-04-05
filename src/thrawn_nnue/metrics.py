@@ -270,8 +270,13 @@ def generate_run_plots(run: MetricsRun) -> list[Path]:
                 plots_dir / "train_loss.png",
                 run.train_records,
                 "global_step",
-                [("loss", "blended"), ("eval_loss", "eval"), ("result_loss", "result")],
+                [
+                    ("loss", "blended loss"),
+                    ("eval_loss", "eval target"),
+                    ("result_loss", "game result"),
+                ],
                 "Train Loss",
+                smooth_primary=True,
             )
         )
         outputs.append(
@@ -293,11 +298,12 @@ def generate_run_plots(run: MetricsRun) -> list[Path]:
                 run.validation_records,
                 "global_step",
                 [
-                    ("validation_loss", "blended"),
-                    ("validation_eval_loss", "eval"),
-                    ("validation_result_loss", "result"),
+                    ("validation_loss", "blended loss"),
+                    ("validation_eval_loss", "eval target"),
+                    ("validation_result_loss", "game result"),
                 ],
                 "Validation Loss",
+                smooth_primary=False,
             )
         )
 
@@ -307,17 +313,45 @@ def generate_run_plots(run: MetricsRun) -> list[Path]:
     return outputs
 
 
-def _plot_losses(plt, output_path: Path, records: list[dict[str, object]], x_key: str, series: list[tuple[str, str]], title: str) -> Path:
-    figure, axis = plt.subplots(figsize=(8, 5))
+def _plot_losses(
+    plt,
+    output_path: Path,
+    records: list[dict[str, object]],
+    x_key: str,
+    series: list[tuple[str, str]],
+    title: str,
+    *,
+    smooth_primary: bool,
+) -> Path:
+    figure, axis = plt.subplots(figsize=(9, 5.5))
     x_values = [int(record[x_key]) for record in records]
-    for field, label in series:
+    primary_values: list[float] | None = None
+    primary_smoothed: list[float] | None = None
+    for index, (field, label) in enumerate(series):
         y_values = [float(record[field]) for record in records]
-        axis.plot(x_values, y_values, label=label)
+        if index == 0 and smooth_primary and len(y_values) >= 8:
+            primary_values = y_values
+            primary_smoothed = _moving_average(y_values, window=_smoothing_window(len(y_values)))
+            axis.plot(x_values, y_values, label=f"{label} (raw)", alpha=0.2, linewidth=1.0)
+            axis.plot(x_values, primary_smoothed, label=f"{label} (smoothed)", linewidth=2.2)
+            continue
+        axis.plot(x_values, y_values, label=label, linewidth=2.0 if index == 0 else 1.8)
     axis.set_title(title)
     axis.set_xlabel("Global Step")
-    axis.set_ylabel("Value")
+    axis.set_ylabel("Loss")
     axis.grid(True, alpha=0.3)
     axis.legend()
+    if primary_values is not None and primary_smoothed is not None:
+        _set_focus_ylim(axis, primary_values, primary_smoothed)
+    axis.text(
+        0.01,
+        0.01,
+        "blended = weighted eval-target + game-result loss",
+        transform=axis.transAxes,
+        fontsize=9,
+        alpha=0.75,
+        va="bottom",
+    )
     figure.tight_layout()
     figure.savefig(output_path)
     plt.close(figure)
@@ -325,26 +359,78 @@ def _plot_losses(plt, output_path: Path, records: list[dict[str, object]], x_key
 
 
 def _plot_overview(plt, output_path: Path, run: MetricsRun) -> Path:
-    figure, axis = plt.subplots(figsize=(8, 5))
+    figure, axis = plt.subplots(figsize=(9, 5.5))
+    train_steps = [int(record["global_step"]) for record in run.train_records]
+    train_loss = [float(record["loss"]) for record in run.train_records]
+    validation_steps = [int(record["global_step"]) for record in run.validation_records]
+    validation_loss = [float(record["validation_loss"]) for record in run.validation_records]
+    smoothed_train = _moving_average(train_loss, window=_smoothing_window(len(train_loss)))
+
     axis.plot(
-        [int(record["global_step"]) for record in run.train_records],
-        [float(record["loss"]) for record in run.train_records],
-        label="train blended",
+        train_steps,
+        train_loss,
+        label="train blended (raw)",
+        alpha=0.12,
+        linewidth=0.9,
     )
     axis.plot(
-        [int(record["global_step"]) for record in run.validation_records],
-        [float(record["validation_loss"]) for record in run.validation_records],
+        train_steps,
+        smoothed_train,
+        label="train blended (smoothed)",
+        linewidth=2.2,
+    )
+    axis.plot(
+        validation_steps,
+        validation_loss,
         label="validation blended",
+        marker="o",
+        markersize=3.5,
+        linewidth=2.0,
     )
     axis.set_title("Loss Overview")
     axis.set_xlabel("Global Step")
     axis.set_ylabel("Loss")
     axis.grid(True, alpha=0.3)
     axis.legend()
+    _set_focus_ylim(axis, train_loss + validation_loss, smoothed_train + validation_loss)
     figure.tight_layout()
     figure.savefig(output_path)
     plt.close(figure)
     return output_path
+
+
+def _moving_average(values: list[float], window: int) -> list[float]:
+    if window <= 1 or len(values) <= 2:
+        return values[:]
+    smoothed: list[float] = []
+    running_total = 0.0
+    for index, value in enumerate(values):
+        running_total += value
+        if index >= window:
+            running_total -= values[index - window]
+        current_window = min(index + 1, window)
+        smoothed.append(running_total / current_window)
+    return smoothed
+
+
+def _smoothing_window(length: int) -> int:
+    return max(5, min(401, length // 50))
+
+
+def _set_focus_ylim(axis, raw_values: list[float], trend_values: list[float]) -> None:
+    if not raw_values or not trend_values:
+        return
+    trend_min = min(trend_values)
+    trend_max = max(trend_values)
+    spread = max(trend_max - trend_min, 1e-9)
+    lower = min(raw_values)
+    upper = max(raw_values)
+    padded_lower = max(lower, trend_min - spread * 0.35)
+    padded_upper = min(upper, trend_max + spread * 0.35)
+    if padded_upper <= padded_lower:
+        padded_lower = lower
+        padded_upper = upper
+    axis.set_ylim(padded_lower, padded_upper)
 
 
 def _load_jsonl(path: Path) -> list[dict[str, object]]:

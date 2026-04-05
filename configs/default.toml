@@ -1,5 +1,5 @@
-run_name = "test80_a768_v1"
-output_dir = "runs/test80_a768_v1"
+run_name = "test80_a768_v2"
+output_dir = "runs/test80_a768_v2"
 
 train_datasets = [
   "/Users/flin/src/thrawn-nnue/data/test80-2024-01-jan-2tb7p.min-v2.v6.binpack",
@@ -14,19 +14,19 @@ validation_datasets = [
 # device: auto, cuda, mps, or cpu
 # auto prefers cuda, then mps, then cpu
 device = "mps"
-num_loader_threads = 4
-batch_size = 2048
+num_loader_threads = 8
+batch_size = 4096
 steps_per_epoch = 10000
 # run validation every N training steps when validation_datasets is non-empty
 validation_every = 2000
 # number of validation batches to average per validation pass
 validation_steps = 64
-max_epochs = 50
+max_epochs = 200            
 checkpoint_every = 10000
 log_every = 25
 console_mode = "progress"
 
-learning_rate = 0.0004
+learning_rate = 0.0002
 weight_decay = 0.00001
 clip_grad_norm = 1.0
 # mixed precision is currently enabled only for CUDA
