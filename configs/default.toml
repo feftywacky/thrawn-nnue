@@ -1,5 +1,5 @@
-run_name = "test80_a768_m4"
-output_dir = "runs/test80_a768_m4"
+run_name = "test80_a768_v0"
+output_dir = "runs/test80_a768_v0"
 
 train_datasets = [
   "/Users/flin/src/thrawn-nnue/data/test80-2024-01-jan-2tb7p.min-v2.v6.binpack",
