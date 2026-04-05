@@ -2,14 +2,6 @@
 
 `thrawn-nnue` is a CLI framework for training a dual-perspective chess NNUE using a simple A-768 feature set for [thrawn](https://github.com/feftywacky/thrawn).
 
-## What is included
-
-- Native `.binpack` ingestion via [native_binpack/](/Users/feiyulin/Code/thrawn-nnue/native_binpack)
-- A dual-perspective `768 -> 256 -> 32 -> 1` NNUE in PyTorch
-- Exact-resume checkpoints with config and RNG state snapshots
-- A `.nnue` binary export plus a verification command
-- Dataset inspection and a native test fixture generator for smoke tests
-
 ## Installation
 
 Install Python 3.11 and then install the package in editable mode:
@@ -19,25 +11,6 @@ python3.11 -m pip install -e .
 ```
 
 This repo expects `numpy` and `torch`. The native `.binpack` bridge is built automatically on first use.
-
-## Device Selection
-
-Training is configurable for:
-
-- `cuda`
-- `mps` for Apple Silicon GPUs
-- `cpu`
-- `auto`
-
-`auto` prefers:
-
-1. CUDA
-2. Apple `mps`
-3. CPU
-
-For an Apple M4 Pro MacBook, the usual choice is `device = "mps"` or just `device = "auto"` if your PyTorch build has MPS support.
-
-Mixed precision (`amp = true`) is currently only used on CUDA. On Apple Silicon, training runs in standard precision on `mps`.
 
 ## Quick Start
 
