@@ -30,6 +30,10 @@ ft_size = 256
 hidden_size = 32
 output_perspective = "stm"
 
+# optional teacher-score preprocessing before WDL target transform
+# clip is disabled at 0.0
+score_clip = 0.0
+score_scale = 1.0
 wdl_scale = 410.0
 result_lambda = 0.5
 

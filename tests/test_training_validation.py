@@ -15,11 +15,30 @@ except ModuleNotFoundError:
 
 from thrawn_nnue.config import TrainConfig
 from thrawn_nnue.native import write_fixture_binpack
-from thrawn_nnue.training import _create_state, _maybe_update_best_checkpoint, _run_validation, train_from_config
+from thrawn_nnue.training import (
+    _create_state,
+    _maybe_update_best_checkpoint,
+    _normalize_teacher_scores,
+    _run_validation,
+    train_from_config,
+)
 
 
 @unittest.skipUnless(torch is not None, "PyTorch is required for validation training tests")
 class ValidationTrainingTests(unittest.TestCase):
+    def test_score_normalization_clips_then_scales(self) -> None:
+        values = torch.tensor([[-5000.0], [2000.0], [9000.0]], dtype=torch.float32)
+        config = TrainConfig.from_dict(
+            {
+                "train_datasets": ["/tmp/train.binpack"],
+                "score_clip": 4000.0,
+                "score_scale": 10.0,
+            }
+        )
+        normalized = _normalize_teacher_scores(values, config, torch)
+        expected = torch.tensor([[-400.0], [200.0], [400.0]], dtype=torch.float32)
+        self.assertTrue(torch.equal(normalized, expected))
+
     def test_run_validation_does_not_mutate_weights_or_optimizer(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)

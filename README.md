@@ -48,6 +48,8 @@ Mixed precision (`amp = true`) is currently only used on CUDA. On Apple Silicon,
 thrawn-nnue inspect-binpack --path /absolute/path/to/train.binpack
 ```
 
+`inspect-binpack` now reports score percentiles, absolute-score tail counts, WDL saturation diagnostics for common `wdl_scale` values, and a recommended starting normalization setup.
+
 3. Train:
 
 ```bash
@@ -101,3 +103,4 @@ thrawn-nnue metrics --run-dir runs/default
 - The engine-side loader/inference code belongs in your engine repo.
 - The exported `.nnue` format is trainer-owned and documented in [docs/nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md).
 - Training metrics are logged to `metrics.jsonl`, and `thrawn-nnue metrics --run-dir ...` generates summary output plus PNG plots in `plots/`.
+- Dataset inspection is intended to drive `wdl_scale`, `score_clip`, and `score_scale` choices before a long training run.

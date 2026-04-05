@@ -29,6 +29,22 @@ class ValidationConfigTests(unittest.TestCase):
                 }
             )
 
+    def test_score_clip_and_score_scale_are_validated(self) -> None:
+        with self.assertRaises(ValueError):
+            TrainConfig.from_dict(
+                {
+                    "train_datasets": ["/tmp/train.binpack"],
+                    "score_clip": -1.0,
+                }
+            )
+        with self.assertRaises(ValueError):
+            TrainConfig.from_dict(
+                {
+                    "train_datasets": ["/tmp/train.binpack"],
+                    "score_scale": 0.0,
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

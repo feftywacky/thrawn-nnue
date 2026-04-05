@@ -31,6 +31,8 @@ class TrainConfig:
     ft_size: int = 256
     hidden_size: int = 32
     output_perspective: str = "stm"
+    score_clip: float = 0.0
+    score_scale: float = 1.0
     wdl_scale: float = 410.0
     result_lambda: float = 0.5
     export_ft_scale: float = 127.0
@@ -85,6 +87,10 @@ class TrainConfig:
             raise ValueError("max_epochs must be positive")
         if not 0.0 <= self.result_lambda <= 1.0:
             raise ValueError("result_lambda must be in [0, 1]")
+        if self.score_clip < 0.0:
+            raise ValueError("score_clip must be >= 0")
+        if self.score_scale <= 0.0:
+            raise ValueError("score_scale must be > 0")
         if self.num_loader_threads <= 0:
             raise ValueError("num_loader_threads must be positive")
         if self.ft_size <= 0 or self.hidden_size <= 0:

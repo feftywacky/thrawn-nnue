@@ -33,6 +33,12 @@ Edit [default.toml](/Users/feiyulin/Code/thrawn-nnue/configs/default.toml) and s
 - `max_epochs`
 - `checkpoint_every`
 
+The score-target controls are now:
+
+- `score_clip`
+- `score_scale`
+- `wdl_scale`
+
 Example:
 
 ```toml
@@ -42,6 +48,9 @@ output_dir = "runs/my_first_run"
 device = "auto"
 validation_every = 500
 validation_steps = 16
+score_clip = 0.0
+score_scale = 1.0
+wdl_scale = 410.0
 ```
 
 ## Device configuration
@@ -89,10 +98,22 @@ This prints:
 - white-to-move versus black-to-move counts
 - win/draw/loss distribution
 - min/max score
+- mean signed score
 - average absolute score
 - average piece count
+- score percentiles
+- absolute-score percentiles
+- score-tail counts and fractions
+- WDL saturation diagnostics for common `wdl_scale` values
+- a recommended starting `wdl_scale`, `score_clip`, and `score_scale`
 
 `inspect-binpack` is a manual preflight step. It is not automatically run by `train`.
+
+Use the recommendation block to choose score normalization for your run:
+
+- `score_clip` limits extreme tails before target construction
+- `score_scale` rescales unusually large score magnitudes
+- `wdl_scale` controls how sharply normalized scores map into WDL space
 
 ## 4. Train
 
@@ -109,12 +130,14 @@ During training the trainer:
 3. Builds two accumulators with a shared feature-transformer table.
 4. Orders them as `[stm_acc, nstm_acc]`.
 5. Runs the `512 -> 32 -> 1` network.
-6. Converts centipawn predictions into WDL space.
-7. Blends eval loss and result loss using `result_lambda`.
-8. Saves periodic training checkpoints.
-9. Runs validation every `validation_every` steps if `validation_datasets` is configured.
-10. Updates `checkpoints/best.pt` when validation loss improves.
-11. Writes JSONL training and validation metrics.
+6. Applies teacher-score preprocessing:
+   clip, then scale
+7. Converts normalized score targets into WDL space.
+8. Blends eval loss and result loss using `result_lambda`.
+9. Saves periodic training checkpoints.
+10. Runs validation every `validation_every` steps if `validation_datasets` is configured.
+11. Updates `checkpoints/best.pt` when validation loss improves.
+12. Writes JSONL training and validation metrics.
 
 Outputs go under the configured `output_dir`, including:
 

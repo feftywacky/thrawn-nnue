@@ -40,8 +40,25 @@ class _InspectStats(ctypes.Structure):
         ("max_score", ctypes.c_int16),
         ("min_ply", ctypes.c_uint16),
         ("max_ply", ctypes.c_uint16),
+        ("mean_score", ctypes.c_double),
         ("mean_abs_score", ctypes.c_double),
         ("mean_piece_count", ctypes.c_double),
+        ("score_p01", ctypes.c_double),
+        ("score_p05", ctypes.c_double),
+        ("score_p50", ctypes.c_double),
+        ("score_p95", ctypes.c_double),
+        ("score_p99", ctypes.c_double),
+        ("abs_score_p50", ctypes.c_double),
+        ("abs_score_p90", ctypes.c_double),
+        ("abs_score_p95", ctypes.c_double),
+        ("abs_score_p99", ctypes.c_double),
+        ("ply_p50", ctypes.c_double),
+        ("ply_p95", ctypes.c_double),
+        ("abs_score_ge_1000", ctypes.c_uint64),
+        ("abs_score_ge_2000", ctypes.c_uint64),
+        ("abs_score_ge_4000", ctypes.c_uint64),
+        ("abs_score_ge_8000", ctypes.c_uint64),
+        ("abs_score_ge_16000", ctypes.c_uint64),
     ]
 
 
@@ -74,7 +91,7 @@ class NativeBatch:
 
 def build_native_extension(force: bool = False) -> Path:
     repo_root = Path(__file__).resolve().parents[2]
-    build_dir = repo_root / "build" / "native"
+    build_dir = repo_root / "build" / "native_binpack"
     build_dir.mkdir(parents=True, exist_ok=True)
 
     existing = _find_library(build_dir)
@@ -104,7 +121,8 @@ def inspect_binpack(path: str | Path) -> dict[str, int | float]:
     ok = lib.thrawn_inspect_binpack(os.fsencode(Path(path).resolve()), ctypes.byref(stats))
     if ok != 1:
         raise NativeError(_last_error(lib))
-    return {
+    entries_read = int(stats.entries_read)
+    result = {
         "entries_read": int(stats.entries_read),
         "white_to_move": int(stats.white_to_move),
         "black_to_move": int(stats.black_to_move),
@@ -115,9 +133,46 @@ def inspect_binpack(path: str | Path) -> dict[str, int | float]:
         "max_score": int(stats.max_score),
         "min_ply": int(stats.min_ply),
         "max_ply": int(stats.max_ply),
+        "mean_score": float(stats.mean_score),
         "mean_abs_score": float(stats.mean_abs_score),
         "mean_piece_count": float(stats.mean_piece_count),
+        "score_percentiles": {
+            "p01": float(stats.score_p01),
+            "p05": float(stats.score_p05),
+            "p50": float(stats.score_p50),
+            "p95": float(stats.score_p95),
+            "p99": float(stats.score_p99),
+        },
+        "abs_score_percentiles": {
+            "p50": float(stats.abs_score_p50),
+            "p90": float(stats.abs_score_p90),
+            "p95": float(stats.abs_score_p95),
+            "p99": float(stats.abs_score_p99),
+        },
+        "ply_percentiles": {
+            "p50": float(stats.ply_p50),
+            "p95": float(stats.ply_p95),
+        },
+        "abs_score_threshold_counts": {
+            "ge_1000": int(stats.abs_score_ge_1000),
+            "ge_2000": int(stats.abs_score_ge_2000),
+            "ge_4000": int(stats.abs_score_ge_4000),
+            "ge_8000": int(stats.abs_score_ge_8000),
+            "ge_16000": int(stats.abs_score_ge_16000),
+        },
     }
+    result["result_percentages"] = {
+        "wins": _safe_fraction(int(stats.wins), entries_read),
+        "draws": _safe_fraction(int(stats.draws), entries_read),
+        "losses": _safe_fraction(int(stats.losses), entries_read),
+    }
+    result["abs_score_threshold_fractions"] = {
+        key: _safe_fraction(value, entries_read)
+        for key, value in result["abs_score_threshold_counts"].items()
+    }
+    result["wdl_scale_diagnostics"] = _wdl_scale_diagnostics(result)
+    result["recommendation"] = _inspect_recommendation(result)
+    return result
 
 
 def write_fixture_binpack(path: str | Path) -> None:
@@ -230,3 +285,71 @@ def _last_error(lib: ctypes.CDLL) -> str:
     if not raw:
         return ""
     return raw.decode("utf-8")
+
+
+def _safe_fraction(count: int, total: int) -> float:
+    if total <= 0:
+        return 0.0
+    return float(count) / float(total)
+
+
+def _wdl_scale_diagnostics(stats: dict[str, object]) -> dict[str, dict[str, float]]:
+    mean_abs_score = float(stats["mean_abs_score"])
+    candidate_scales = [410.0, 1000.0, 2000.0, 4000.0, 8000.0]
+    diagnostics: dict[str, dict[str, float]] = {}
+    for scale in candidate_scales:
+        transformed = 1.0 / (1.0 + np.exp(-(mean_abs_score / scale)))
+        p95_transformed = 1.0 / (1.0 + np.exp(-(float(stats["abs_score_percentiles"]["p95"]) / scale)))
+        diagnostics[str(int(scale))] = {
+            "mean_abs_score_target": float(transformed),
+            "p95_abs_score_target": float(p95_transformed),
+            "high_saturation_proxy": float(transformed >= 0.98 or p95_transformed >= 0.995),
+        }
+    return diagnostics
+
+
+def _inspect_recommendation(stats: dict[str, object]) -> dict[str, object]:
+    abs_p95 = float(stats["abs_score_percentiles"]["p95"])
+    abs_p99 = float(stats["abs_score_percentiles"]["p99"])
+    mean_abs_score = float(stats["mean_abs_score"])
+    diagnostics = stats["wdl_scale_diagnostics"]
+
+    recommended_wdl_scale = 410.0
+    for candidate in [1000.0, 2000.0, 4000.0, 8000.0]:
+        candidate_diag = diagnostics[str(int(candidate))]
+        if candidate_diag["mean_abs_score_target"] < 0.95 and candidate_diag["p95_abs_score_target"] < 0.995:
+            recommended_wdl_scale = candidate
+            break
+    else:
+        recommended_wdl_scale = 8000.0
+
+    recommended_score_clip = 0.0
+    if abs_p99 >= 16000:
+        recommended_score_clip = 16000.0
+    elif abs_p99 >= 8000:
+        recommended_score_clip = 8000.0
+
+    recommended_score_scale = 1.0
+    if mean_abs_score >= 6000:
+        recommended_score_scale = 10.0
+    elif mean_abs_score >= 2000:
+        recommended_score_scale = 4.0
+
+    saturated_at_410 = bool(diagnostics["410"]["high_saturation_proxy"] >= 0.5)
+    notes = []
+    if saturated_at_410:
+        notes.append("dataset appears highly saturated for wdl_scale=410")
+    if recommended_score_clip > 0.0:
+        notes.append("extreme score tails suggest enabling score clipping")
+    if recommended_score_scale != 1.0:
+        notes.append("score magnitudes look unusually large for direct centipawn-style use")
+    if not notes:
+        notes.append("current score distribution looks usable without aggressive normalization")
+
+    return {
+        "saturated_at_default_wdl_scale": saturated_at_410,
+        "recommended_wdl_scale": recommended_wdl_scale,
+        "recommended_score_clip": recommended_score_clip,
+        "recommended_score_scale": recommended_score_scale,
+        "notes": notes,
+    }

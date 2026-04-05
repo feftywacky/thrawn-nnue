@@ -132,9 +132,10 @@ def _run_training_loop(state: TrainState) -> None:
                         tensors["black_indices"],
                         tensors["stm"],
                     )
+                    normalized_scores = _normalize_teacher_scores(tensors["score_cp"], state.config, torch)
                     loss, eval_loss, result_loss = _blended_loss(
                         prediction_cp,
-                        tensors["score_cp"],
+                        normalized_scores,
                         tensors["result_wdl"],
                         state.config.wdl_scale,
                         state.config.result_lambda,
@@ -211,6 +212,15 @@ def _blended_loss(prediction_cp, target_cp, result_wdl, wdl_scale: float, result
     return loss, eval_loss, result_loss
 
 
+def _normalize_teacher_scores(scores, config: TrainConfig, torch):
+    normalized = scores
+    if config.score_clip > 0.0:
+        normalized = torch.clamp(normalized, -config.score_clip, config.score_clip)
+    if config.score_scale != 1.0:
+        normalized = normalized / config.score_scale
+    return normalized
+
+
 def _run_validation(state: TrainState) -> dict[str, object]:
     torch = _require_torch()
     autocast_enabled = _cuda_amp_enabled(state.config, state.device)
@@ -240,9 +250,10 @@ def _run_validation(state: TrainState) -> dict[str, object]:
                         tensors["black_indices"],
                         tensors["stm"],
                     )
+                    normalized_scores = _normalize_teacher_scores(tensors["score_cp"], state.config, torch)
                     loss, eval_loss, result_loss = _blended_loss(
                         prediction_cp,
-                        tensors["score_cp"],
+                        normalized_scores,
                         tensors["result_wdl"],
                         state.config.wdl_scale,
                         state.config.result_lambda,
