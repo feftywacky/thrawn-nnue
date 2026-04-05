@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import struct
+from typing import Any
 
 import numpy as np
 
@@ -125,7 +126,7 @@ def load_export(path: str | Path) -> ExportedNetwork:
         )
 
 
-def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list[str] | None = None) -> dict[str, float]:
+def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list[str] | None = None) -> dict[str, Any]:
     torch = _require_torch()
     from .checkpoint import load_checkpoint
     from .config import TrainConfig
@@ -161,6 +162,12 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
         "positions": float(len(fens)),
         "max_abs_error": max(abs_errors) if abs_errors else 0.0,
         "mean_abs_error": (sum(abs_errors) / len(abs_errors)) if abs_errors else 0.0,
+        "checkpoint_predictions": predictions,
+        "exported_predictions": exported_predictions,
+        "abs_errors": abs_errors,
+        "export_ft_scale": float(exported.ft_scale),
+        "export_dense_scale": float(exported.dense_scale),
+        "quantization": _export_quantization_diagnostics(exported),
     }
 
 
@@ -197,21 +204,23 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
     l1_bias = model.l1.bias.detach().cpu().numpy()
     out_weight = model.output.weight.detach().cpu().numpy().T
     out_bias = model.output.bias.detach().cpu().numpy()
+    ft_scale = _fit_quantization_scale([ft_bias, ft_weight], config.export_ft_scale, np.int16)
+    dense_scale = _fit_quantization_scale([l1_weight, out_weight], config.export_dense_scale, np.int8)
 
     return ExportedNetwork(
         description=config.export_description,
         num_features=config.num_features,
         ft_size=config.ft_size,
         hidden_size=config.hidden_size,
-        ft_scale=config.export_ft_scale,
-        dense_scale=config.export_dense_scale,
+        ft_scale=ft_scale,
+        dense_scale=dense_scale,
         wdl_scale=config.wdl_scale,
-        ft_bias=_quantize(ft_bias, config.export_ft_scale, np.int16),
-        ft_weight=_quantize(ft_weight, config.export_ft_scale, np.int16),
-        l1_bias=_quantize(l1_bias, config.export_dense_scale, np.int32),
-        l1_weight=_quantize(l1_weight, config.export_dense_scale, np.int8),
-        out_bias=_quantize(out_bias, config.export_dense_scale, np.int32),
-        out_weight=_quantize(out_weight, config.export_dense_scale, np.int8),
+        ft_bias=_quantize(ft_bias, ft_scale, np.int16),
+        ft_weight=_quantize(ft_weight, ft_scale, np.int16),
+        l1_bias=_quantize(l1_bias, dense_scale, np.int32),
+        l1_weight=_quantize(l1_weight, dense_scale, np.int8),
+        out_bias=_quantize(out_bias, dense_scale, np.int32),
+        out_weight=_quantize(out_weight, dense_scale, np.int8),
     )
 
 
@@ -220,6 +229,43 @@ def _quantize(values: np.ndarray, scale: float, dtype) -> np.ndarray:
     quantized = np.rint(values * scale)
     quantized = np.clip(quantized, info.min, info.max)
     return quantized.astype(dtype)
+
+
+def _fit_quantization_scale(values: list[np.ndarray], requested_scale: float, dtype) -> float:
+    info = np.iinfo(dtype)
+    max_abs = max((float(np.max(np.abs(value))) for value in values if value.size > 0), default=0.0)
+    if max_abs <= 0.0:
+        return float(requested_scale)
+    max_scale_without_clipping = float(info.max) / max_abs
+    return float(min(requested_scale, max_scale_without_clipping))
+
+
+def _export_quantization_diagnostics(exported: ExportedNetwork) -> dict[str, dict[str, float]]:
+    return {
+        "ft_bias": _quantized_tensor_stats(exported.ft_bias),
+        "ft_weight": _quantized_tensor_stats(exported.ft_weight),
+        "l1_bias": _quantized_tensor_stats(exported.l1_bias),
+        "l1_weight": _quantized_tensor_stats(exported.l1_weight),
+        "out_bias": _quantized_tensor_stats(exported.out_bias),
+        "out_weight": _quantized_tensor_stats(exported.out_weight),
+    }
+
+
+def _quantized_tensor_stats(values: np.ndarray) -> dict[str, float]:
+    if values.size == 0:
+        return {
+            "count": 0.0,
+            "max_abs_quantized": 0.0,
+            "positive_limit_hits": 0.0,
+            "negative_limit_hits": 0.0,
+        }
+    info = np.iinfo(values.dtype)
+    return {
+        "count": float(values.size),
+        "max_abs_quantized": float(np.max(np.abs(values))),
+        "positive_limit_hits": float(np.count_nonzero(values == info.max)),
+        "negative_limit_hits": float(np.count_nonzero(values == info.min)),
+    }
 
 
 def _write_export(handle, exported: ExportedNetwork) -> None:

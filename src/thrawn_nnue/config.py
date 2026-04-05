@@ -92,6 +92,8 @@ class TrainConfig:
             raise ValueError("score_clip must be >= 0")
         if self.score_scale <= 0.0:
             raise ValueError("score_scale must be > 0")
+        if self.export_ft_scale <= 0.0 or self.export_dense_scale <= 0.0:
+            raise ValueError("export scales must be > 0")
         if self.num_loader_threads <= 0:
             raise ValueError("num_loader_threads must be positive")
         if self.ft_size <= 0 or self.hidden_size <= 0:

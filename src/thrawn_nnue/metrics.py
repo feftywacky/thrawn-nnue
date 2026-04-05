@@ -277,6 +277,8 @@ def generate_run_plots(run: MetricsRun) -> list[Path]:
                 ],
                 "Train Loss",
                 smooth_primary=True,
+                y_label="Loss",
+                footer_note="blended = weighted eval-target + game-result loss",
             )
         )
         outputs.append(
@@ -288,6 +290,7 @@ def generate_run_plots(run: MetricsRun) -> list[Path]:
                 [("lr", "lr")],
                 "Learning Rate",
                 smooth_primary=False,
+                y_label="Learning Rate",
             )
         )
 
@@ -305,6 +308,8 @@ def generate_run_plots(run: MetricsRun) -> list[Path]:
                 ],
                 "Validation Loss",
                 smooth_primary=False,
+                y_label="Loss",
+                footer_note="blended = weighted eval-target + game-result loss",
             )
         )
 
@@ -323,6 +328,8 @@ def _plot_losses(
     title: str,
     *,
     smooth_primary: bool,
+    y_label: str,
+    footer_note: str | None = None,
 ) -> Path:
     figure, axis = plt.subplots(figsize=(9, 5.5))
     x_values = [int(record[x_key]) for record in records]
@@ -339,20 +346,21 @@ def _plot_losses(
         axis.plot(x_values, y_values, label=label, linewidth=2.0 if index == 0 else 1.8)
     axis.set_title(title)
     axis.set_xlabel("Global Step")
-    axis.set_ylabel("Loss")
+    axis.set_ylabel(y_label)
     axis.grid(True, alpha=0.3)
     axis.legend()
     if primary_values is not None and primary_smoothed is not None:
         _set_focus_ylim(axis, primary_values, primary_smoothed)
-    axis.text(
-        0.01,
-        0.01,
-        "blended = weighted eval-target + game-result loss",
-        transform=axis.transAxes,
-        fontsize=9,
-        alpha=0.75,
-        va="bottom",
-    )
+    if footer_note is not None:
+        axis.text(
+            0.01,
+            0.01,
+            footer_note,
+            transform=axis.transAxes,
+            fontsize=9,
+            alpha=0.75,
+            va="bottom",
+        )
     figure.tight_layout()
     figure.savefig(output_path)
     plt.close(figure)
