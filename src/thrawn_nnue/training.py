@@ -8,7 +8,7 @@ import math
 from .checkpoint import load_checkpoint, restore_rng_state, save_checkpoint
 from .console import ConsoleContext, create_console_reporter
 from .config import TrainConfig
-from .native import BinpackStream, inspect_binpack
+from .native import BinpackStream
 
 
 def _require_torch():
@@ -97,10 +97,7 @@ def _create_state(config: TrainConfig) -> TrainState:
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=config.max_epochs * config.steps_per_epoch,
-    )
+    scheduler = _create_scheduler(config, optimizer, torch)
     scaler = torch.cuda.amp.GradScaler(enabled=_cuda_amp_enabled(config, device))
 
     return TrainState(
@@ -119,13 +116,14 @@ def _run_training_loop(state: TrainState) -> None:
     torch = _require_torch()
     autocast_enabled = _cuda_amp_enabled(state.config, state.device)
     reporter = create_console_reporter(state.config.console_mode)
+    total_steps = 0 if state.config.steps_per_epoch == 0 else state.config.max_epochs * state.config.steps_per_epoch
     reporter.startup(
         ConsoleContext(
             run_name=state.config.run_name,
             device=state.device,
             train_shards=len(state.config.train_datasets),
             validation_shards=len(state.config.validation_datasets),
-            total_steps=state.config.max_epochs * state.config.steps_per_epoch,
+            total_steps=total_steps,
             initial_global_step=state.global_step,
             max_epochs=state.config.max_epochs,
             steps_per_epoch=state.config.steps_per_epoch,
@@ -134,6 +132,10 @@ def _run_training_loop(state: TrainState) -> None:
     )
 
     try:
+        if state.config.steps_per_epoch == 0:
+            _run_full_pass_training_loop(state, reporter, torch, autocast_enabled)
+            return
+
         with BinpackStream(
             state.config.train_datasets,
             num_threads=state.config.num_loader_threads,
@@ -146,31 +148,14 @@ def _run_training_loop(state: TrainState) -> None:
                     if batch is None:
                         raise RuntimeError("Cyclic training stream unexpectedly returned EOF")
 
-                    tensors = batch.to_torch(state.device)
-                    state.model.train()
-                    state.optimizer.zero_grad(set_to_none=True)
-                    with torch.cuda.amp.autocast(enabled=autocast_enabled):
-                        prediction_cp = state.model(
-                            tensors["white_indices"],
-                            tensors["black_indices"],
-                            tensors["stm"],
-                        )
-                        normalized_scores = _normalize_teacher_scores(tensors["score_cp"], state.config, torch)
-                        loss, eval_loss, result_loss = _blended_loss(
-                            prediction_cp,
-                            normalized_scores,
-                            tensors["result_wdl"],
-                            state.config.wdl_scale,
-                            state.config.result_lambda,
-                            torch,
-                        )
-
-                    state.scaler.scale(loss).backward()
-                    state.scaler.unscale_(state.optimizer)
-                    torch.nn.utils.clip_grad_norm_(state.model.parameters(), state.config.clip_grad_norm)
-                    state.scaler.step(state.optimizer)
-                    state.scaler.update()
-                    state.scheduler.step()
+                    loss, eval_loss, result_loss = _run_train_step(
+                        state,
+                        batch,
+                        torch,
+                        autocast_enabled=autocast_enabled,
+                    )
+                    if state.scheduler is not None:
+                        state.scheduler.step()
 
                     state.global_step += 1
                     state.step_in_epoch = step_in_epoch + 1
@@ -246,21 +231,133 @@ def _save_training_checkpoint(
 
 
 def _resolve_runtime_config(config: TrainConfig) -> None:
-    if config.steps_per_epoch == 0:
-        config.steps_per_epoch = _auto_steps_for_dataset(config.train_datasets, config.batch_size)
-    if config.validation_datasets and config.validation_steps == 0:
-        config.validation_steps = _auto_steps_for_dataset(config.validation_datasets, config.batch_size)
     config.validate()
 
 
-def _auto_steps_for_dataset(paths: list[str], batch_size: int) -> int:
-    total_entries = 0
-    for path in paths:
-        stats = inspect_binpack(path)
-        total_entries += int(stats["entries_read"])
-    if total_entries <= 0:
-        raise ValueError("Auto-sized datasets must contain at least one entry")
-    return max(1, math.ceil(total_entries / batch_size))
+def _create_scheduler(config: TrainConfig, optimizer, torch):
+    if config.steps_per_epoch == 0:
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=config.max_epochs,
+        )
+    return torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=config.max_epochs * config.steps_per_epoch,
+    )
+
+
+def _run_full_pass_training_loop(state: TrainState, reporter, torch, autocast_enabled: bool) -> None:
+    for epoch in range(state.epoch, state.config.max_epochs):
+        step_in_epoch = 0
+        skipped_batches = 0
+        start_step = state.step_in_epoch if epoch == state.epoch else 0
+        with BinpackStream(
+            state.config.train_datasets,
+            num_threads=state.config.num_loader_threads,
+            cyclic=False,
+        ) as train_stream:
+            while True:
+                batch = train_stream.next_batch(state.config.batch_size)
+                if batch is None:
+                    break
+                if skipped_batches < start_step:
+                    skipped_batches += 1
+                    continue
+
+                loss, eval_loss, result_loss = _run_train_step(
+                    state,
+                    batch,
+                    torch,
+                    autocast_enabled=autocast_enabled,
+                )
+
+                state.global_step += 1
+                step_in_epoch += 1
+                state.step_in_epoch = start_step + step_in_epoch
+                current_loss = float(loss.detach().cpu().item())
+                current_lr = float(state.optimizer.param_groups[0]["lr"])
+                reporter.update_train(
+                    epoch=epoch,
+                    step_in_epoch=state.step_in_epoch,
+                    global_step=state.global_step,
+                    loss=current_loss,
+                    lr=current_lr,
+                )
+
+                if state.global_step % state.config.log_every == 0:
+                    _log_metrics(
+                        state,
+                        {
+                            "event": "train",
+                            "epoch": epoch,
+                            "step_in_epoch": state.step_in_epoch - 1,
+                            "global_step": state.global_step,
+                            "loss": current_loss,
+                            "eval_loss": float(eval_loss.detach().cpu().item()),
+                            "result_loss": float(result_loss.detach().cpu().item()),
+                            "lr": current_lr,
+                        },
+                    )
+
+                if state.global_step % state.config.checkpoint_every == 0:
+                    checkpoint_path = state.run_dir / "checkpoints" / f"step_{state.global_step:08d}.pt"
+                    _save_training_checkpoint(state, checkpoint_path, epoch=epoch, step_in_epoch=state.step_in_epoch)
+                    reporter.checkpoint_saved(str(checkpoint_path), is_best=False)
+
+                if state.config.validation_every > 0 and state.global_step % state.config.validation_every == 0:
+                    _run_validation_and_report(state, reporter)
+
+        if step_in_epoch == 0 and start_step == 0:
+            raise ValueError("Full-pass training datasets must yield at least one batch")
+
+        state.epoch = epoch + 1
+        state.step_in_epoch = 0
+        if state.scheduler is not None:
+            state.scheduler.step()
+        if state.config.validation_every == 0:
+            _run_validation_and_report(state, reporter)
+
+
+def _run_train_step(state: TrainState, batch, torch, *, autocast_enabled: bool):
+    tensors = batch.to_torch(state.device)
+    state.model.train()
+    state.optimizer.zero_grad(set_to_none=True)
+    with torch.cuda.amp.autocast(enabled=autocast_enabled):
+        prediction_cp = state.model(
+            tensors["white_indices"],
+            tensors["black_indices"],
+            tensors["stm"],
+        )
+        normalized_scores = _normalize_teacher_scores(tensors["score_cp"], state.config, torch)
+        loss, eval_loss, result_loss = _blended_loss(
+            prediction_cp,
+            normalized_scores,
+            tensors["result_wdl"],
+            state.config.wdl_scale,
+            state.config.result_lambda,
+            torch,
+        )
+
+    state.scaler.scale(loss).backward()
+    state.scaler.unscale_(state.optimizer)
+    torch.nn.utils.clip_grad_norm_(state.model.parameters(), state.config.clip_grad_norm)
+    state.scaler.step(state.optimizer)
+    state.scaler.update()
+    return loss, eval_loss, result_loss
+
+
+def _run_validation_and_report(state: TrainState, reporter) -> None:
+    reporter.validation_started(global_step=state.global_step)
+    metrics = _run_validation(state)
+    is_best = _maybe_update_best_checkpoint(state, float(metrics["validation_loss"]))
+    metrics["is_best"] = is_best
+    _log_metrics(state, metrics)
+    reporter.validation_finished(metrics, is_best=is_best)
+    if is_best:
+        reporter.checkpoint_saved(
+            str(state.run_dir / "checkpoints" / "best.pt"),
+            is_best=True,
+        )
 
 
 def _should_run_validation(state: TrainState) -> bool:
@@ -306,10 +403,15 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         cyclic=False,
     ) as validation_stream:
         with torch.no_grad():
-            for _ in range(state.config.validation_steps):
+            remaining_steps = state.config.validation_steps
+            while True:
+                if remaining_steps == 0 and state.config.validation_steps > 0:
+                    break
                 batch = validation_stream.next_batch(state.config.batch_size)
                 if batch is None:
                     break
+                if remaining_steps > 0:
+                    remaining_steps -= 1
 
                 tensors = batch.to_torch(state.device)
                 with torch.cuda.amp.autocast(enabled=autocast_enabled):

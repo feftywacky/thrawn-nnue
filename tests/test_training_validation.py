@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import math
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -95,7 +96,7 @@ class ValidationTrainingTests(unittest.TestCase):
             self.assertFalse(_maybe_update_best_checkpoint(state, 0.30))
             self.assertTrue(_maybe_update_best_checkpoint(state, 0.20))
 
-    def test_create_state_auto_sizes_train_and_validation_steps(self) -> None:
+    def test_create_state_preserves_full_pass_zero_values_without_inspecting(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             train_path = tmp / "train.binpack"
@@ -103,8 +104,6 @@ class ValidationTrainingTests(unittest.TestCase):
             write_fixture_binpack(train_path)
             write_fixture_binpack(valid_path)
 
-            train_entries = int(inspect_binpack(train_path)["entries_read"])
-            valid_entries = int(inspect_binpack(valid_path)["entries_read"])
             config = TrainConfig.from_dict(
                 {
                     "train_datasets": [str(train_path)],
@@ -117,10 +116,15 @@ class ValidationTrainingTests(unittest.TestCase):
                 }
             )
 
-            state = _create_state(config)
+            with patch("thrawn_nnue.training._create_scheduler") as create_scheduler:
+                create_scheduler.side_effect = lambda cfg, optimizer, torch_module: torch_module.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer,
+                    T_max=cfg.max_epochs,
+                )
+                state = _create_state(config)
 
-            self.assertEqual(state.config.steps_per_epoch, math.ceil(train_entries / 2))
-            self.assertEqual(state.config.validation_steps, math.ceil(valid_entries / 2))
+            self.assertEqual(state.config.steps_per_epoch, 0)
+            self.assertEqual(state.config.validation_steps, 0)
 
     def test_train_with_validation_writes_metrics_and_best_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -185,6 +189,31 @@ class ValidationTrainingTests(unittest.TestCase):
             records = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
             validation_records = [record for record in records if record.get("event") == "validation"]
             self.assertEqual(len(validation_records), 2)
+
+    def test_zero_validation_steps_consumes_full_validation_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            train_path = tmp / "train.binpack"
+            valid_path = tmp / "valid.binpack"
+            write_fixture_binpack(train_path)
+            write_fixture_binpack(valid_path)
+
+            valid_entries = int(inspect_binpack(valid_path)["entries_read"])
+            config = TrainConfig.from_dict(
+                {
+                    "train_datasets": [str(train_path)],
+                    "validation_datasets": [str(valid_path)],
+                    "validation_steps": 0,
+                    "output_dir": str(tmp / "run"),
+                    "device": "cpu",
+                    "batch_size": 2,
+                }
+            )
+
+            state = _create_state(config)
+            metrics = _run_validation(state)
+
+            self.assertEqual(metrics["validation_batches"], math.ceil(valid_entries / 2))
 
     def test_text_console_mode_prints_human_readable_progress_without_raw_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
