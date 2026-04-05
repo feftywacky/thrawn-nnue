@@ -30,7 +30,7 @@ validation_every = 0
 # 0 means one full June validation pass
 validation_steps = 0
 
-max_epochs = 4
+max_epochs = 5
 checkpoint_every = 25000
 log_every = 25
 console_mode = "progress"
