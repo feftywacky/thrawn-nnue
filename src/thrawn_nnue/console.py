@@ -122,20 +122,22 @@ class ProgressReporter(_BaseReporter):
         self._latest_validation_loss: float | None = None
 
     def startup(self, context: ConsoleContext) -> None:
+        total = context.total_steps if context.total_steps > 0 else None
         self._bar = self._tqdm(
-            total=context.total_steps,
+            total=total,
             initial=context.initial_global_step,
             dynamic_ncols=True,
             file=sys.stdout,
             unit="step",
         )
+        total_label = "full-pass" if total is None else str(context.total_steps)
         self._bar.write(
             "training start:"
             f" run={context.run_name}"
             f" device={context.device}"
             f" train_shards={context.train_shards}"
             f" validation_shards={context.validation_shards}"
-            f" total_steps={context.total_steps}"
+            f" total_steps={total_label}"
         )
         self._bar.write(
             "training stream: combined cyclic stream across all train_datasets;"

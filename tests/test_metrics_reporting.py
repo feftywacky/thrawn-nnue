@@ -16,6 +16,7 @@ try:
 except ModuleNotFoundError:
     matplotlib = None
 
+from thrawn_nnue.console import ConsoleContext, ProgressReporter
 from thrawn_nnue.cli import main
 from thrawn_nnue.metrics import generate_run_plots, load_metrics_run, render_summary_text, summarize_run
 
@@ -236,6 +237,52 @@ class MetricsCliTests(unittest.TestCase):
                 resume_training.assert_called_once_with("/tmp/run.pt", console_mode="text")
         finally:
             sys.argv = argv
+
+
+class ProgressReporterTests(unittest.TestCase):
+    def test_progress_reporter_uses_indeterminate_bar_for_full_pass_runs(self) -> None:
+        writes: list[str] = []
+
+        class FakeBar:
+            def __init__(self) -> None:
+                self.n = 0
+
+            def write(self, message: str) -> None:
+                writes.append(message)
+
+            def update(self, amount: int) -> None:
+                self.n += amount
+
+            def set_postfix(self, postfix: dict[str, object], refresh: bool = False) -> None:
+                return None
+
+            def close(self) -> None:
+                return None
+
+        calls: list[dict[str, object]] = []
+
+        def fake_tqdm(**kwargs):
+            calls.append(kwargs)
+            return FakeBar()
+
+        with patch("thrawn_nnue.console._load_tqdm", return_value=fake_tqdm):
+            reporter = ProgressReporter()
+            reporter.startup(
+                ConsoleContext(
+                    run_name="full-pass",
+                    device="cpu",
+                    train_shards=5,
+                    validation_shards=1,
+                    total_steps=0,
+                    initial_global_step=0,
+                    max_epochs=5,
+                    steps_per_epoch=0,
+                    log_every=25,
+                )
+            )
+
+        self.assertEqual(calls[0]["total"], None)
+        self.assertTrue(any("total_steps=full-pass" in message for message in writes))
 
 
 if __name__ == "__main__":
