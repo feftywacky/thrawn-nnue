@@ -9,7 +9,7 @@ python3.11 -m unittest discover -s tests -v
 If you want to force a clean rebuild of the native `.binpack` bridge first:
 
 ```bash
-rm -rf build/native
+rm -rf build/native_binpack
 python3.11 -m unittest discover -s tests -v
 ```
 
@@ -24,4 +24,5 @@ python3.11 -m unittest discover -s tests -v
 ## Notes
 
 - Some tests require the native library to compile successfully through CMake.
+- Tests that exercise training are skipped automatically if `torch` is not installed.
 - The checkpoint metadata test is skipped automatically if `torch` is not installed.

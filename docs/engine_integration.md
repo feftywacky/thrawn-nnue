@@ -25,14 +25,7 @@ Your engine needs four pieces.
 
 ## 1. Load the exported file
 
-Read the header documented in [nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md), then read tensors in this order:
-
-- `ft_bias`
-- `ft_weight`
-- `l1_bias`
-- `l1_weight`
-- `out_bias`
-- `out_weight`
+Read the header and tensor layout documented in [nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md).
 
 Validate:
 
@@ -41,9 +34,9 @@ Validate:
 - feature set is `a768_dual_v1`
 - dimensions match your engine build
 
-## 2. Recreate the same feature extraction
+## 2. Recreate the same A-768 features
 
-Your engine must generate the same A-768 features as the trainer:
+Your engine must generate the same perspective-relative piece-square features as the trainer:
 
 - 6 piece types
 - own/opponent color relative to the perspective
@@ -51,12 +44,12 @@ Your engine must generate the same A-768 features as the trainer:
 - one pass from White's perspective
 - one pass from Black's perspective
 
-That means your position state should maintain:
+Maintain:
 
 - one White-perspective accumulator
 - one Black-perspective accumulator
 
-and update both incrementally on make/unmake.
+and update both on make and unmake.
 
 ## 3. Recreate the same forward pass
 
@@ -70,7 +63,7 @@ At evaluation time:
 6. Apply clipped ReLU again.
 7. Apply the final output layer.
 
-If you want integer inference, keep the quantized weights and use the scales defined in [nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md).
+If you want integer inference, keep the quantized weights and use the scales from [nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md).
 
 ## 4. Interpret the output
 
@@ -82,12 +75,10 @@ In practice your engine will usually:
 - map the scalar to your internal eval scale
 - let the side-to-move ordering handle the sign naturally
 
-## Practical integration plan
-
-In your engine repo, the simplest path is:
+## Practical plan
 
 1. Add a `ThrawnNnue` file loader.
 2. Add A-768 feature extraction shared by full refresh and incremental update code.
-3. Add a two-accumulator state object to your position/search stack.
+3. Add a two-accumulator state object to your position or search stack.
 4. Add the forward pass over the exported tensors.
-5. Replace or blend your current evaluator with the NNUE output.
+5. Validate parity against the trainer on a few known FENs before optimizing.

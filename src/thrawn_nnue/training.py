@@ -8,7 +8,7 @@ import math
 from .checkpoint import load_checkpoint, restore_rng_state, save_checkpoint
 from .console import ConsoleContext, create_console_reporter
 from .config import TrainConfig
-from .native import BinpackStream
+from .native import BinpackStream, inspect_binpack
 
 
 def _require_torch():
@@ -80,6 +80,7 @@ def _create_state(config: TrainConfig) -> TrainState:
     torch = _require_torch()
     from .model import DualPerspectiveA768NNUE
 
+    _resolve_runtime_config(config)
     device = _select_device(config.device, torch)
     run_dir = Path(config.output_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -203,7 +204,7 @@ def _run_training_loop(state: TrainState) -> None:
                         _save_training_checkpoint(state, checkpoint_path, epoch=epoch, step_in_epoch=state.step_in_epoch)
                         reporter.checkpoint_saved(str(checkpoint_path), is_best=False)
 
-                    if state.config.validation_datasets and state.global_step % state.config.validation_every == 0:
+                    if _should_run_validation(state):
                         reporter.validation_started(global_step=state.global_step)
                         metrics = _run_validation(state)
                         is_best = _maybe_update_best_checkpoint(state, float(metrics["validation_loss"]))
@@ -242,6 +243,32 @@ def _save_training_checkpoint(
         best_validation_loss=state.best_validation_loss,
         best_validation_step=state.best_validation_step,
     )
+
+
+def _resolve_runtime_config(config: TrainConfig) -> None:
+    if config.steps_per_epoch == 0:
+        config.steps_per_epoch = _auto_steps_for_dataset(config.train_datasets, config.batch_size)
+    if config.validation_datasets and config.validation_steps == 0:
+        config.validation_steps = _auto_steps_for_dataset(config.validation_datasets, config.batch_size)
+    config.validate()
+
+
+def _auto_steps_for_dataset(paths: list[str], batch_size: int) -> int:
+    total_entries = 0
+    for path in paths:
+        stats = inspect_binpack(path)
+        total_entries += int(stats["entries_read"])
+    if total_entries <= 0:
+        raise ValueError("Auto-sized datasets must contain at least one entry")
+    return max(1, math.ceil(total_entries / batch_size))
+
+
+def _should_run_validation(state: TrainState) -> bool:
+    if not state.config.validation_datasets:
+        return False
+    if state.config.validation_every == 0:
+        return state.step_in_epoch >= state.config.steps_per_epoch
+    return state.global_step % state.config.validation_every == 0
 
 
 def _blended_loss(prediction_cp, target_cp, result_wdl, wdl_scale: float, result_lambda: float, torch):

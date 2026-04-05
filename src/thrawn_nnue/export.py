@@ -239,8 +239,9 @@ def _fit_quantization_scale(values: list[np.ndarray], requested_scale: float, dt
     max_abs = max((float(np.max(np.abs(value))) for value in values if value.size > 0), default=0.0)
     if max_abs <= 0.0:
         return float(requested_scale)
-    max_scale_without_clipping = float(info.max) / max_abs
-    return float(min(requested_scale, max_scale_without_clipping))
+    max_scale_without_limit_hits = max(float(info.max) - 0.5, 1.0) / max_abs
+    headroom_scale = float(np.nextafter(max_scale_without_limit_hits, 0.0))
+    return float(min(requested_scale, headroom_scale))
 
 
 def _export_quantization_diagnostics(exported: ExportedNetwork) -> dict[str, dict[str, float]]:

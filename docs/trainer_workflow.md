@@ -43,17 +43,30 @@ The score-target controls are now:
 Example:
 
 ```toml
-train_datasets = ["/absolute/path/to/train_01.binpack", "/absolute/path/to/train_02.binpack"]
-validation_datasets = ["/absolute/path/to/valid.binpack"]
+train_datasets = ["/absolute/path/to/train/**/*.binpack"]
+validation_datasets = ["/absolute/path/to/valid"]
 output_dir = "runs/my_first_run"
 device = "auto"
-validation_every = 500
-validation_steps = 16
+steps_per_epoch = 0
+validation_every = 0
+validation_steps = 256
 console_mode = "progress"
 score_clip = 0.0
 score_scale = 1.0
 wdl_scale = 410.0
 ```
+
+Dataset entries may be:
+
+- explicit `.binpack` file paths
+- directories, which are expanded recursively to `.binpack` files
+- glob patterns such as `"/data/train/**/*.binpack"`
+
+Sizing controls support auto mode:
+
+- `steps_per_epoch = 0` runs one full training-corpus pass per epoch
+- `validation_every = 0` runs validation at the end of each epoch
+- `validation_steps = 0` runs one full validation-corpus pass
 
 ## Device configuration
 
@@ -162,6 +175,7 @@ Each validation pass:
 
 - opens the held-out `.binpack` files in non-cyclic mode
 - evaluates `validation_steps` batches or stops earlier at dataset exhaustion
+- if `validation_steps = 0`, auto-sizes to a full held-out pass
 - averages blended loss, eval loss, and result loss
 - logs a validation record to `metrics.jsonl`
 - updates `checkpoints/best.pt` if blended validation loss is the best seen so far

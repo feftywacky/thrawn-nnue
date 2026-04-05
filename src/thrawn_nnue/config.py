@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from glob import glob
 from pathlib import Path
 from typing import Any
 import tomllib
@@ -56,8 +57,8 @@ class TrainConfig:
 
         cfg = cls(**data)
         if base_dir is not None:
-            cfg.train_datasets = _resolve_path_list(base_dir, cfg.train_datasets)
-            cfg.validation_datasets = _resolve_path_list(base_dir, cfg.validation_datasets)
+            cfg.train_datasets = _resolve_dataset_list(base_dir, cfg.train_datasets)
+            cfg.validation_datasets = _resolve_dataset_list(base_dir, cfg.validation_datasets)
             cfg.output_dir = str((base_dir / cfg.output_dir).resolve())
         cfg.validate()
         return cfg
@@ -80,10 +81,10 @@ class TrainConfig:
             raise ValueError("Only output_perspective='stm' is supported")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if self.steps_per_epoch <= 0:
-            raise ValueError("steps_per_epoch must be positive")
-        if self.validation_every <= 0:
-            raise ValueError("validation_every must be positive")
+        if self.steps_per_epoch < 0:
+            raise ValueError("steps_per_epoch must be >= 0")
+        if self.validation_every < 0:
+            raise ValueError("validation_every must be >= 0")
         if self.max_epochs <= 0:
             raise ValueError("max_epochs must be positive")
         if not 0.0 <= self.result_lambda <= 1.0:
@@ -102,19 +103,45 @@ class TrainConfig:
             raise ValueError("device must be one of: auto, cuda, mps, cpu")
         if self.console_mode not in {"progress", "text"}:
             raise ValueError("console_mode must be one of: progress, text")
-        if self.validation_datasets and self.validation_steps <= 0:
-            raise ValueError("validation_steps must be positive when validation_datasets are configured")
+        if self.validation_steps < 0:
+            raise ValueError("validation_steps must be >= 0")
 
 
 def load_config(path: str | Path) -> TrainConfig:
     return TrainConfig.from_toml(path)
 
 
-def _resolve_path_list(base_dir: Path, values: list[str]) -> list[str]:
+def _resolve_dataset_list(base_dir: Path, values: list[str]) -> list[str]:
     resolved: list[str] = []
+    seen: set[str] = set()
     for value in values:
-        p = Path(value)
-        if not p.is_absolute():
-            p = (base_dir / p).resolve()
-        resolved.append(str(p))
+        for path in _expand_dataset_value(base_dir, value):
+            if path not in seen:
+                resolved.append(path)
+                seen.add(path)
     return resolved
+
+
+def _expand_dataset_value(base_dir: Path, value: str) -> list[str]:
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = (base_dir / candidate).resolve()
+
+    if _looks_like_glob(value):
+        matches = sorted(Path(match).resolve() for match in glob(str(candidate), recursive=True))
+        files = [str(path) for path in matches if path.is_file()]
+        if not files:
+            raise ValueError(f"Dataset glob matched no files: {value}")
+        return files
+
+    if candidate.is_dir():
+        files = sorted(path.resolve() for path in candidate.rglob("*.binpack") if path.is_file())
+        if not files:
+            raise ValueError(f"Dataset directory contains no .binpack files: {candidate}")
+        return [str(path) for path in files]
+
+    return [str(candidate)]
+
+
+def _looks_like_glob(value: str) -> bool:
+    return any(char in value for char in "*?[")

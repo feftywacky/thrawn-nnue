@@ -1,0 +1,61 @@
+run_name = "test80_a768_v3"
+output_dir = "runs/test80_a768_v3"
+
+# Tuning config, not the final all-data retrain.
+# Train on Jan-May and keep June held out for honest model selection.
+# If v3 wins, a later production config can retrain on Jan-Jun with no validation split.
+train_datasets = [
+  "/Users/flin/src/thrawn-nnue/data/test80-2024-01-jan-2tb7p.min-v2.v6.binpack",
+  "/Users/flin/src/thrawn-nnue/data/test80-2024-02-feb-2tb7p.min-v2.v6.binpack",
+  "/Users/flin/src/thrawn-nnue/data/test80-2024-03-mar-2tb7p.min-v2.v6.binpack",
+  "/Users/flin/src/thrawn-nnue/data/test80-2024-04-apr-2tb7p.min-v2.v6.binpack",
+  "/Users/flin/src/thrawn-nnue/data/test80-2024-05-may-2tb7p.min-v2.v6.binpack",
+]
+validation_datasets = [
+  "/Users/flin/src/thrawn-nnue/data/test80-2024-06-jun-2tb7p.min-v2.v6.binpack",
+]
+
+# device: auto, cuda, mps, or cpu
+# auto prefers cuda, then mps, then cpu
+device = "mps"
+num_loader_threads = 8
+batch_size = 4096
+
+# 0 means one full Jan-May pass per epoch
+steps_per_epoch = 0
+
+# 0 means validate at the end of each epoch
+validation_every = 0
+
+# 0 means one full June validation pass
+validation_steps = 0
+
+max_epochs = 4
+checkpoint_every = 25000
+log_every = 25
+console_mode = "progress"
+
+learning_rate = 0.00015
+weight_decay = 0.00002
+clip_grad_norm = 1.0
+# mixed precision is currently enabled only for CUDA
+amp = true
+
+feature_set = "a768_dual"
+num_features = 768
+max_active_features = 32
+ft_size = 512
+hidden_size = 64
+output_perspective = "stm"
+
+# v3 normalizes the raw teacher scale down before the WDL transform.
+# This keeps the effective target mapping close to v2 while encouraging
+# smaller raw outputs, which should export more cleanly.
+score_clip = 16000.0
+score_scale = 4.0
+wdl_scale = 2000.0
+result_lambda = 0.75
+
+export_ft_scale = 127.0
+export_dense_scale = 96.0
+export_description = "thrawn a768 dual nnue v3"

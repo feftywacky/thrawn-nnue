@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 import tempfile
 import unittest
+import math
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -16,7 +17,7 @@ except ModuleNotFoundError:
     torch = None
 
 from thrawn_nnue.config import TrainConfig
-from thrawn_nnue.native import write_fixture_binpack
+from thrawn_nnue.native import inspect_binpack, write_fixture_binpack
 from thrawn_nnue.training import (
     _create_state,
     _maybe_update_best_checkpoint,
@@ -94,6 +95,33 @@ class ValidationTrainingTests(unittest.TestCase):
             self.assertFalse(_maybe_update_best_checkpoint(state, 0.30))
             self.assertTrue(_maybe_update_best_checkpoint(state, 0.20))
 
+    def test_create_state_auto_sizes_train_and_validation_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            train_path = tmp / "train.binpack"
+            valid_path = tmp / "valid.binpack"
+            write_fixture_binpack(train_path)
+            write_fixture_binpack(valid_path)
+
+            train_entries = int(inspect_binpack(train_path)["entries_read"])
+            valid_entries = int(inspect_binpack(valid_path)["entries_read"])
+            config = TrainConfig.from_dict(
+                {
+                    "train_datasets": [str(train_path)],
+                    "validation_datasets": [str(valid_path)],
+                    "output_dir": str(tmp / "run"),
+                    "device": "cpu",
+                    "batch_size": 2,
+                    "steps_per_epoch": 0,
+                    "validation_steps": 0,
+                }
+            )
+
+            state = _create_state(config)
+
+            self.assertEqual(state.config.steps_per_epoch, math.ceil(train_entries / 2))
+            self.assertEqual(state.config.validation_steps, math.ceil(valid_entries / 2))
+
     def test_train_with_validation_writes_metrics_and_best_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -127,6 +155,36 @@ class ValidationTrainingTests(unittest.TestCase):
             records = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
             self.assertTrue(any(record.get("event") == "train" for record in records))
             self.assertTrue(any(record.get("event") == "validation" for record in records))
+
+    def test_epoch_end_validation_runs_when_validation_every_is_zero(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            train_path = tmp / "train.binpack"
+            valid_path = tmp / "valid.binpack"
+            write_fixture_binpack(train_path)
+            write_fixture_binpack(valid_path)
+
+            config = TrainConfig.from_dict(
+                {
+                    "train_datasets": [str(train_path)],
+                    "validation_datasets": [str(valid_path)],
+                    "output_dir": str(tmp / "run"),
+                    "device": "cpu",
+                    "batch_size": 2,
+                    "steps_per_epoch": 2,
+                    "max_epochs": 2,
+                    "validation_every": 0,
+                    "validation_steps": 1,
+                    "checkpoint_every": 10,
+                    "log_every": 1,
+                }
+            )
+            train_from_config(config)
+
+            metrics_path = Path(config.output_dir) / "metrics.jsonl"
+            records = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
+            validation_records = [record for record in records if record.get("event") == "validation"]
+            self.assertEqual(len(validation_records), 2)
 
     def test_text_console_mode_prints_human_readable_progress_without_raw_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

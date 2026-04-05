@@ -14,7 +14,7 @@ This repo expects `numpy` and `torch`. The native `.binpack` bridge is built aut
 
 ## Quick Start
 
-1. Edit [default.toml](/Users/feiyulin/Code/thrawn-nnue/configs/default.toml) and point `train_datasets` at one or more `.binpack` files.
+1. Edit [default.toml](/Users/feiyulin/Code/thrawn-nnue/configs/default.toml) and point `train_datasets` at one or more `.binpack` files, a dataset directory, or a glob such as `"/data/train/**/*.binpack"`.
 2. Inspect a dataset:
 
 ```bash
@@ -35,7 +35,7 @@ Training now defaults to a live single-line progress bar. It shows step progress
 thrawn-nnue train --config configs/default.toml --console-mode text
 ```
 
-4. Validation runs automatically every `validation_every` steps if `validation_datasets` is configured, and the best validation checkpoint is written to `runs/.../checkpoints/best.pt`.
+4. Validation runs automatically when `validation_datasets` is configured. Use `validation_every` for step-based validation or `validation_every = 0` for end-of-epoch validation. The best validation checkpoint is written to `runs/.../checkpoints/best.pt`.
 
 5. Resume later if needed:
 
@@ -79,8 +79,11 @@ thrawn-nnue metrics --run-dir runs/default
 ## Notes
 
 - This repository is trainer-only.
-- The engine-side loader/inference code belongs in your engine repo.
-- The exported `.nnue` format is trainer-owned and documented in [docs/nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md).
+- The engine-side loader and inference code belongs in your engine repo.
 - Training metrics are logged to `metrics.jsonl`, and `thrawn-nnue metrics --run-dir ...` generates summary output plus PNG plots in `plots/`.
 - Multiple `train_datasets` are opened as one combined cyclic training stream, not processed one file at a time.
+- Dataset lists can contain individual files, directories, or glob patterns. Directories are expanded recursively to `.binpack` files.
+- `steps_per_epoch = 0` means one full training-corpus pass per epoch.
+- `validation_every = 0` means validate at the end of each epoch.
+- `validation_steps = 0` means one full validation-corpus pass.
 - Dataset inspection is intended to drive `wdl_scale`, `score_clip`, and `score_scale` choices before a long training run.
