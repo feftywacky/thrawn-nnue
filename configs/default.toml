@@ -1,23 +1,23 @@
-run_name = "default"
-output_dir = "runs/default"
+run_name = "test80_a768_v0"
+output_dir = "runs/test80_a768_v0"
 
 train_datasets = []
 validation_datasets = []
 # device: auto, cuda, mps, or cpu
 # auto prefers cuda, then mps, then cpu
 device = "auto"
-num_loader_threads = 2
-batch_size = 256
-steps_per_epoch = 1000
+num_loader_threads = 4
+batch_size = 1024
+steps_per_epoch = 2000
 # run validation every N training steps when validation_datasets is non-empty
 validation_every = 500
 # number of validation batches to average per validation pass
 validation_steps = 16
 max_epochs = 10
-checkpoint_every = 250
+checkpoint_every = 500
 log_every = 25
 
-learning_rate = 0.001
+learning_rate = 0.0004
 weight_decay = 0.00001
 clip_grad_norm = 1.0
 # mixed precision is currently enabled only for CUDA
@@ -35,7 +35,7 @@ output_perspective = "stm"
 score_clip = 0.0
 score_scale = 1.0
 wdl_scale = 410.0
-result_lambda = 0.5
+result_lambda = 0.8
 
 export_ft_scale = 127.0
 export_dense_scale = 64.0
