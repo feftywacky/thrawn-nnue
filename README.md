@@ -1,6 +1,6 @@
 # thrawn-nnue
 
-`thrawn-nnue` is a CLI tool for training a dual-perspective chess NNUE using a simple A-768 feature set for [thrawn](https://github.com/feftywacky/thrawn).
+`thrawn-nnue` is a CLI framework for training a dual-perspective chess NNUE using a simple A-768 feature set for [thrawn](https://github.com/feftywacky/thrawn).
 
 ## What is included
 
