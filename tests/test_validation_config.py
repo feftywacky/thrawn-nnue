@@ -45,6 +45,15 @@ class ValidationConfigTests(unittest.TestCase):
                 }
             )
 
+    def test_console_mode_is_validated(self) -> None:
+        with self.assertRaises(ValueError):
+            TrainConfig.from_dict(
+                {
+                    "train_datasets": ["/tmp/train.binpack"],
+                    "console_mode": "json",
+                }
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

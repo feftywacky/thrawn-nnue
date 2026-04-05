@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 import tempfile
 import unittest
@@ -125,6 +127,42 @@ class ValidationTrainingTests(unittest.TestCase):
             records = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
             self.assertTrue(any(record.get("event") == "train" for record in records))
             self.assertTrue(any(record.get("event") == "validation" for record in records))
+
+    def test_text_console_mode_prints_human_readable_progress_without_raw_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            train_path = tmp / "train.binpack"
+            valid_path = tmp / "valid.binpack"
+            write_fixture_binpack(train_path)
+            write_fixture_binpack(valid_path)
+
+            config = TrainConfig.from_dict(
+                {
+                    "train_datasets": [str(train_path)],
+                    "validation_datasets": [str(valid_path)],
+                    "output_dir": str(tmp / "run"),
+                    "device": "cpu",
+                    "console_mode": "text",
+                    "batch_size": 2,
+                    "steps_per_epoch": 2,
+                    "max_epochs": 1,
+                    "validation_every": 1,
+                    "validation_steps": 1,
+                    "checkpoint_every": 10,
+                    "log_every": 1,
+                }
+            )
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                train_from_config(config)
+
+            output = stdout.getvalue()
+            self.assertIn("training start:", output)
+            self.assertIn("train step=", output)
+            self.assertIn("validation done:", output)
+            self.assertNotIn('{"event": "train"', output)
+            self.assertNotIn('{"event": "validation"', output)
 
 
 if __name__ == "__main__":

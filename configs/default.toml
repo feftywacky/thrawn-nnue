@@ -24,6 +24,7 @@ validation_steps = 16
 max_epochs = 20
 checkpoint_every = 500
 log_every = 25
+console_mode = "progress"
 
 learning_rate = 0.0004
 weight_decay = 0.00001

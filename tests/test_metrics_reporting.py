@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -116,6 +117,34 @@ class MetricsCliTests(unittest.TestCase):
             if matplotlib is not None:
                 self.assertIn("run_dir:", output)
                 self.assertIn("train_records: 1", output)
+
+    def test_train_cli_console_mode_override_takes_precedence(self) -> None:
+        argv = sys.argv
+        try:
+            sys.argv = ["thrawn-nnue", "train", "--config", "configs/default.toml", "--console-mode", "text"]
+            with (
+                redirect_stdout(io.StringIO()),
+                patch("thrawn_nnue.cli.load_config") as load_config,
+                patch("thrawn_nnue.cli.train_from_config") as train_from_config,
+            ):
+                config = object()
+                load_config.return_value = config
+                train_from_config.return_value = Path("/tmp/final.pt")
+                main()
+                train_from_config.assert_called_once_with(config, console_mode="text")
+        finally:
+            sys.argv = argv
+
+    def test_resume_cli_console_mode_override_takes_precedence(self) -> None:
+        argv = sys.argv
+        try:
+            sys.argv = ["thrawn-nnue", "resume", "--checkpoint", "/tmp/run.pt", "--console-mode", "text"]
+            with redirect_stdout(io.StringIO()), patch("thrawn_nnue.cli.resume_training") as resume_training:
+                resume_training.return_value = Path("/tmp/final.pt")
+                main()
+                resume_training.assert_called_once_with("/tmp/run.pt", console_mode="text")
+        finally:
+            sys.argv = argv
 
 
 if __name__ == "__main__":

@@ -17,9 +17,11 @@ def main() -> None:
 
     train_parser = subparsers.add_parser("train", help="Train from a TOML config")
     train_parser.add_argument("--config", required=True)
+    train_parser.add_argument("--console-mode", choices=["progress", "text"])
 
     resume_parser = subparsers.add_parser("resume", help="Resume from a checkpoint")
     resume_parser.add_argument("--checkpoint", required=True)
+    resume_parser.add_argument("--console-mode", choices=["progress", "text"])
 
     export_parser = subparsers.add_parser("export", help="Export a checkpoint to .nnue")
     export_parser.add_argument("--checkpoint", required=True)
@@ -40,12 +42,12 @@ def main() -> None:
 
     if args.command == "train":
         config = load_config(args.config)
-        checkpoint_path = train_from_config(config)
+        checkpoint_path = train_from_config(config, console_mode=args.console_mode)
         print(str(checkpoint_path))
         return
 
     if args.command == "resume":
-        checkpoint_path = resume_training(args.checkpoint)
+        checkpoint_path = resume_training(args.checkpoint, console_mode=args.console_mode)
         print(str(checkpoint_path))
         return
 

@@ -56,6 +56,12 @@ thrawn-nnue inspect-binpack --path /absolute/path/to/train.binpack
 thrawn-nnue train --config configs/default.toml
 ```
 
+Training now defaults to a live single-line progress bar. It shows step progress, epoch, ETA, latest train loss, latest validation loss, and checkpoint notices. If you prefer plain summaries instead, set `console_mode = "text"` in [default.toml](/Users/feiyulin/Code/thrawn-nnue/configs/default.toml) or run:
+
+```bash
+thrawn-nnue train --config configs/default.toml --console-mode text
+```
+
 4. Validation runs automatically every `validation_every` steps if `validation_datasets` is configured, and the best validation checkpoint is written to `runs/.../checkpoints/best.pt`.
 
 5. Resume later if needed:
@@ -103,4 +109,5 @@ thrawn-nnue metrics --run-dir runs/default
 - The engine-side loader/inference code belongs in your engine repo.
 - The exported `.nnue` format is trainer-owned and documented in [docs/nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md).
 - Training metrics are logged to `metrics.jsonl`, and `thrawn-nnue metrics --run-dir ...` generates summary output plus PNG plots in `plots/`.
+- Multiple `train_datasets` are opened as one combined cyclic training stream, not processed one file at a time.
 - Dataset inspection is intended to drive `wdl_scale`, `score_clip`, and `score_scale` choices before a long training run.

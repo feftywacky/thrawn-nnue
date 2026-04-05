@@ -21,6 +21,7 @@ class TrainConfig:
     max_epochs: int = 10
     checkpoint_every: int = 250
     log_every: int = 25
+    console_mode: str = "progress"
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
     clip_grad_norm: float = 1.0
@@ -97,6 +98,8 @@ class TrainConfig:
             raise ValueError("network sizes must be positive")
         if self.device not in {"auto", "cuda", "mps", "cpu"}:
             raise ValueError("device must be one of: auto, cuda, mps, cpu")
+        if self.console_mode not in {"progress", "text"}:
+            raise ValueError("console_mode must be one of: progress, text")
         if self.validation_datasets and self.validation_steps <= 0:
             raise ValueError("validation_steps must be positive when validation_datasets are configured")
 

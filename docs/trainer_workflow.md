@@ -32,6 +32,7 @@ Edit [default.toml](/Users/feiyulin/Code/thrawn-nnue/configs/default.toml) and s
 - `steps_per_epoch`
 - `max_epochs`
 - `checkpoint_every`
+- `console_mode`
 
 The score-target controls are now:
 
@@ -48,6 +49,7 @@ output_dir = "runs/my_first_run"
 device = "auto"
 validation_every = 500
 validation_steps = 16
+console_mode = "progress"
 score_clip = 0.0
 score_scale = 1.0
 wdl_scale = 410.0
@@ -123,9 +125,18 @@ Start training with:
 thrawn-nnue train --config configs/default.toml
 ```
 
+By default, training uses a live progress bar. It tracks `global_step` out of `max_epochs * steps_per_epoch`, shows the current epoch/step, latest train loss, latest validation loss, and emits short notices when validation runs or checkpoints are saved.
+
+If you want plain text summaries instead:
+
+```bash
+thrawn-nnue train --config configs/default.toml --console-mode text
+```
+
 During training the trainer:
 
 1. Streams `.binpack` entries through the native loader.
+   All configured `train_datasets` are opened together as one combined cyclic stream.
 2. Extracts white and black A-768 active feature lists.
 3. Builds two accumulators with a shared feature-transformer table.
 4. Orders them as `[stm_acc, nstm_acc]`.
@@ -178,6 +189,12 @@ Resume from a saved checkpoint with:
 
 ```bash
 thrawn-nnue resume --checkpoint runs/my_first_run/checkpoints/step_00001000.pt
+```
+
+You can also override the console mode on resume:
+
+```bash
+thrawn-nnue resume --checkpoint runs/my_first_run/checkpoints/step_00001000.pt --console-mode text
 ```
 
 Checkpoints contain:
