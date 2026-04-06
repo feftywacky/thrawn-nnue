@@ -175,6 +175,41 @@ def inspect_binpack(path: str | Path) -> dict[str, int | float]:
     return result
 
 
+def inspect_binpack_collection(paths: list[str | Path]) -> dict[str, object]:
+    resolved_paths = [Path(path).resolve() for path in paths]
+    if not resolved_paths:
+        raise ValueError("At least one .binpack path is required")
+
+    per_file: list[dict[str, object]] = []
+    for path in sorted(resolved_paths):
+        stats = inspect_binpack(path)
+        per_file.append({"path": str(path), "stats": stats})
+
+    aggregate = _aggregate_inspection_stats([item["stats"] for item in per_file])
+    return {
+        "file_count": len(per_file),
+        "aggregate": aggregate,
+        "files": per_file,
+    }
+
+
+def discover_binpack_files(path: str | Path) -> list[Path]:
+    root = Path(path).resolve()
+    if root.is_file():
+        if root.suffix != ".binpack":
+            raise ValueError(f"Expected a .binpack file or directory, got: {root}")
+        return [root]
+    if not root.exists():
+        raise ValueError(f"Path does not exist: {root}")
+    if not root.is_dir():
+        raise ValueError(f"Expected a directory or .binpack file, got: {root}")
+
+    files = sorted(candidate for candidate in root.rglob("*.binpack") if candidate.is_file())
+    if not files:
+        raise ValueError(f"No .binpack files found under: {root}")
+    return files
+
+
 def write_fixture_binpack(path: str | Path) -> None:
     lib = _load_library()
     ok = lib.thrawn_write_fixture_binpack(os.fsencode(Path(path).resolve()))
@@ -291,6 +326,67 @@ def _safe_fraction(count: int, total: int) -> float:
     if total <= 0:
         return 0.0
     return float(count) / float(total)
+
+
+def _aggregate_inspection_stats(stats_list: list[dict[str, object]]) -> dict[str, object]:
+    total_entries = sum(int(stats["entries_read"]) for stats in stats_list)
+    if total_entries <= 0:
+        raise ValueError("Inspection aggregate requires at least one dataset entry")
+
+    def weighted_mean(key: str) -> float:
+        numerator = sum(float(stats[key]) * int(stats["entries_read"]) for stats in stats_list)
+        return numerator / total_entries
+
+    aggregate: dict[str, object] = {
+        "entries_read": total_entries,
+        "white_to_move": sum(int(stats["white_to_move"]) for stats in stats_list),
+        "black_to_move": sum(int(stats["black_to_move"]) for stats in stats_list),
+        "wins": sum(int(stats["wins"]) for stats in stats_list),
+        "draws": sum(int(stats["draws"]) for stats in stats_list),
+        "losses": sum(int(stats["losses"]) for stats in stats_list),
+        "min_score": min(int(stats["min_score"]) for stats in stats_list),
+        "max_score": max(int(stats["max_score"]) for stats in stats_list),
+        "min_ply": min(int(stats["min_ply"]) for stats in stats_list),
+        "max_ply": max(int(stats["max_ply"]) for stats in stats_list),
+        "mean_score": weighted_mean("mean_score"),
+        "mean_abs_score": weighted_mean("mean_abs_score"),
+        "mean_piece_count": weighted_mean("mean_piece_count"),
+        "abs_score_threshold_counts": {
+            threshold: sum(int(stats["abs_score_threshold_counts"][threshold]) for stats in stats_list)
+            for threshold in ["ge_1000", "ge_2000", "ge_4000", "ge_8000", "ge_16000"]
+        },
+    }
+    aggregate["result_percentages"] = {
+        "wins": _safe_fraction(int(aggregate["wins"]), total_entries),
+        "draws": _safe_fraction(int(aggregate["draws"]), total_entries),
+        "losses": _safe_fraction(int(aggregate["losses"]), total_entries),
+    }
+    aggregate["abs_score_threshold_fractions"] = {
+        key: _safe_fraction(value, total_entries)
+        for key, value in aggregate["abs_score_threshold_counts"].items()
+    }
+
+    # Exact percentiles cannot be reconstructed from per-file summaries alone, so
+    # aggregate percentiles are conservative maxima of the file-level estimates.
+    aggregate["score_percentiles"] = {
+        percentile: max(float(stats["score_percentiles"][percentile]) for stats in stats_list)
+        for percentile in ["p01", "p05", "p50", "p95", "p99"]
+    }
+    aggregate["abs_score_percentiles"] = {
+        percentile: max(float(stats["abs_score_percentiles"][percentile]) for stats in stats_list)
+        for percentile in ["p50", "p90", "p95", "p99"]
+    }
+    aggregate["ply_percentiles"] = {
+        percentile: max(float(stats["ply_percentiles"][percentile]) for stats in stats_list)
+        for percentile in ["p50", "p95"]
+    }
+    aggregate["wdl_scale_diagnostics"] = _wdl_scale_diagnostics(aggregate)
+    aggregate["recommendation"] = _inspect_recommendation(aggregate)
+    aggregate["aggregate_notes"] = [
+        "entries, result counts, threshold counts, minima, maxima, and means are exact aggregates",
+        "percentiles are conservative maxima of per-file percentiles, not exact merged percentiles",
+    ]
+    return aggregate
 
 
 def _wdl_scale_diagnostics(stats: dict[str, object]) -> dict[str, dict[str, float]]:

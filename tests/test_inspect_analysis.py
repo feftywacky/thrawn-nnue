@@ -7,7 +7,14 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from thrawn_nnue.native import inspect_binpack, write_fixture_binpack, _inspect_recommendation, _wdl_scale_diagnostics
+from thrawn_nnue.native import (
+    discover_binpack_files,
+    inspect_binpack,
+    inspect_binpack_collection,
+    write_fixture_binpack,
+    _inspect_recommendation,
+    _wdl_scale_diagnostics,
+)
 
 
 class InspectAnalysisTests(unittest.TestCase):
@@ -46,6 +53,40 @@ class InspectAnalysisTests(unittest.TestCase):
         self.assertFalse(recommendation["saturated_at_default_wdl_scale"])
         self.assertEqual(recommendation["recommended_score_clip"], 0.0)
         self.assertEqual(recommendation["recommended_score_scale"], 1.0)
+
+    def test_discover_binpack_files_walks_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            nested = root / "nested"
+            nested.mkdir()
+            a = root / "a.binpack"
+            b = nested / "b.binpack"
+            write_fixture_binpack(a)
+            write_fixture_binpack(b)
+
+            discovered = discover_binpack_files(root)
+            self.assertEqual(discovered, sorted([a.resolve(), b.resolve()]))
+
+    def test_collection_inspect_returns_aggregate_and_per_file_stats(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            first = root / "first.binpack"
+            second = root / "second.binpack"
+            write_fixture_binpack(first)
+            write_fixture_binpack(second)
+
+            combined = inspect_binpack_collection([first, second])
+
+            self.assertEqual(combined["file_count"], 2)
+            self.assertEqual(len(combined["files"]), 2)
+            self.assertEqual(combined["aggregate"]["entries_read"], 6)
+            expected_wins = sum(int(item["stats"]["wins"]) for item in combined["files"])
+            expected_draws = sum(int(item["stats"]["draws"]) for item in combined["files"])
+            expected_losses = sum(int(item["stats"]["losses"]) for item in combined["files"])
+            self.assertEqual(combined["aggregate"]["wins"], expected_wins)
+            self.assertEqual(combined["aggregate"]["draws"], expected_draws)
+            self.assertEqual(combined["aggregate"]["losses"], expected_losses)
+            self.assertIn("aggregate_notes", combined["aggregate"])
 
 
 if __name__ == "__main__":

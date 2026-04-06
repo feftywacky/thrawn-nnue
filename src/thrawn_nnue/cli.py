@@ -7,7 +7,7 @@ import json
 from .config import load_config
 from .export import export_checkpoint, verify_export
 from .metrics import generate_run_plots, load_metrics_run, render_summary_text, summarize_run
-from .native import inspect_binpack
+from .native import discover_binpack_files, inspect_binpack, inspect_binpack_collection
 from .training import resume_training, train_from_config
 
 
@@ -34,6 +34,12 @@ def main() -> None:
 
     inspect_parser = subparsers.add_parser("inspect-binpack", help="Inspect a .binpack dataset")
     inspect_parser.add_argument("--path", required=True)
+
+    inspect_all_parser = subparsers.add_parser(
+        "inspect-binpack-dir",
+        help="Inspect all .binpack files under a directory and aggregate the results",
+    )
+    inspect_all_parser.add_argument("--path", required=True)
 
     metrics_parser = subparsers.add_parser("metrics", help="Summarize a training run and generate plots")
     metrics_parser.add_argument("--run-dir", required=True)
@@ -64,6 +70,12 @@ def main() -> None:
 
     if args.command == "inspect-binpack":
         stats = inspect_binpack(args.path)
+        print(json.dumps(stats, indent=2, sort_keys=True))
+        return
+
+    if args.command == "inspect-binpack-dir":
+        paths = discover_binpack_files(args.path)
+        stats = inspect_binpack_collection(paths)
         print(json.dumps(stats, indent=2, sort_keys=True))
         return
 
