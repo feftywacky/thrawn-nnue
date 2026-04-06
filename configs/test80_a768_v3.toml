@@ -37,12 +37,12 @@ console_mode = "progress"
 learning_rate = 0.0003
 weight_decay = 0.00002
 clip_grad_norm = 1.0
-# mixed precision is currently enabled only for CUDA
+# mixed precision uses PyTorch AMP when the selected backend supports it
 amp = true
 
 # feature_set / num_features describe the sparse A-768 input encoding.
 # ft_size controls the accumulator width per perspective.
-feature_set = "a768_dual"
+feature_set = "a768"
 num_features = 768
 max_active_features = 32
 ft_size = 768

@@ -73,9 +73,11 @@ Budget controls:
 
 Network sizing:
 
-- `feature_set = "a768_dual"` and `num_features = 768` describe the sparse input encoding
+- `feature_set = "a768"` and `num_features = 768` describe the sparse input encoding
+- the legacy alias `feature_set = "a768_dual"` is still accepted
 - `ft_size` is the accumulator width for one perspective
 - the first dense layer therefore sees `2 * ft_size` inputs because the trainer feeds `[stm_acc, nstm_acc]`
+- `output_buckets` controls how many phase buckets share the same hidden layer and split only at the final output layer
 
 ## Device configuration
 
@@ -104,8 +106,8 @@ if your installed PyTorch build supports MPS.
 
 Notes:
 
-- CUDA training uses AMP when `amp = true`.
-- Apple `mps` training currently runs without AMP in this scaffold.
+- The trainer now uses PyTorch's generic AMP API, so `amp = true` enables autocast/scaling on whichever backend your local PyTorch build supports.
+- If a backend does not expose AMP support in that build, the trainer falls back to fp32 rather than pretending AMP is active.
 - If you request `cuda` or `mps` explicitly and that backend is unavailable, the trainer raises an error instead of silently falling back.
 
 ## 3. Inspect a dataset
@@ -167,10 +169,11 @@ During training the trainer:
 
 1. Streams `.binpack` entries through the native loader.
    All configured `train_datasets` are opened together as one combined cyclic stream.
+   The native reader samples chunk reads across the shard list and shuffles buffered entries, so training is interleaved across the whole date range instead of consuming one file front-to-back.
 2. Extracts white and black A-768 active feature lists.
 3. Builds two accumulators with a shared feature-transformer table.
 4. Orders them as `[stm_acc, nstm_acc]`.
-5. Runs the configured `2 * ft_size -> hidden_size -> 1` network.
+5. Runs the configured `2 * ft_size -> hidden_size -> output_buckets` network and selects the phase bucket for each position at the final layer.
 6. Applies teacher-score preprocessing:
    clip, then scale
 7. Converts normalized score targets into WDL space.

@@ -27,11 +27,12 @@ class TrainConfig:
     weight_decay: float = 1e-5
     clip_grad_norm: float = 1.0
     amp: bool = True
-    feature_set: str = "a768_dual"
+    feature_set: str = "a768"
     num_features: int = 768
     max_active_features: int = 32
     ft_size: int = 256
     hidden_size: int = 32
+    output_buckets: int = 1
     output_perspective: str = "stm"
     score_clip: float = 0.0
     score_scale: float = 1.0
@@ -73,12 +74,13 @@ class TrainConfig:
         return cls.from_dict(raw, base_dir=config_path.parent)
 
     def validate(self) -> None:
-        if self.feature_set != "a768_dual":
-            raise ValueError("Only feature_set='a768_dual' is supported in this scaffold")
+        self.feature_set = _canonical_feature_set(self.feature_set)
         if self.num_features != 768:
             raise ValueError("A-768 requires num_features=768")
         if self.max_active_features != 32:
             raise ValueError("Chess A-768 expects max_active_features=32")
+        if self.output_buckets <= 0:
+            raise ValueError("output_buckets must be positive")
         if self.output_perspective != "stm":
             raise ValueError("Only output_perspective='stm' is supported")
         if self.batch_size <= 0:
@@ -171,6 +173,12 @@ def _expand_dataset_value(base_dir: Path, value: str) -> list[str]:
 
 def _looks_like_glob(value: str) -> bool:
     return any(char in value for char in "*?[")
+
+
+def _canonical_feature_set(value: str) -> str:
+    if value in {"a768", "a768_dual"}:
+        return "a768"
+    raise ValueError("Only feature_set='a768' (or legacy alias 'a768_dual') is supported")
 
 
 def _dataset_overlap(train_datasets: list[str], validation_datasets: list[str]) -> list[str]:

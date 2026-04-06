@@ -13,7 +13,7 @@ The exported network in this repo has this shape:
 - one accumulator per perspective of width `ft_size`
 - first dense layer input width: `2 * ft_size`
 - hidden layer width: `hidden_size`
-- scalar output
+- final output width: `output_buckets` with one selected scalar per position
 
 The exported file layout is documented in [nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md).
 

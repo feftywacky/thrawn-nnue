@@ -9,11 +9,12 @@ All multi-byte values are little-endian.
 | Field | Type | Value |
 | --- | --- | --- |
 | magic | 8 bytes | `THNNUE\0\1` |
-| version | `u32` | `2` |
+| version | `u32` | `3` |
 | feature_set | 16 bytes | ASCII, NUL-padded, `a768_dual_v1` |
 | num_features | `u32` | `768` |
-| ft_size | `u32` | usually `256` |
-| hidden_size | `u32` | usually `32` |
+| ft_size | `u32` | commonly `768` |
+| hidden_size | `u32` | commonly `128` |
+| output_buckets | `u32` | usually `1` or `8` |
 | output_perspective | `u32` | `1` for side-to-move output |
 | ft_scale | `f32` | feature-transformer quantization scale |
 | dense_scale | `f32` | dense-layer quantization scale |
@@ -26,8 +27,8 @@ The description bytes come next, followed by packed tensors in this order:
 2. `ft_weight`: `int16[num_features][ft_size]`
 3. `l1_bias`: `int32[hidden_size]`
 4. `l1_weight`: `int8[ft_size * 2][hidden_size]`
-5. `out_bias`: `int32[1]`
-6. `out_weight`: `int16[hidden_size][1]` in version 2, `int8[hidden_size][1]` in version 1
+5. `out_bias`: `int32[output_buckets]`
+6. `out_weight`: `int16[hidden_size][output_buckets]` in version 3, `int16[hidden_size][1]` in version 2, `int8[hidden_size][1]` in version 1
 
 ## Semantics
 
@@ -37,6 +38,7 @@ The description bytes come next, followed by packed tensors in this order:
 - The first dense layer always consumes `[stm_acc, nstm_acc]`.
 - That means the first dense layer input width is always `2 * ft_size`.
 - Exported tensors are quantized for compact storage, but verification in this repo dequantizes them back to float for parity checks.
+- When `output_buckets > 1`, the engine should compute the hidden activations once, then select the final bucket by the same piece-count bucket rule the trainer uses.
 
 ## Quantization
 

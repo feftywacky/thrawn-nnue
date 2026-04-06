@@ -7,6 +7,8 @@ from .board import BoardState, flip_vertical
 
 NUM_FEATURES = 768
 MAX_ACTIVE_FEATURES = 32
+MIN_PIECE_COUNT = 2
+MAX_PIECE_COUNT = 32
 
 
 def orient_square(square_index: int, perspective: str) -> int:
@@ -47,6 +49,16 @@ def active_feature_indices(board_state: BoardState, perspective: str) -> list[in
 def padded_feature_indices(board_state: BoardState, perspective: str) -> list[int]:
     indices = active_feature_indices(board_state, perspective)
     return indices + [-1] * (MAX_ACTIVE_FEATURES - len(indices))
+
+
+def output_bucket_index(piece_count: int, output_buckets: int) -> int:
+    if output_buckets <= 1:
+        return 0
+
+    clamped_piece_count = min(MAX_PIECE_COUNT, max(MIN_PIECE_COUNT, piece_count))
+    phase_progress = MAX_PIECE_COUNT - clamped_piece_count
+    phase_span = MAX_PIECE_COUNT - MIN_PIECE_COUNT + 1
+    return min(output_buckets - 1, (phase_progress * output_buckets) // phase_span)
 
 
 @dataclass(slots=True)

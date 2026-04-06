@@ -16,15 +16,22 @@ def _require_torch():
 if torch is not None:
 
     class DualPerspectiveA768NNUE(nn.Module):
-        def __init__(self, num_features: int = 768, ft_size: int = 256, hidden_size: int = 32):
+        def __init__(
+            self,
+            num_features: int = 768,
+            ft_size: int = 256,
+            hidden_size: int = 32,
+            output_buckets: int = 1,
+        ):
             super().__init__()
             self.num_features = num_features
             self.ft_size = ft_size
             self.hidden_size = hidden_size
+            self.output_buckets = output_buckets
             self.ft = nn.Embedding(num_features, ft_size)
             self.ft_bias = nn.Parameter(torch.zeros(ft_size, dtype=torch.float32))
             self.l1 = nn.Linear(ft_size * 2, hidden_size)
-            self.output = nn.Linear(hidden_size, 1)
+            self.output = nn.Linear(hidden_size, output_buckets)
             self.reset_parameters()
 
         def reset_parameters(self) -> None:
@@ -42,7 +49,13 @@ if torch is not None:
             embeddings = embeddings * mask.unsqueeze(-1).to(dtype=embeddings.dtype)
             return embeddings.sum(dim=1) + self.ft_bias
 
-        def forward(self, white_indices: torch.Tensor, black_indices: torch.Tensor, stm: torch.Tensor) -> torch.Tensor:
+        def forward(
+            self,
+            white_indices: torch.Tensor,
+            black_indices: torch.Tensor,
+            stm: torch.Tensor,
+            output_bucket_indices: torch.Tensor | None = None,
+        ) -> torch.Tensor:
             white_acc = self._accumulate(white_indices)
             black_acc = self._accumulate(black_indices)
             stm_bool = stm.ge(0.5)
@@ -53,7 +66,15 @@ if torch is not None:
             )
             hidden = torch.clamp(combined, 0.0, 1.0)
             hidden = torch.clamp(self.l1(hidden), 0.0, 1.0)
-            return self.output(hidden)
+            outputs = self.output(hidden)
+            if self.output_buckets == 1:
+                return outputs
+            if output_bucket_indices is None:
+                raise ValueError("output_bucket_indices are required when output_buckets > 1")
+
+            bucket_indices = output_bucket_indices.reshape(-1).to(device=outputs.device, dtype=torch.long)
+            bucket_indices = bucket_indices.clamp_(0, self.output_buckets - 1)
+            return outputs.gather(1, bucket_indices.unsqueeze(1))
 
 else:
 

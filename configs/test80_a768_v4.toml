@@ -11,22 +11,14 @@ train_datasets = [
 validation_datasets = [
   "/Users/flin/src/thrawn-nnue/data/test80-2024-06-jun-2tb7p.min-v2.v6.binpack",
 ]
-# device: auto, cuda, mps, or cpu
-# auto prefers cuda, then mps, then cpu
+
 device = "mps"
 num_loader_threads = 12
 batch_size = 16384
 
-# Primary run budget is positions seen, not epochs.
 total_train_positions = 4000000000
-
-# Superbatch boundaries are reporting and validation checkpoints.
 superbatch_positions = 500000000
-
-# 0 means validate at each superbatch boundary.
 validation_interval_positions = 0
-
-# Use a fixed 40M-position June holdout for validation.
 validation_positions = 40000000
 
 checkpoint_every = 25000
@@ -36,8 +28,6 @@ console_mode = "progress"
 learning_rate = 0.001
 weight_decay = 0.00002
 clip_grad_norm = 1.0
-# Mixed precision now uses PyTorch's generic AMP path when the selected
-# backend supports autocast/scaling.
 amp = true
 
 feature_set = "a768"

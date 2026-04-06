@@ -26,6 +26,7 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.superbatch_positions, 2_000)
         self.assertEqual(config.validation_interval_positions, 0)
         self.assertEqual(config.validation_positions, 0)
+        self.assertEqual(config.feature_set, "a768")
 
     def test_score_clip_and_score_scale_are_validated(self) -> None:
         with self.assertRaises(ValueError):
@@ -55,6 +56,27 @@ class ValidationConfigTests(unittest.TestCase):
                     "total_train_positions": 10_000,
                     "superbatch_positions": 1_000,
                     "console_mode": "json",
+                }
+            )
+
+    def test_a768_dual_alias_is_normalized_and_output_buckets_must_be_positive(self) -> None:
+        config = TrainConfig.from_dict(
+            {
+                "train_datasets": ["/tmp/train.binpack"],
+                "total_train_positions": 10_000,
+                "superbatch_positions": 1_000,
+                "feature_set": "a768_dual",
+            }
+        )
+        self.assertEqual(config.feature_set, "a768")
+
+        with self.assertRaises(ValueError):
+            TrainConfig.from_dict(
+                {
+                    "train_datasets": ["/tmp/train.binpack"],
+                    "total_train_positions": 10_000,
+                    "superbatch_positions": 1_000,
+                    "output_buckets": 0,
                 }
             )
 

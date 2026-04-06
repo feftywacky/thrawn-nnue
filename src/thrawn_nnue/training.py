@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 import json
@@ -91,6 +92,7 @@ def _create_state(config: TrainConfig) -> TrainState:
         num_features=config.num_features,
         ft_size=config.ft_size,
         hidden_size=config.hidden_size,
+        output_buckets=config.output_buckets,
     ).to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -98,7 +100,7 @@ def _create_state(config: TrainConfig) -> TrainState:
         weight_decay=config.weight_decay,
     )
     scheduler = _create_scheduler(config, optimizer, torch)
-    scaler = torch.cuda.amp.GradScaler(enabled=_cuda_amp_enabled(config, device))
+    scaler = _create_grad_scaler(torch, config, device)
 
     return TrainState(
         model=model,
@@ -114,7 +116,7 @@ def _create_state(config: TrainConfig) -> TrainState:
 
 def _run_training_loop(state: TrainState) -> None:
     torch = _require_torch()
-    autocast_enabled = _cuda_amp_enabled(state.config, state.device)
+    autocast_enabled = _amp_enabled(torch, state.config, state.device)
     reporter = create_console_reporter(state.config.console_mode)
     validation_interval_positions = _effective_validation_interval_positions(state.config)
     next_validation_positions = (
@@ -146,7 +148,8 @@ def _run_training_loop(state: TrainState) -> None:
             cyclic=True,
         ) as train_stream:
             while state.positions_seen < state.config.total_train_positions:
-                batch = train_stream.next_batch(state.config.batch_size)
+                remaining_positions = state.config.total_train_positions - state.positions_seen
+                batch = train_stream.next_batch(min(state.config.batch_size, remaining_positions))
                 if batch is None:
                     raise RuntimeError("Cyclic training stream unexpectedly returned EOF")
 
@@ -249,13 +252,15 @@ def _create_scheduler(config: TrainConfig, optimizer, torch):
 
 def _run_train_step(state: TrainState, batch, torch, *, autocast_enabled: bool):
     tensors = batch.to_torch(state.device)
+    bucket_indices = _output_bucket_indices(tensors["white_counts"], state.config.output_buckets, torch)
     state.model.train()
     state.optimizer.zero_grad(set_to_none=True)
-    with torch.cuda.amp.autocast(enabled=autocast_enabled):
+    with _autocast_context(torch, state.device, autocast_enabled):
         prediction_cp = state.model(
             tensors["white_indices"],
             tensors["black_indices"],
             tensors["stm"],
+            bucket_indices,
         )
         normalized_scores = _normalize_teacher_scores(tensors["score_cp"], state.config, torch)
         loss, teacher_loss, result_loss = _blended_loss(
@@ -309,7 +314,7 @@ def _normalize_teacher_scores(scores, config: TrainConfig, torch):
 
 def _run_validation(state: TrainState) -> dict[str, object]:
     torch = _require_torch()
-    autocast_enabled = _cuda_amp_enabled(state.config, state.device)
+    autocast_enabled = _amp_enabled(torch, state.config, state.device)
 
     total_loss = 0.0
     total_teacher_loss = 0.0
@@ -331,7 +336,10 @@ def _run_validation(state: TrainState) -> dict[str, object]:
             while True:
                 if remaining_positions == 0 and state.config.validation_positions > 0:
                     break
-                batch = validation_stream.next_batch(state.config.batch_size)
+                requested_batch_size = state.config.batch_size
+                if remaining_positions > 0:
+                    requested_batch_size = min(requested_batch_size, remaining_positions)
+                batch = validation_stream.next_batch(requested_batch_size)
                 if batch is None:
                     break
                 batch_positions = _batch_size(batch)
@@ -339,11 +347,13 @@ def _run_validation(state: TrainState) -> dict[str, object]:
                     remaining_positions -= batch_positions
 
                 tensors = batch.to_torch(state.device)
-                with torch.cuda.amp.autocast(enabled=autocast_enabled):
+                bucket_indices = _output_bucket_indices(tensors["white_counts"], state.config.output_buckets, torch)
+                with _autocast_context(torch, state.device, autocast_enabled):
                     prediction_cp = state.model(
                         tensors["white_indices"],
                         tensors["black_indices"],
                         tensors["stm"],
+                        bucket_indices,
                     )
                     normalized_scores = _normalize_teacher_scores(tensors["score_cp"], state.config, torch)
                     loss, teacher_loss, result_loss = _blended_loss(
@@ -445,8 +455,91 @@ def _mps_available(torch) -> bool:
     )
 
 
-def _cuda_amp_enabled(config: TrainConfig, device: str) -> bool:
-    return config.amp and device == "cuda"
+class _NullScaledLoss:
+    def __init__(self, loss):
+        self._loss = loss
+
+    def backward(self) -> None:
+        self._loss.backward()
+
+
+class _NullGradScaler:
+    def scale(self, loss):
+        return _NullScaledLoss(loss)
+
+    def unscale_(self, optimizer) -> None:
+        return None
+
+    def step(self, optimizer) -> None:
+        optimizer.step()
+
+    def update(self) -> None:
+        return None
+
+    def state_dict(self) -> dict[str, object]:
+        return {}
+
+    def load_state_dict(self, state: dict[str, object]) -> None:
+        return None
+
+
+def _amp_enabled(torch, config: TrainConfig, device: str) -> bool:
+    if not config.amp:
+        return False
+    if device not in {"cuda", "mps", "cpu", "xpu"}:
+        return False
+    if not hasattr(torch, "autocast"):
+        return device == "cuda" and hasattr(getattr(torch, "cuda", None), "amp")
+
+    autocast_mode = getattr(getattr(torch, "amp", None), "autocast_mode", None)
+    if autocast_mode is not None and hasattr(autocast_mode, "is_autocast_available"):
+        try:
+            return bool(autocast_mode.is_autocast_available(device))
+        except Exception:
+            return False
+
+    return device == "cuda"
+
+
+def _autocast_context(torch, device: str, enabled: bool):
+    if not enabled:
+        return nullcontext()
+    if hasattr(torch, "autocast"):
+        try:
+            return torch.autocast(device_type=device, enabled=True)
+        except TypeError:
+            return torch.autocast(device, enabled=True)
+    if device == "cuda" and hasattr(getattr(torch, "cuda", None), "amp"):
+        return torch.cuda.amp.autocast(enabled=True)
+    return nullcontext()
+
+
+def _create_grad_scaler(torch, config: TrainConfig, device: str):
+    enabled = _amp_enabled(torch, config, device)
+    amp_namespace = getattr(torch, "amp", None)
+    if amp_namespace is not None and hasattr(amp_namespace, "GradScaler"):
+        try:
+            return amp_namespace.GradScaler(device=device, enabled=enabled)
+        except TypeError:
+            try:
+                return amp_namespace.GradScaler(device, enabled=enabled)
+            except TypeError:
+                pass
+        except Exception:
+            if not enabled:
+                return _NullGradScaler()
+
+    if device == "cuda" and hasattr(getattr(torch, "cuda", None), "amp"):
+        return torch.cuda.amp.GradScaler(enabled=enabled)
+    return _NullGradScaler()
+
+
+def _output_bucket_indices(piece_counts, output_buckets: int, torch):
+    if output_buckets <= 1:
+        return None
+    clamped_counts = piece_counts.clamp(min=2, max=32).to(dtype=torch.long)
+    phase_progress = 32 - clamped_counts
+    return torch.clamp((phase_progress * output_buckets) // 31, max=output_buckets - 1)
 
 
 def _total_optimizer_steps(config: TrainConfig) -> int:

@@ -15,6 +15,7 @@ from thrawn_nnue.export import (
     _export_quantization_diagnostics,
     _exported_network_from_model,
     _fit_quantization_scale,
+    evaluate_export,
     load_export,
     _write_export,
 )
@@ -27,6 +28,7 @@ class ExportFormatTests(unittest.TestCase):
             num_features=768,
             ft_size=4,
             hidden_size=2,
+            output_buckets=3,
             ft_scale=127.0,
             dense_scale=64.0,
             wdl_scale=410.0,
@@ -34,8 +36,8 @@ class ExportFormatTests(unittest.TestCase):
             ft_weight=np.arange(768 * 4, dtype=np.int16).reshape(768, 4),
             l1_bias=np.array([7, -3], dtype=np.int32),
             l1_weight=np.arange(8 * 2, dtype=np.int8).reshape(8, 2),
-            out_bias=np.array([11], dtype=np.int32),
-            out_weight=np.array([[5], [-2]], dtype=np.int16),
+            out_bias=np.array([11, 13, 17], dtype=np.int32),
+            out_weight=np.array([[5, 6, 7], [-2, -3, -4]], dtype=np.int16),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -48,6 +50,7 @@ class ExportFormatTests(unittest.TestCase):
             self.assertEqual(loaded.num_features, 768)
             self.assertEqual(loaded.ft_size, 4)
             self.assertEqual(loaded.hidden_size, 2)
+            self.assertEqual(loaded.output_buckets, 3)
             self.assertTrue(np.array_equal(loaded.ft_bias, exported.ft_bias))
             self.assertTrue(np.array_equal(loaded.ft_weight, exported.ft_weight))
             self.assertTrue(np.array_equal(loaded.l1_bias, exported.l1_bias))
@@ -82,8 +85,8 @@ class ExportFormatTests(unittest.TestCase):
                 bias=FakeTensor([0.0, 0.0]),
             ),
             output=SimpleNamespace(
-                weight=FakeTensor([[4.0, -4.0]]),
-                bias=FakeTensor([0.0]),
+                weight=FakeTensor([[4.0, -4.0], [2.0, -2.0]]),
+                bias=FakeTensor([0.0, 0.0]),
             ),
         )
         config = SimpleNamespace(
@@ -91,6 +94,7 @@ class ExportFormatTests(unittest.TestCase):
             num_features=1,
             ft_size=1,
             hidden_size=2,
+            output_buckets=2,
             export_ft_scale=127.0,
             export_dense_scale=64.0,
             wdl_scale=410.0,
@@ -105,6 +109,34 @@ class ExportFormatTests(unittest.TestCase):
         self.assertEqual(diagnostics["out_weight"]["positive_limit_hits"], 0.0)
         self.assertEqual(diagnostics["out_weight"]["negative_limit_hits"], 0.0)
         self.assertGreater(diagnostics["out_weight"]["max_abs_quantized"], 127.0)
+
+    def test_evaluate_export_selects_phase_bucket(self) -> None:
+        exported = ExportedNetwork(
+            description="fixture",
+            num_features=768,
+            ft_size=1,
+            hidden_size=1,
+            output_buckets=8,
+            ft_scale=1.0,
+            dense_scale=1.0,
+            wdl_scale=410.0,
+            ft_bias=np.zeros(1, dtype=np.int16),
+            ft_weight=np.zeros((768, 1), dtype=np.int16),
+            l1_bias=np.zeros(1, dtype=np.int32),
+            l1_weight=np.zeros((2, 1), dtype=np.int8),
+            out_bias=np.arange(8, dtype=np.int32),
+            out_weight=np.zeros((1, 8), dtype=np.int16),
+        )
+
+        outputs = evaluate_export(
+            exported,
+            [
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                "8/8/8/8/8/8/8/K6k w - - 0 1",
+            ],
+        )
+
+        self.assertEqual(outputs, [0.0, 7.0])
 
 
 if __name__ == "__main__":

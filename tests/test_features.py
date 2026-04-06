@@ -12,6 +12,7 @@ from thrawn_nnue.features import (
     extract_dual_perspective,
     feature_index,
     orient_square,
+    output_bucket_index,
     padded_feature_indices,
 )
 
@@ -38,6 +39,11 @@ class FeatureTests(unittest.TestCase):
         real = [i for i in indices if i >= 0]
         self.assertEqual(indices[: len(real)], real)
         self.assertTrue(all(i == -1 for i in indices[len(real) :]))
+
+    def test_output_buckets_move_from_opening_to_endgame(self) -> None:
+        self.assertEqual(output_bucket_index(32, 8), 0)
+        self.assertEqual(output_bucket_index(2, 8), 7)
+        self.assertLess(output_bucket_index(24, 8), output_bucket_index(8, 8))
 
 
 if __name__ == "__main__":

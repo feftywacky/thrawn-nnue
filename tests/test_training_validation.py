@@ -207,6 +207,33 @@ class ValidationTrainingTests(unittest.TestCase):
             self.assertEqual(metrics["validation_batches"], math.ceil(valid_entries / 2))
             self.assertEqual(metrics["validation_positions"], valid_entries)
 
+    def test_validation_position_budget_is_exact_for_partial_last_batch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            train_path = tmp / "train.binpack"
+            valid_path = tmp / "valid.binpack"
+            write_fixture_binpack(train_path)
+            write_fixture_binpack(valid_path)
+
+            config = TrainConfig.from_dict(
+                {
+                    "train_datasets": [str(train_path)],
+                    "validation_datasets": [str(valid_path)],
+                    "validation_positions": 1,
+                    "total_train_positions": 10_000,
+                    "superbatch_positions": 1_000,
+                    "output_dir": str(tmp / "run"),
+                    "device": "cpu",
+                    "batch_size": 2,
+                }
+            )
+
+            state = _create_state(config)
+            metrics = _run_validation(state)
+
+            self.assertEqual(metrics["validation_batches"], 1)
+            self.assertEqual(metrics["validation_positions"], 1)
+
     def test_training_stops_on_position_budget_and_resume_continues_from_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
@@ -238,8 +265,8 @@ class ValidationTrainingTests(unittest.TestCase):
 
             final_payload = load_checkpoint(final_checkpoint)
             resumed_payload = load_checkpoint(resumed_checkpoint)
-            self.assertGreaterEqual(final_payload["positions_seen"], config.total_train_positions)
-            self.assertGreaterEqual(resumed_payload["positions_seen"], config.total_train_positions)
+            self.assertEqual(final_payload["positions_seen"], config.total_train_positions)
+            self.assertEqual(resumed_payload["positions_seen"], config.total_train_positions)
             self.assertEqual(resumed_payload["global_step"], final_payload["global_step"])
 
     def test_final_validation_runs_even_if_interval_is_not_reached(self) -> None:

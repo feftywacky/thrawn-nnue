@@ -64,10 +64,13 @@ thrawn-nnue metrics --run-dir runs/default
 ## Operating The Trainer
 
 - Treat `total_train_positions` as the real run budget. The trainer is no longer organized around epochs.
+- Multiple `train_datasets` are interleaved through the native chunk reader, so a Jan-May list is sampled across all shards instead of being consumed one file at a time.
 - Use `superbatch_positions` as a reporting boundary and as the default validation boundary when `validation_interval_positions = 0`.
 - Use `validation_positions = 0` for a full held-out pass, or set it to a smaller fixed position budget for faster iteration.
 - Run `inspect-binpack` on a representative shard before long training runs to choose `wdl_scale`, `score_clip`, and `score_scale`.
 - Watch validation metrics, especially blended loss, `wdl_accuracy`, and `teacher_result_disagreement_rate`, rather than train loss alone.
+- `feature_set = "a768"` is the preferred config spelling; the older `a768_dual` alias is still accepted.
+- Set `output_buckets = 8` for production-style runs so the final layer can separate opening and endgame behavior while keeping the same dual-accumulator update path.
 - Export `checkpoints/best.pt` by default, then verify parity and engine strength in the engine repo.
 
 ## Documentation
@@ -96,5 +99,6 @@ thrawn-nnue metrics --run-dir runs/default
 - `superbatch_positions` is a reporting and default-validation boundary, not an epoch.
 - `validation_interval_positions = 0` means validate at each superbatch boundary.
 - `validation_positions = 0` means one full validation-corpus pass.
+- `validation_positions > 0` is now respected exactly, including the last partial batch.
 - Dataset inspection is intended to drive `wdl_scale`, `score_clip`, and `score_scale` choices before a long training run.
 - Train and validation shard lists must not overlap; same-game dedup remains a data-prep responsibility outside the trainer.

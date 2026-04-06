@@ -34,7 +34,7 @@ Read the header and tensor layout documented in [nnue_format.md](/Users/feiyulin
 Validate:
 
 - magic is `THNNUE\0\1`
-- version is `2` for current exports
+- version is `3` for current exports
 - feature set is `a768_dual_v1`
 - dimensions match your engine build
 
@@ -66,6 +66,7 @@ At evaluation time:
 5. Apply the first dense layer.
 6. Apply clipped ReLU again.
 7. Apply the final output layer.
+   If `output_buckets > 1`, choose the bucket from the board's total piece count using the same trainer rule before reading the scalar output.
 
 If you want integer inference, keep the quantized weights and use the scales from [nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md).
 

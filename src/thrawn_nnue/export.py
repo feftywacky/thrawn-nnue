@@ -8,14 +8,16 @@ from typing import Any
 import numpy as np
 
 from .board import BoardState
-from .features import active_feature_indices
+from .features import active_feature_indices, output_bucket_index
 
 
 MAGIC = b"THNNUE\x00\x01"
-VERSION = 2
+VERSION = 3
 FEATURE_SET_ID = "a768_dual_v1"
 OUTPUT_PERSPECTIVE_STM = 1
-HEADER_STRUCT = struct.Struct("<8sI16sIIIIfffI")
+HEADER_PREFIX_STRUCT = struct.Struct("<8sI")
+LEGACY_HEADER_REST_STRUCT = struct.Struct("<16sIIIIfffI")
+HEADER_REST_STRUCT = struct.Struct("<16sIIIIIfffI")
 DEFAULT_VERIFICATION_FENS = [
     "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
     "r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/2P5/PP3PPP/RNBQKBNR b KQkq - 0 3",
@@ -29,6 +31,7 @@ class ExportedNetwork:
     num_features: int
     ft_size: int
     hidden_size: int
+    output_buckets: int
     ft_scale: float
     dense_scale: float
     wdl_scale: float
@@ -60,6 +63,7 @@ def export_checkpoint(checkpoint_path: str | Path, output_path: str | Path) -> P
         num_features=config.num_features,
         ft_size=config.ft_size,
         hidden_size=config.hidden_size,
+        output_buckets=config.output_buckets,
     )
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
@@ -74,27 +78,49 @@ def export_checkpoint(checkpoint_path: str | Path, output_path: str | Path) -> P
 
 def load_export(path: str | Path) -> ExportedNetwork:
     with Path(path).open("rb") as handle:
-        raw_header = handle.read(HEADER_STRUCT.size)
-        if len(raw_header) != HEADER_STRUCT.size:
+        raw_prefix = handle.read(HEADER_PREFIX_STRUCT.size)
+        if len(raw_prefix) != HEADER_PREFIX_STRUCT.size:
             raise ValueError("File too small to contain a Thrawn NNUE header")
-        (
-            magic,
-            version,
-            feature_set,
-            num_features,
-            ft_size,
-            hidden_size,
-            output_perspective,
-            ft_scale,
-            dense_scale,
-            wdl_scale,
-            description_length,
-        ) = HEADER_STRUCT.unpack(raw_header)
+        magic, version = HEADER_PREFIX_STRUCT.unpack(raw_prefix)
 
         if magic != MAGIC:
             raise ValueError("Unexpected .nnue magic")
-        if version not in {1, VERSION}:
+        if version not in {1, 2, VERSION}:
             raise ValueError(f"Unsupported .nnue version: {version}")
+
+        if version in {1, 2}:
+            raw_rest = handle.read(LEGACY_HEADER_REST_STRUCT.size)
+            if len(raw_rest) != LEGACY_HEADER_REST_STRUCT.size:
+                raise ValueError("File too small to contain a legacy Thrawn NNUE header")
+            (
+                feature_set,
+                num_features,
+                ft_size,
+                hidden_size,
+                output_perspective,
+                ft_scale,
+                dense_scale,
+                wdl_scale,
+                description_length,
+            ) = LEGACY_HEADER_REST_STRUCT.unpack(raw_rest)
+            output_buckets = 1
+        else:
+            raw_rest = handle.read(HEADER_REST_STRUCT.size)
+            if len(raw_rest) != HEADER_REST_STRUCT.size:
+                raise ValueError("File too small to contain a Thrawn NNUE header")
+            (
+                feature_set,
+                num_features,
+                ft_size,
+                hidden_size,
+                output_buckets,
+                output_perspective,
+                ft_scale,
+                dense_scale,
+                wdl_scale,
+                description_length,
+            ) = HEADER_REST_STRUCT.unpack(raw_rest)
+
         if feature_set.rstrip(b"\x00").decode("ascii") != FEATURE_SET_ID:
             raise ValueError("Unexpected feature-set identifier")
         if output_perspective != OUTPUT_PERSPECTIVE_STM:
@@ -107,16 +133,20 @@ def load_export(path: str | Path) -> ExportedNetwork:
         l1_bias = np.frombuffer(handle.read(hidden_size * 4), dtype="<i4").copy()
         l1_weight = np.frombuffer(handle.read(ft_size * 2 * hidden_size), dtype=np.int8).copy()
         l1_weight = l1_weight.reshape(ft_size * 2, hidden_size)
-        out_bias = np.frombuffer(handle.read(4), dtype="<i4").copy()
+        out_bias = np.frombuffer(handle.read(output_buckets * 4), dtype="<i4").copy()
         if version == 1:
             out_weight = np.frombuffer(handle.read(hidden_size), dtype=np.int8).copy().reshape(hidden_size, 1)
         else:
-            out_weight = np.frombuffer(handle.read(hidden_size * 2), dtype="<i2").copy().reshape(hidden_size, 1)
+            out_weight = np.frombuffer(
+                handle.read(hidden_size * output_buckets * 2),
+                dtype="<i2",
+            ).copy().reshape(hidden_size, output_buckets)
         return ExportedNetwork(
             description=description,
             num_features=num_features,
             ft_size=ft_size,
             hidden_size=hidden_size,
+            output_buckets=output_buckets,
             ft_scale=ft_scale,
             dense_scale=dense_scale,
             wdl_scale=wdl_scale,
@@ -141,6 +171,7 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
         num_features=config.num_features,
         ft_size=config.ft_size,
         hidden_size=config.hidden_size,
+        output_buckets=config.output_buckets,
     )
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
@@ -149,11 +180,15 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
     with torch.no_grad():
         predictions = []
         for fen in fens:
-            white_indices, black_indices, stm = _batch_arrays_from_fens([fen])
+            white_indices, black_indices, stm, bucket_indices = _batch_arrays_from_fens(
+                [fen],
+                output_buckets=config.output_buckets,
+            )
             pred = model(
                 torch.from_numpy(white_indices).long(),
                 torch.from_numpy(black_indices).long(),
                 torch.from_numpy(stm).float().unsqueeze(1),
+                torch.from_numpy(bucket_indices).long(),
             )
             predictions.append(float(pred.squeeze().cpu().item()))
 
@@ -195,8 +230,9 @@ def evaluate_export(exported: ExportedNetwork, fens: list[str]) -> list[float]:
             combined = np.concatenate([black_acc, white_acc], axis=0)
         hidden = np.clip(combined, 0.0, 1.0)
         hidden = np.clip(hidden @ l1_weight + l1_bias, 0.0, 1.0)
-        output = hidden @ out_weight[:, 0] + out_bias[0]
-        results.append(float(output))
+        output = hidden @ out_weight + out_bias
+        bucket = output_bucket_index(len(board.board), exported.output_buckets)
+        results.append(float(output[bucket]))
     return results
 
 
@@ -215,6 +251,7 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
         num_features=config.num_features,
         ft_size=config.ft_size,
         hidden_size=config.hidden_size,
+        output_buckets=config.output_buckets,
         ft_scale=ft_scale,
         dense_scale=dense_scale,
         wdl_scale=config.wdl_scale,
@@ -275,13 +312,15 @@ def _quantized_tensor_stats(values: np.ndarray) -> dict[str, float]:
 def _write_export(handle, exported: ExportedNetwork) -> None:
     feature_set_bytes = FEATURE_SET_ID.encode("ascii").ljust(16, b"\x00")
     description_bytes = exported.description.encode("utf-8")
-    header = HEADER_STRUCT.pack(
+    header = HEADER_PREFIX_STRUCT.pack(
         MAGIC,
         VERSION,
+    ) + HEADER_REST_STRUCT.pack(
         feature_set_bytes,
         exported.num_features,
         exported.ft_size,
         exported.hidden_size,
+        exported.output_buckets,
         OUTPUT_PERSPECTIVE_STM,
         float(exported.ft_scale),
         float(exported.dense_scale),
@@ -298,10 +337,15 @@ def _write_export(handle, exported: ExportedNetwork) -> None:
     handle.write(exported.out_weight.astype("<i2").tobytes())
 
 
-def _batch_arrays_from_fens(fens: list[str]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _batch_arrays_from_fens(
+    fens: list[str],
+    *,
+    output_buckets: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     white_indices = []
     black_indices = []
     stm = []
+    bucket_indices = []
     for fen in fens:
         board = BoardState.from_fen(fen)
         white = active_feature_indices(board, "white")
@@ -309,8 +353,10 @@ def _batch_arrays_from_fens(fens: list[str]) -> tuple[np.ndarray, np.ndarray, np
         white_indices.append(white + [-1] * (32 - len(white)))
         black_indices.append(black + [-1] * (32 - len(black)))
         stm.append(1.0 if board.side_to_move == "w" else 0.0)
+        bucket_indices.append(output_bucket_index(len(board.board), output_buckets))
     return (
         np.asarray(white_indices, dtype=np.int32),
         np.asarray(black_indices, dtype=np.int32),
         np.asarray(stm, dtype=np.float32),
+        np.asarray(bucket_indices, dtype=np.int64),
     )
