@@ -4,6 +4,8 @@ This repository is trainer-only. The output artifact your engine needs is the ex
 
 If you want AVX2, AVX-512, or NEON optimization, that work belongs in the engine repo, not here. This trainer produces and exports weights; your engine owns quantized inference, SIMD kernels, accumulator update speed, and cross-architecture parity.
 
+For a concrete engine-side optimization guide, see [simd_optimization.md](/Users/feiyulin/Code/thrawn-nnue/docs/simd_optimization.md).
+
 ## What the native code in this repo is for
 
 The code in [native_binpack/](/Users/feiyulin/Code/thrawn-nnue/native_binpack) is trainer-side infrastructure, not engine inference code.
