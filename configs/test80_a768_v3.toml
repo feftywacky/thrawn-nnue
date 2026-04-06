@@ -19,22 +19,22 @@ num_loader_threads = 12
 batch_size = 16384
 
 # Primary budget is positions seen. This tuning run targets 20B positions.
-total_train_positions = 20000000000
+total_train_positions = 25000000000
 
-# Validate every 0.5B positions so divergence shows up earlier.
-superbatch_positions = 500000000
+# Validate every 1B positions so divergence shows up earlier.
+superbatch_positions = 1000000000
 
 # 0 means validate at each superbatch boundary.
 validation_interval_positions = 0
 
 # 0 means one full June validation pass.
-validation_positions = 0
+validation_positions = 20000000
 
 checkpoint_every = 25000
 log_every = 25
 console_mode = "progress"
 
-learning_rate = 0.0004
+learning_rate = 0.0003
 weight_decay = 0.00002
 clip_grad_norm = 1.0
 # mixed precision is currently enabled only for CUDA
@@ -50,9 +50,9 @@ hidden_size = 128
 output_perspective = "stm"
 
 score_clip = 16000.0
-score_scale = 4.0
-wdl_scale = 2000.0
-eval_lambda = 0.75
+score_scale = 10.0
+wdl_scale = 8000.0
+eval_lambda = 0.7
 lr_drop_fractions = [0.80, 0.95]
 lr_drop_factor = 0.1
 
