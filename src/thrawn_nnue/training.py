@@ -30,10 +30,10 @@ class TrainState:
     run_dir: Path
     metrics_path: Path
     best_validation_loss: float | None = None
-    best_validation_step: int | None = None
-    epoch: int = 0
-    step_in_epoch: int = 0
+    best_validation_positions: int | None = None
     global_step: int = 0
+    positions_seen: int = 0
+    superbatch_index: int = 0
 
 
 def train_from_config(config: TrainConfig, *, console_mode: str | None = None) -> Path:
@@ -65,10 +65,10 @@ def resume_training(checkpoint_path: str | Path, *, console_mode: str | None = N
         state.scaler.load_state_dict(payload["scaler_state"])
     restore_rng_state(payload["rng_state"])
     state.best_validation_loss = payload.get("best_validation_loss")
-    state.best_validation_step = payload.get("best_validation_step")
-    state.epoch = int(payload["epoch"])
-    state.step_in_epoch = int(payload["step_in_epoch"])
+    state.best_validation_positions = _payload_best_validation_positions(payload, config)
     state.global_step = int(payload["global_step"])
+    state.positions_seen = _payload_positions_seen(payload, config)
+    state.superbatch_index = _payload_superbatch_index(payload, config)
     state.model.to(state.device)
     _run_training_loop(state)
     final_checkpoint = state.run_dir / "checkpoints" / f"step_{state.global_step:08d}.pt"
@@ -116,170 +116,59 @@ def _run_training_loop(state: TrainState) -> None:
     torch = _require_torch()
     autocast_enabled = _cuda_amp_enabled(state.config, state.device)
     reporter = create_console_reporter(state.config.console_mode)
-    total_steps = 0 if state.config.steps_per_epoch == 0 else state.config.max_epochs * state.config.steps_per_epoch
+    validation_interval_positions = _effective_validation_interval_positions(state.config)
+    next_validation_positions = (
+        None
+        if not state.config.validation_datasets
+        else _next_validation_positions(state.positions_seen, validation_interval_positions)
+    )
+    last_validation_positions: int | None = None
+
     reporter.startup(
         ConsoleContext(
             run_name=state.config.run_name,
             device=state.device,
             train_shards=len(state.config.train_datasets),
             validation_shards=len(state.config.validation_datasets),
-            total_steps=total_steps,
-            initial_global_step=state.global_step,
-            max_epochs=state.config.max_epochs,
-            steps_per_epoch=state.config.steps_per_epoch,
+            total_train_positions=state.config.total_train_positions,
+            initial_positions_seen=state.positions_seen,
+            batch_size=state.config.batch_size,
+            superbatch_positions=state.config.superbatch_positions,
+            validation_interval_positions=validation_interval_positions,
             log_every=state.config.log_every,
         )
     )
 
     try:
-        if state.config.steps_per_epoch == 0:
-            _run_full_pass_training_loop(state, reporter, torch, autocast_enabled)
-            return
-
         with BinpackStream(
             state.config.train_datasets,
             num_threads=state.config.num_loader_threads,
             cyclic=True,
         ) as train_stream:
-            for epoch in range(state.epoch, state.config.max_epochs):
-                start_step = state.step_in_epoch if epoch == state.epoch else 0
-                for step_in_epoch in range(start_step, state.config.steps_per_epoch):
-                    batch = train_stream.next_batch(state.config.batch_size)
-                    if batch is None:
-                        raise RuntimeError("Cyclic training stream unexpectedly returned EOF")
-
-                    loss, eval_loss, result_loss = _run_train_step(
-                        state,
-                        batch,
-                        torch,
-                        autocast_enabled=autocast_enabled,
-                    )
-                    if state.scheduler is not None:
-                        state.scheduler.step()
-
-                    state.global_step += 1
-                    state.step_in_epoch = step_in_epoch + 1
-                    current_loss = float(loss.detach().cpu().item())
-                    current_lr = float(state.optimizer.param_groups[0]["lr"])
-                    reporter.update_train(
-                        epoch=epoch,
-                        step_in_epoch=state.step_in_epoch,
-                        global_step=state.global_step,
-                        loss=current_loss,
-                        lr=current_lr,
-                    )
-
-                    if state.global_step % state.config.log_every == 0:
-                        _log_metrics(
-                            state,
-                            {
-                                "event": "train",
-                                "epoch": epoch,
-                                "step_in_epoch": step_in_epoch,
-                                "global_step": state.global_step,
-                                "loss": current_loss,
-                                "eval_loss": float(eval_loss.detach().cpu().item()),
-                                "result_loss": float(result_loss.detach().cpu().item()),
-                                "lr": current_lr,
-                            },
-                        )
-
-                    if state.global_step % state.config.checkpoint_every == 0:
-                        checkpoint_path = state.run_dir / "checkpoints" / f"step_{state.global_step:08d}.pt"
-                        _save_training_checkpoint(state, checkpoint_path, epoch=epoch, step_in_epoch=state.step_in_epoch)
-                        reporter.checkpoint_saved(str(checkpoint_path), is_best=False)
-
-                    if _should_run_validation(state):
-                        reporter.validation_started(global_step=state.global_step)
-                        metrics = _run_validation(state)
-                        is_best = _maybe_update_best_checkpoint(state, float(metrics["validation_loss"]))
-                        metrics["is_best"] = is_best
-                        _log_metrics(state, metrics)
-                        reporter.validation_finished(metrics, is_best=is_best)
-                        if is_best:
-                            reporter.checkpoint_saved(
-                                str(state.run_dir / "checkpoints" / "best.pt"),
-                                is_best=True,
-                            )
-
-                state.epoch = epoch + 1
-                state.step_in_epoch = 0
-    finally:
-        reporter.close()
-
-
-def _save_training_checkpoint(
-    state: TrainState,
-    checkpoint_path: Path,
-    *,
-    epoch: int | None = None,
-    step_in_epoch: int | None = None,
-) -> None:
-    save_checkpoint(
-        checkpoint_path,
-        model=state.model,
-        optimizer=state.optimizer,
-        scheduler=state.scheduler,
-        scaler=state.scaler,
-        config=state.config.to_dict(),
-        epoch=state.epoch if epoch is None else epoch,
-        step_in_epoch=state.step_in_epoch if step_in_epoch is None else step_in_epoch,
-        global_step=state.global_step,
-        best_validation_loss=state.best_validation_loss,
-        best_validation_step=state.best_validation_step,
-    )
-
-
-def _resolve_runtime_config(config: TrainConfig) -> None:
-    config.validate()
-
-
-def _create_scheduler(config: TrainConfig, optimizer, torch):
-    if config.steps_per_epoch == 0:
-        return torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=config.max_epochs,
-        )
-    return torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=config.max_epochs * config.steps_per_epoch,
-    )
-
-
-def _run_full_pass_training_loop(state: TrainState, reporter, torch, autocast_enabled: bool) -> None:
-    for epoch in range(state.epoch, state.config.max_epochs):
-        step_in_epoch = 0
-        skipped_batches = 0
-        start_step = state.step_in_epoch if epoch == state.epoch else 0
-        with BinpackStream(
-            state.config.train_datasets,
-            num_threads=state.config.num_loader_threads,
-            cyclic=False,
-        ) as train_stream:
-            while True:
+            while state.positions_seen < state.config.total_train_positions:
                 batch = train_stream.next_batch(state.config.batch_size)
                 if batch is None:
-                    break
-                if skipped_batches < start_step:
-                    skipped_batches += 1
-                    continue
+                    raise RuntimeError("Cyclic training stream unexpectedly returned EOF")
 
-                loss, eval_loss, result_loss = _run_train_step(
+                batch_positions = _batch_size(batch)
+                loss, teacher_loss, result_loss = _run_train_step(
                     state,
                     batch,
                     torch,
                     autocast_enabled=autocast_enabled,
                 )
+                if state.scheduler is not None:
+                    state.scheduler.step()
 
                 state.global_step += 1
-                step_in_epoch += 1
-                state.step_in_epoch = start_step + step_in_epoch
+                state.positions_seen += batch_positions
+                state.superbatch_index = _superbatch_index(state.positions_seen, state.config.superbatch_positions)
                 current_loss = float(loss.detach().cpu().item())
                 current_lr = float(state.optimizer.param_groups[0]["lr"])
                 reporter.update_train(
-                    epoch=epoch,
-                    step_in_epoch=state.step_in_epoch,
                     global_step=state.global_step,
+                    positions_seen=state.positions_seen,
+                    superbatch_index=state.superbatch_index,
                     loss=current_loss,
                     lr=current_lr,
                 )
@@ -289,33 +178,73 @@ def _run_full_pass_training_loop(state: TrainState, reporter, torch, autocast_en
                         state,
                         {
                             "event": "train",
-                            "epoch": epoch,
-                            "step_in_epoch": state.step_in_epoch - 1,
                             "global_step": state.global_step,
+                            "positions_seen": state.positions_seen,
+                            "superbatch_index": state.superbatch_index,
+                            "batch_positions": batch_positions,
                             "loss": current_loss,
-                            "eval_loss": float(eval_loss.detach().cpu().item()),
+                            "teacher_loss": float(teacher_loss.detach().cpu().item()),
                             "result_loss": float(result_loss.detach().cpu().item()),
                             "lr": current_lr,
                         },
                     )
 
+                if next_validation_positions is not None and state.positions_seen >= next_validation_positions:
+                    _run_validation_and_report(state, reporter)
+                    last_validation_positions = state.positions_seen
+                    next_validation_positions = _next_validation_positions(
+                        state.positions_seen,
+                        validation_interval_positions,
+                    )
+
                 if state.global_step % state.config.checkpoint_every == 0:
                     checkpoint_path = state.run_dir / "checkpoints" / f"step_{state.global_step:08d}.pt"
-                    _save_training_checkpoint(state, checkpoint_path, epoch=epoch, step_in_epoch=state.step_in_epoch)
+                    _save_training_checkpoint(state, checkpoint_path)
                     reporter.checkpoint_saved(str(checkpoint_path), is_best=False)
 
-                if state.config.validation_every > 0 and state.global_step % state.config.validation_every == 0:
-                    _run_validation_and_report(state, reporter)
-
-        if step_in_epoch == 0 and start_step == 0:
-            raise ValueError("Full-pass training datasets must yield at least one batch")
-
-        state.epoch = epoch + 1
-        state.step_in_epoch = 0
-        if state.scheduler is not None:
-            state.scheduler.step()
-        if state.config.validation_every == 0:
+        if state.config.validation_datasets and last_validation_positions != state.positions_seen:
             _run_validation_and_report(state, reporter)
+    finally:
+        reporter.close()
+
+
+def _save_training_checkpoint(state: TrainState, checkpoint_path: Path) -> None:
+    save_checkpoint(
+        checkpoint_path,
+        model=state.model,
+        optimizer=state.optimizer,
+        scheduler=state.scheduler,
+        scaler=state.scaler,
+        config=state.config.to_dict(),
+        global_step=state.global_step,
+        positions_seen=state.positions_seen,
+        superbatch_index=state.superbatch_index,
+        best_validation_loss=state.best_validation_loss,
+        best_validation_positions=state.best_validation_positions,
+    )
+
+
+def _resolve_runtime_config(config: TrainConfig) -> None:
+    config.validate()
+
+
+def _create_scheduler(config: TrainConfig, optimizer, torch):
+    total_steps = _total_optimizer_steps(config)
+    milestones = sorted(
+        {
+            milestone
+            for milestone in (
+                int(math.floor(total_steps * float(fraction)))
+                for fraction in config.lr_drop_fractions
+            )
+            if 0 < milestone < total_steps
+        }
+    )
+    return torch.optim.lr_scheduler.MultiStepLR(
+        optimizer,
+        milestones=milestones,
+        gamma=config.lr_drop_factor,
+    )
 
 
 def _run_train_step(state: TrainState, batch, torch, *, autocast_enabled: bool):
@@ -329,12 +258,12 @@ def _run_train_step(state: TrainState, batch, torch, *, autocast_enabled: bool):
             tensors["stm"],
         )
         normalized_scores = _normalize_teacher_scores(tensors["score_cp"], state.config, torch)
-        loss, eval_loss, result_loss = _blended_loss(
+        loss, teacher_loss, result_loss = _blended_loss(
             prediction_cp,
             normalized_scores,
             tensors["result_wdl"],
             state.config.wdl_scale,
-            state.config.result_lambda,
+            state.config.eval_lambda,
             torch,
         )
 
@@ -343,11 +272,11 @@ def _run_train_step(state: TrainState, batch, torch, *, autocast_enabled: bool):
     torch.nn.utils.clip_grad_norm_(state.model.parameters(), state.config.clip_grad_norm)
     state.scaler.step(state.optimizer)
     state.scaler.update()
-    return loss, eval_loss, result_loss
+    return loss, teacher_loss, result_loss
 
 
 def _run_validation_and_report(state: TrainState, reporter) -> None:
-    reporter.validation_started(global_step=state.global_step)
+    reporter.validation_started(global_step=state.global_step, positions_seen=state.positions_seen)
     metrics = _run_validation(state)
     is_best = _maybe_update_best_checkpoint(state, float(metrics["validation_loss"]))
     metrics["is_best"] = is_best
@@ -360,21 +289,13 @@ def _run_validation_and_report(state: TrainState, reporter) -> None:
         )
 
 
-def _should_run_validation(state: TrainState) -> bool:
-    if not state.config.validation_datasets:
-        return False
-    if state.config.validation_every == 0:
-        return state.step_in_epoch >= state.config.steps_per_epoch
-    return state.global_step % state.config.validation_every == 0
-
-
-def _blended_loss(prediction_cp, target_cp, result_wdl, wdl_scale: float, result_lambda: float, torch):
-    pred_wdl = torch.sigmoid(prediction_cp / wdl_scale)
-    target_wdl = torch.sigmoid(target_cp / wdl_scale)
-    eval_loss = torch.mean((pred_wdl - target_wdl) ** 2)
+def _blended_loss(prediction_cp, target_cp, result_wdl, wdl_scale: float, eval_lambda: float, torch):
+    pred_wdl = _wdl_from_cp(prediction_cp, wdl_scale, torch)
+    target_wdl = _wdl_from_cp(target_cp, wdl_scale, torch)
+    teacher_loss = torch.mean((pred_wdl - target_wdl) ** 2)
     result_loss = torch.mean((pred_wdl - result_wdl) ** 2)
-    loss = result_lambda * eval_loss + (1.0 - result_lambda) * result_loss
-    return loss, eval_loss, result_loss
+    loss = eval_lambda * teacher_loss + (1.0 - eval_lambda) * result_loss
+    return loss, teacher_loss, result_loss
 
 
 def _normalize_teacher_scores(scores, config: TrainConfig, torch):
@@ -391,8 +312,11 @@ def _run_validation(state: TrainState) -> dict[str, object]:
     autocast_enabled = _cuda_amp_enabled(state.config, state.device)
 
     total_loss = 0.0
-    total_eval_loss = 0.0
+    total_teacher_loss = 0.0
     total_result_loss = 0.0
+    total_positions = 0
+    total_correct = 0
+    total_teacher_result_disagreement = 0
     batches = 0
 
     was_training = state.model.training
@@ -403,15 +327,16 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         cyclic=False,
     ) as validation_stream:
         with torch.no_grad():
-            remaining_steps = state.config.validation_steps
+            remaining_positions = state.config.validation_positions
             while True:
-                if remaining_steps == 0 and state.config.validation_steps > 0:
+                if remaining_positions == 0 and state.config.validation_positions > 0:
                     break
                 batch = validation_stream.next_batch(state.config.batch_size)
                 if batch is None:
                     break
-                if remaining_steps > 0:
-                    remaining_steps -= 1
+                batch_positions = _batch_size(batch)
+                if remaining_positions > 0:
+                    remaining_positions -= batch_positions
 
                 tensors = batch.to_torch(state.device)
                 with torch.cuda.amp.autocast(enabled=autocast_enabled):
@@ -421,33 +346,52 @@ def _run_validation(state: TrainState) -> dict[str, object]:
                         tensors["stm"],
                     )
                     normalized_scores = _normalize_teacher_scores(tensors["score_cp"], state.config, torch)
-                    loss, eval_loss, result_loss = _blended_loss(
+                    loss, teacher_loss, result_loss = _blended_loss(
                         prediction_cp,
                         normalized_scores,
                         tensors["result_wdl"],
                         state.config.wdl_scale,
-                        state.config.result_lambda,
+                        state.config.eval_lambda,
                         torch,
                     )
 
-                total_loss += float(loss.detach().cpu().item())
-                total_eval_loss += float(eval_loss.detach().cpu().item())
-                total_result_loss += float(result_loss.detach().cpu().item())
+                pred_wdl = _wdl_from_cp(prediction_cp, state.config.wdl_scale, torch)
+                target_wdl = _wdl_from_cp(normalized_scores, state.config.wdl_scale, torch)
+                result_bucket = _wdl_bucket(tensors["result_wdl"])
+                pred_bucket = _wdl_bucket(pred_wdl)
+                target_bucket = _wdl_bucket(target_wdl)
+
+                total_loss += float(loss.detach().cpu().item()) * batch_positions
+                total_teacher_loss += float(teacher_loss.detach().cpu().item()) * batch_positions
+                total_result_loss += float(result_loss.detach().cpu().item()) * batch_positions
+                total_correct += int((pred_bucket == result_bucket).sum().detach().cpu().item())
+                total_teacher_result_disagreement += int(
+                    (target_bucket != result_bucket).sum().detach().cpu().item()
+                )
+                total_positions += batch_positions
                 batches += 1
 
     if was_training:
         state.model.train()
 
-    average_loss = math.inf if batches == 0 else total_loss / batches
-    average_eval_loss = math.inf if batches == 0 else total_eval_loss / batches
-    average_result_loss = math.inf if batches == 0 else total_result_loss / batches
+    average_loss = math.inf if total_positions == 0 else total_loss / total_positions
+    average_teacher_loss = math.inf if total_positions == 0 else total_teacher_loss / total_positions
+    average_result_loss = math.inf if total_positions == 0 else total_result_loss / total_positions
+    wdl_accuracy = 0.0 if total_positions == 0 else total_correct / total_positions
+    teacher_result_disagreement_rate = (
+        0.0 if total_positions == 0 else total_teacher_result_disagreement / total_positions
+    )
 
     return {
         "event": "validation",
         "global_step": state.global_step,
+        "positions_seen": state.positions_seen,
         "validation_loss": average_loss,
-        "validation_eval_loss": average_eval_loss,
+        "validation_teacher_loss": average_teacher_loss,
         "validation_result_loss": average_result_loss,
+        "wdl_accuracy": wdl_accuracy,
+        "teacher_result_disagreement_rate": teacher_result_disagreement_rate,
+        "validation_positions": total_positions,
         "validation_batches": batches,
     }
 
@@ -460,7 +404,7 @@ def _maybe_update_best_checkpoint(state: TrainState, validation_loss: float) -> 
         return False
 
     state.best_validation_loss = validation_loss
-    state.best_validation_step = state.global_step
+    state.best_validation_positions = state.positions_seen
     best_checkpoint_path = state.run_dir / "checkpoints" / "best.pt"
     _save_training_checkpoint(state, best_checkpoint_path)
     return True
@@ -503,3 +447,53 @@ def _mps_available(torch) -> bool:
 
 def _cuda_amp_enabled(config: TrainConfig, device: str) -> bool:
     return config.amp and device == "cuda"
+
+
+def _total_optimizer_steps(config: TrainConfig) -> int:
+    return max(1, math.ceil(config.total_train_positions / config.batch_size))
+
+
+def _effective_validation_interval_positions(config: TrainConfig) -> int:
+    if config.validation_interval_positions > 0:
+        return config.validation_interval_positions
+    return config.superbatch_positions
+
+
+def _next_validation_positions(current_positions: int, interval_positions: int) -> int:
+    return ((current_positions // interval_positions) + 1) * interval_positions
+
+
+def _superbatch_index(positions_seen: int, superbatch_positions: int) -> int:
+    return positions_seen // superbatch_positions
+
+
+def _batch_size(batch) -> int:
+    return int(batch.stm.shape[0])
+
+
+def _wdl_from_cp(values, wdl_scale: float, torch):
+    return torch.sigmoid(values / wdl_scale)
+
+
+def _wdl_bucket(values):
+    return values.mul(3.0).clamp_min(0.0).clamp_max(2.999999).to(dtype=values.dtype).to(dtype=values.long().dtype)
+
+
+def _payload_positions_seen(payload: dict[str, object], config: TrainConfig) -> int:
+    if "positions_seen" in payload:
+        return int(payload["positions_seen"])
+    return int(payload["global_step"]) * config.batch_size
+
+
+def _payload_superbatch_index(payload: dict[str, object], config: TrainConfig) -> int:
+    if "superbatch_index" in payload:
+        return int(payload["superbatch_index"])
+    return _superbatch_index(_payload_positions_seen(payload, config), config.superbatch_positions)
+
+
+def _payload_best_validation_positions(payload: dict[str, object], config: TrainConfig) -> int | None:
+    if payload.get("best_validation_positions") is not None:
+        return int(payload["best_validation_positions"])
+    if payload.get("best_validation_step") is not None:
+        return int(payload["best_validation_step"]) * config.batch_size
+    return None

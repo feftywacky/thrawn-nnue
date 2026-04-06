@@ -43,27 +43,27 @@ def save_checkpoint(
     scheduler,
     scaler,
     config: dict[str, object],
-    epoch: int,
-    step_in_epoch: int,
     global_step: int,
+    positions_seen: int,
+    superbatch_index: int,
     best_validation_loss: float | None = None,
-    best_validation_step: int | None = None,
+    best_validation_positions: int | None = None,
 ) -> Path:
     torch = _require_torch()
     output_path = Path(path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "config": config,
-        "epoch": epoch,
-        "step_in_epoch": step_in_epoch,
         "global_step": global_step,
+        "positions_seen": positions_seen,
+        "superbatch_index": superbatch_index,
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
         "scaler_state": scaler.state_dict() if scaler is not None else None,
         "rng_state": capture_rng_state(),
         "best_validation_loss": best_validation_loss,
-        "best_validation_step": best_validation_step,
+        "best_validation_positions": best_validation_positions,
     }
     torch.save(payload, output_path)
     return output_path

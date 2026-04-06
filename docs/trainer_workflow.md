@@ -25,12 +25,12 @@ Edit [default.toml](/Users/feiyulin/Code/thrawn-nnue/configs/default.toml) and s
 
 - `train_datasets`
 - `validation_datasets` if you have validation data
-- `validation_every`
-- `validation_steps`
+- `total_train_positions`
+- `superbatch_positions`
+- `validation_interval_positions`
+- `validation_positions`
 - `output_dir`
 - `batch_size`
-- `steps_per_epoch`
-- `max_epochs`
 - `checkpoint_every`
 - `console_mode`
 
@@ -47,9 +47,10 @@ train_datasets = ["/absolute/path/to/train/**/*.binpack"]
 validation_datasets = ["/absolute/path/to/valid"]
 output_dir = "runs/my_first_run"
 device = "auto"
-steps_per_epoch = 0
-validation_every = 0
-validation_steps = 256
+total_train_positions = 20000000000
+superbatch_positions = 4000000000
+validation_interval_positions = 0
+validation_positions = 1048576
 console_mode = "progress"
 score_clip = 0.0
 score_scale = 1.0
@@ -62,11 +63,19 @@ Dataset entries may be:
 - directories, which are expanded recursively to `.binpack` files
 - glob patterns such as `"/data/train/**/*.binpack"`
 
-Sizing controls support auto mode:
+Budget controls:
 
-- `steps_per_epoch = 0` runs one full training-corpus pass per epoch
-- `validation_every = 0` runs validation at the end of each epoch
-- `validation_steps = 0` runs one full validation-corpus pass
+- `total_train_positions` is the primary stop condition
+- `superbatch_positions` is a reporting boundary, not a full-pass epoch
+- `validation_interval_positions = 0` runs validation at each superbatch boundary
+- `validation_positions = 0` runs one full validation-corpus pass
+- train and validation shard lists must not overlap
+
+Network sizing:
+
+- `feature_set = "a768_dual"` and `num_features = 768` describe the sparse input encoding
+- `ft_size` is the accumulator width for one perspective
+- the first dense layer therefore sees `2 * ft_size` inputs because the trainer feeds `[stm_acc, nstm_acc]`
 
 ## Device configuration
 
@@ -138,13 +147,21 @@ Start training with:
 thrawn-nnue train --config configs/default.toml
 ```
 
-By default, training uses a live progress bar. It tracks `global_step` out of `max_epochs * steps_per_epoch`, shows the current epoch/step, latest train loss, latest validation loss, and emits short notices when validation runs or checkpoints are saved.
+By default, training uses a live progress bar. It tracks `positions_seen` out of `total_train_positions`, shows the current optimizer step and superbatch index, latest train loss, latest validation loss, and emits short notices when validation runs or checkpoints are saved.
 
 If you want plain text summaries instead:
 
 ```bash
 thrawn-nnue train --config configs/default.toml --console-mode text
 ```
+
+Operational guidance:
+
+- Think in positions, not epochs. `positions_seen / total_train_positions` is the main measure of run progress.
+- Keep `train_datasets` and `validation_datasets` disjoint at the shard level. The trainer enforces path-level separation only.
+- Use smaller `validation_positions` during tuning to validate more frequently, then switch to `0` for full held-out passes on serious runs.
+- Choose `superbatch_positions` large enough that validation cadence is meaningful rather than noisy.
+- Resume from a saved step checkpoint to continue a run exactly; export `best.pt` when validation has clearly peaked.
 
 During training the trainer:
 
@@ -153,13 +170,13 @@ During training the trainer:
 2. Extracts white and black A-768 active feature lists.
 3. Builds two accumulators with a shared feature-transformer table.
 4. Orders them as `[stm_acc, nstm_acc]`.
-5. Runs the `512 -> 32 -> 1` network.
+5. Runs the configured `2 * ft_size -> hidden_size -> 1` network.
 6. Applies teacher-score preprocessing:
    clip, then scale
 7. Converts normalized score targets into WDL space.
-8. Blends eval loss and result loss using `result_lambda`.
+8. Blends teacher loss and result loss using `eval_lambda`.
 9. Saves periodic training checkpoints.
-10. Runs validation every `validation_every` steps if `validation_datasets` is configured.
+10. Runs validation whenever `positions_seen` crosses the next configured position threshold.
 11. Updates `checkpoints/best.pt` when validation loss improves.
 12. Writes JSONL training and validation metrics.
 
@@ -170,13 +187,16 @@ Outputs go under the configured `output_dir`, including:
 - `plots/` after running the metrics report command
 
 Validation uses only `validation_datasets`. Those shards should be held out from `train_datasets`.
+The trainer enforces disjoint shard paths, but it cannot detect same-game leakage across separately prepared shards.
 
 Each validation pass:
 
 - opens the held-out `.binpack` files in non-cyclic mode
-- evaluates `validation_steps` batches or stops earlier at dataset exhaustion
-- if `validation_steps = 0`, auto-sizes to a full held-out pass
-- averages blended loss, eval loss, and result loss
+- evaluates positions until `validation_positions` is reached or the dataset is exhausted
+- if `validation_positions = 0`, auto-sizes to a full held-out pass
+- averages blended loss, teacher loss, and result loss
+- reports `wdl_accuracy` against the game result
+- reports `teacher_result_disagreement_rate`
 - logs a validation record to `metrics.jsonl`
 - updates `checkpoints/best.pt` if blended validation loss is the best seen so far
 
@@ -219,8 +239,10 @@ Checkpoints contain:
 - AMP scaler state
 - config snapshot
 - RNG state
-- epoch and step counters
-- current best validation loss and best validation step
+- optimizer step counter
+- `positions_seen`
+- `superbatch_index`
+- current best validation loss and best validation position
 
 That makes resume suitable for continuing a run exactly, not just reloading weights.
 

@@ -36,97 +36,208 @@ class MetricsSummaryTests(unittest.TestCase):
             _write_metrics(
                 run_dir / "metrics.jsonl",
                 [
-                    {"event": "train", "global_step": 1, "loss": 0.9, "eval_loss": 0.8, "result_loss": 1.0, "lr": 0.001},
-                    {"event": "train", "global_step": 2, "loss": 0.7, "eval_loss": 0.6, "result_loss": 0.8, "lr": 0.0008},
+                    {
+                        "event": "train",
+                        "global_step": 1,
+                        "positions_seen": 2048,
+                        "loss": 0.9,
+                        "teacher_loss": 0.8,
+                        "result_loss": 1.0,
+                        "lr": 0.001,
+                    },
+                    {
+                        "event": "train",
+                        "global_step": 2,
+                        "positions_seen": 4096,
+                        "loss": 0.7,
+                        "teacher_loss": 0.6,
+                        "result_loss": 0.8,
+                        "lr": 0.0008,
+                    },
                 ],
             )
-            run = load_metrics_run(run_dir)
-            summary = summarize_run(run)
+            with patch(
+                "thrawn_nnue.metrics._checkpoint_diagnostics",
+                return_value={
+                    "best_validation_loss": None,
+                    "best_validation_positions": None,
+                    "config": {
+                        "batch_size": 2048,
+                        "total_train_positions": 10_000,
+                        "superbatch_positions": 5_000,
+                        "validation_interval_positions": 2_500,
+                        "score_clip": 16000.0,
+                        "score_scale": 1.0,
+                        "wdl_scale": 8000.0,
+                        "eval_lambda": 0.8,
+                    },
+                    "global_step": 2,
+                    "positions_seen": 4096,
+                },
+            ):
+                run = load_metrics_run(run_dir)
+                summary = summarize_run(run)
             self.assertEqual(summary["status"], "train-only")
             self.assertEqual(summary["train_records"], 2)
             self.assertEqual(summary["validation_records"], 0)
-            self.assertEqual(summary["latest_train_step"], 2)
-            self.assertIsNone(summary["latest_validation_step"])
+            self.assertEqual(summary["positions_seen"], 4096)
+            self.assertIsNone(summary["latest_validation_positions"])
             self.assertEqual(summary["resume_recommendation"], "insufficient-validation")
-            self.assertIn("Run Budget", render_summary_text(summary))
+            self.assertIn("configured_total_positions", render_summary_text(summary))
 
-    def test_validation_summary_prefers_best_validation(self) -> None:
+    def test_validation_summary_prefers_best_validation_positions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
             _write_metrics(
                 run_dir / "metrics.jsonl",
                 [
-                    {"event": "train", "global_step": 1, "loss": 0.9, "eval_loss": 0.8, "result_loss": 1.0, "lr": 0.001},
-                    {"event": "train", "global_step": 4, "loss": 0.4, "eval_loss": 0.2, "result_loss": 0.5, "lr": 0.0007},
-                    {"event": "validation", "global_step": 2, "validation_loss": 0.5, "validation_eval_loss": 0.4, "validation_result_loss": 0.6},
-                    {"event": "validation", "global_step": 4, "validation_loss": 0.3, "validation_eval_loss": 0.25, "validation_result_loss": 0.35},
+                    {
+                        "event": "train",
+                        "global_step": 1,
+                        "positions_seen": 1024,
+                        "loss": 0.9,
+                        "teacher_loss": 0.8,
+                        "result_loss": 1.0,
+                        "lr": 0.001,
+                    },
+                    {
+                        "event": "train",
+                        "global_step": 4,
+                        "positions_seen": 4096,
+                        "loss": 0.4,
+                        "teacher_loss": 0.2,
+                        "result_loss": 0.5,
+                        "lr": 0.0007,
+                    },
+                    {
+                        "event": "validation",
+                        "global_step": 2,
+                        "positions_seen": 2048,
+                        "validation_loss": 0.5,
+                        "validation_teacher_loss": 0.4,
+                        "validation_result_loss": 0.6,
+                        "wdl_accuracy": 0.55,
+                        "teacher_result_disagreement_rate": 0.40,
+                        "validation_positions": 1024,
+                    },
+                    {
+                        "event": "validation",
+                        "global_step": 4,
+                        "positions_seen": 4096,
+                        "validation_loss": 0.3,
+                        "validation_teacher_loss": 0.25,
+                        "validation_result_loss": 0.35,
+                        "wdl_accuracy": 0.62,
+                        "teacher_result_disagreement_rate": 0.33,
+                        "validation_positions": 1024,
+                    },
                 ],
             )
             with patch(
                 "thrawn_nnue.metrics._checkpoint_diagnostics",
                 return_value={
                     "best_validation_loss": 0.3,
-                    "best_validation_step": 4,
+                    "best_validation_positions": 4096,
                     "config": {
                         "batch_size": 1024,
-                        "max_epochs": 2,
-                        "steps_per_epoch": 4,
+                        "total_train_positions": 8192,
+                        "superbatch_positions": 4096,
+                        "validation_interval_positions": 2048,
                         "score_clip": 16000.0,
                         "score_scale": 1.0,
                         "wdl_scale": 8000.0,
-                        "result_lambda": 0.8,
+                        "eval_lambda": 0.8,
                     },
                     "global_step": 4,
+                    "positions_seen": 4096,
                 },
             ):
                 run = load_metrics_run(run_dir)
                 summary = summarize_run(run)
             self.assertEqual(summary["status"], "validated")
-            self.assertEqual(summary["best_validation_step"], 4)
+            self.assertEqual(summary["best_validation_positions"], 4096)
             self.assertAlmostEqual(summary["best_validation_loss"], 0.3)
             self.assertEqual(summary["resume_recommendation"], "continue-latest")
             self.assertTrue(summary["best_is_latest_validation"])
             self.assertEqual(summary["configured_total_steps"], 8)
-            self.assertEqual(summary["samples_seen"], 4096)
             self.assertAlmostEqual(summary["train_validation_gap"], -0.1)
+            self.assertAlmostEqual(summary["latest_validation_wdl_accuracy"], 0.62)
             text = render_summary_text(summary)
-            self.assertIn("best_validation_step: 4", text)
+            self.assertIn("best_validation_positions: 4096", text)
             self.assertIn("Suggestions", text)
 
-    def test_summary_flags_export_best_and_eval_signal_collapse(self) -> None:
+    def test_summary_flags_export_best_and_teacher_signal_collapse(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
             _write_metrics(
                 run_dir / "metrics.jsonl",
                 [
-                    {"event": "train", "global_step": 100, "loss": 0.30, "eval_loss": 0.001, "result_loss": 0.100, "lr": 0.0010},
-                    {"event": "train", "global_step": 200, "loss": 0.28, "eval_loss": 0.001, "result_loss": 0.095, "lr": 0.0000},
-                    {"event": "validation", "global_step": 100, "validation_loss": 0.25, "validation_eval_loss": 0.001, "validation_result_loss": 0.090},
-                    {"event": "validation", "global_step": 200, "validation_loss": 0.27, "validation_eval_loss": 0.001, "validation_result_loss": 0.100},
+                    {
+                        "event": "train",
+                        "global_step": 100,
+                        "positions_seen": 204_800,
+                        "loss": 0.30,
+                        "teacher_loss": 0.001,
+                        "result_loss": 0.100,
+                        "lr": 0.0010,
+                    },
+                    {
+                        "event": "train",
+                        "global_step": 200,
+                        "positions_seen": 409_600,
+                        "loss": 0.28,
+                        "teacher_loss": 0.001,
+                        "result_loss": 0.095,
+                        "lr": 0.0,
+                    },
+                    {
+                        "event": "validation",
+                        "global_step": 100,
+                        "positions_seen": 204_800,
+                        "validation_loss": 0.25,
+                        "validation_teacher_loss": 0.001,
+                        "validation_result_loss": 0.090,
+                        "wdl_accuracy": 0.60,
+                        "teacher_result_disagreement_rate": 0.35,
+                        "validation_positions": 4096,
+                    },
+                    {
+                        "event": "validation",
+                        "global_step": 200,
+                        "positions_seen": 409_600,
+                        "validation_loss": 0.27,
+                        "validation_teacher_loss": 0.001,
+                        "validation_result_loss": 0.100,
+                        "wdl_accuracy": 0.58,
+                        "teacher_result_disagreement_rate": 0.36,
+                        "validation_positions": 4096,
+                    },
                 ],
             )
             with patch(
                 "thrawn_nnue.metrics._checkpoint_diagnostics",
                 return_value={
                     "best_validation_loss": 0.25,
-                    "best_validation_step": 100,
+                    "best_validation_positions": 204_800,
                     "config": {
                         "batch_size": 2048,
-                        "max_epochs": 10,
-                        "steps_per_epoch": 20,
+                        "total_train_positions": 409_600,
+                        "superbatch_positions": 102_400,
+                        "validation_interval_positions": 102_400,
                         "score_clip": 16000.0,
                         "score_scale": 1.0,
                         "wdl_scale": 8000.0,
-                        "result_lambda": 0.8,
+                        "eval_lambda": 0.8,
                     },
-                    "global_step": 100,
+                    "global_step": 200,
+                    "positions_seen": 409_600,
                 },
             ):
                 run = load_metrics_run(run_dir)
                 summary = summarize_run(run)
             self.assertEqual(summary["resume_recommendation"], "export-best")
-            self.assertEqual(summary["steps_since_best"], 100)
-            self.assertTrue(summary["eval_signal_collapsed"])
+            self.assertEqual(summary["positions_since_best"], 204_800)
+            self.assertTrue(summary["teacher_signal_collapsed"])
             self.assertTrue(summary["scheduler_exhausted"])
             self.assertIn("revisit score normalization", " ".join(summary["suggestions"]))
 
@@ -139,12 +250,53 @@ class MetricsPlotTests(unittest.TestCase):
             _write_metrics(
                 run_dir / "metrics.jsonl",
                 [
-                    {"event": "train", "global_step": 1, "loss": 0.9, "eval_loss": 0.8, "result_loss": 1.0, "lr": 0.001},
-                    {"event": "train", "global_step": 2, "loss": 0.7, "eval_loss": 0.6, "result_loss": 0.8, "lr": 0.0008},
-                    {"event": "validation", "global_step": 2, "validation_loss": 0.5, "validation_eval_loss": 0.45, "validation_result_loss": 0.55},
+                    {
+                        "event": "train",
+                        "global_step": 1,
+                        "positions_seen": 1024,
+                        "loss": 0.9,
+                        "teacher_loss": 0.8,
+                        "result_loss": 1.0,
+                        "lr": 0.001,
+                    },
+                    {
+                        "event": "train",
+                        "global_step": 2,
+                        "positions_seen": 2048,
+                        "loss": 0.7,
+                        "teacher_loss": 0.6,
+                        "result_loss": 0.8,
+                        "lr": 0.0008,
+                    },
+                    {
+                        "event": "validation",
+                        "global_step": 2,
+                        "positions_seen": 2048,
+                        "validation_loss": 0.5,
+                        "validation_teacher_loss": 0.45,
+                        "validation_result_loss": 0.55,
+                        "wdl_accuracy": 0.60,
+                        "teacher_result_disagreement_rate": 0.30,
+                        "validation_positions": 1024,
+                    },
                 ],
             )
-            run = load_metrics_run(run_dir)
+            with patch(
+                "thrawn_nnue.metrics._checkpoint_diagnostics",
+                return_value={
+                    "best_validation_loss": None,
+                    "best_validation_positions": None,
+                    "config": {
+                        "batch_size": 1024,
+                        "total_train_positions": 4096,
+                        "superbatch_positions": 2048,
+                        "validation_interval_positions": 2048,
+                    },
+                    "global_step": 2,
+                    "positions_seen": 2048,
+                },
+            ):
+                run = load_metrics_run(run_dir)
             outputs = generate_run_plots(run)
             names = {path.name for path in outputs}
             self.assertIn("train_loss.png", names)
@@ -162,14 +314,36 @@ class MetricsCliTests(unittest.TestCase):
             _write_metrics(
                 run_dir / "metrics.jsonl",
                 [
-                    {"event": "train", "global_step": 1, "loss": 0.9, "eval_loss": 0.8, "result_loss": 1.0, "lr": 0.001},
+                    {
+                        "event": "train",
+                        "global_step": 1,
+                        "positions_seen": 1024,
+                        "loss": 0.9,
+                        "teacher_loss": 0.8,
+                        "result_loss": 1.0,
+                        "lr": 0.001,
+                    },
                 ],
             )
             stdout = io.StringIO()
             argv = sys.argv
             try:
                 sys.argv = ["thrawn-nnue", "metrics", "--run-dir", str(run_dir)]
-                with redirect_stdout(stdout):
+                with redirect_stdout(stdout), patch(
+                    "thrawn_nnue.metrics._checkpoint_diagnostics",
+                    return_value={
+                        "best_validation_loss": None,
+                        "best_validation_positions": None,
+                        "config": {
+                            "batch_size": 1024,
+                            "total_train_positions": 4096,
+                            "superbatch_positions": 2048,
+                            "validation_interval_positions": 2048,
+                        },
+                        "global_step": 1,
+                        "positions_seen": 1024,
+                    },
+                ):
                     if matplotlib is None:
                         with self.assertRaises(RuntimeError):
                             main()
@@ -181,7 +355,7 @@ class MetricsCliTests(unittest.TestCase):
             if matplotlib is not None:
                 self.assertIn("run_dir:", output)
                 self.assertIn("train_records: 1", output)
-                self.assertIn("Run Budget", output)
+                self.assertIn("configured_total_positions", output)
 
     def test_metrics_cli_json_output_includes_enriched_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -189,14 +363,36 @@ class MetricsCliTests(unittest.TestCase):
             _write_metrics(
                 run_dir / "metrics.jsonl",
                 [
-                    {"event": "train", "global_step": 1, "loss": 0.9, "eval_loss": 0.8, "result_loss": 1.0, "lr": 0.001},
+                    {
+                        "event": "train",
+                        "global_step": 1,
+                        "positions_seen": 1024,
+                        "loss": 0.9,
+                        "teacher_loss": 0.8,
+                        "result_loss": 1.0,
+                        "lr": 0.001,
+                    },
                 ],
             )
             stdout = io.StringIO()
             argv = sys.argv
             try:
                 sys.argv = ["thrawn-nnue", "metrics", "--run-dir", str(run_dir), "--json"]
-                with redirect_stdout(stdout):
+                with redirect_stdout(stdout), patch(
+                    "thrawn_nnue.metrics._checkpoint_diagnostics",
+                    return_value={
+                        "best_validation_loss": None,
+                        "best_validation_positions": None,
+                        "config": {
+                            "batch_size": 1024,
+                            "total_train_positions": 4096,
+                            "superbatch_positions": 2048,
+                            "validation_interval_positions": 2048,
+                        },
+                        "global_step": 1,
+                        "positions_seen": 1024,
+                    },
+                ):
                     if matplotlib is None:
                         with self.assertRaises(RuntimeError):
                             main()
@@ -207,7 +403,7 @@ class MetricsCliTests(unittest.TestCase):
             if matplotlib is not None:
                 payload = json.loads(stdout.getvalue())
                 self.assertIn("summary", payload)
-                self.assertIn("samples_seen", payload["summary"])
+                self.assertIn("positions_seen", payload["summary"])
                 self.assertIn("plots", payload)
 
     def test_train_cli_console_mode_override_takes_precedence(self) -> None:
@@ -240,7 +436,7 @@ class MetricsCliTests(unittest.TestCase):
 
 
 class ProgressReporterTests(unittest.TestCase):
-    def test_progress_reporter_uses_indeterminate_bar_for_full_pass_runs(self) -> None:
+    def test_progress_reporter_uses_position_budget_totals(self) -> None:
         writes: list[str] = []
 
         class FakeBar:
@@ -269,20 +465,22 @@ class ProgressReporterTests(unittest.TestCase):
             reporter = ProgressReporter()
             reporter.startup(
                 ConsoleContext(
-                    run_name="full-pass",
+                    run_name="budgeted",
                     device="cpu",
                     train_shards=5,
                     validation_shards=1,
-                    total_steps=0,
-                    initial_global_step=0,
-                    max_epochs=5,
-                    steps_per_epoch=0,
+                    total_train_positions=1_000,
+                    initial_positions_seen=128,
+                    batch_size=256,
+                    superbatch_positions=500,
+                    validation_interval_positions=250,
                     log_every=25,
                 )
             )
 
-        self.assertEqual(calls[0]["total"], None)
-        self.assertTrue(any("total_steps=full-pass" in message for message in writes))
+        self.assertEqual(calls[0]["total"], 1_000)
+        self.assertEqual(calls[0]["initial"], 128)
+        self.assertTrue(any("total_positions=1,000" in message for message in writes))
 
 
 if __name__ == "__main__":

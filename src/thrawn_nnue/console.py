@@ -11,10 +11,11 @@ class ConsoleContext:
     device: str
     train_shards: int
     validation_shards: int
-    total_steps: int
-    initial_global_step: int
-    max_epochs: int
-    steps_per_epoch: int
+    total_train_positions: int
+    initial_positions_seen: int
+    batch_size: int
+    superbatch_positions: int
+    validation_interval_positions: int
     log_every: int
 
 
@@ -25,15 +26,15 @@ class _BaseReporter:
     def update_train(
         self,
         *,
-        epoch: int,
-        step_in_epoch: int,
         global_step: int,
+        positions_seen: int,
+        superbatch_index: int,
         loss: float,
         lr: float,
     ) -> None:
         raise NotImplementedError
 
-    def validation_started(self, *, global_step: int) -> None:
+    def validation_started(self, *, global_step: int, positions_seen: int) -> None:
         raise NotImplementedError
 
     def validation_finished(self, metrics: dict[str, object], *, is_best: bool) -> None:
@@ -51,28 +52,34 @@ class TextReporter(_BaseReporter):
         self._started_at = time.monotonic()
         self._latest_validation_loss: float | None = None
         self._log_every = 1
+        self._total_train_positions = 0
 
     def startup(self, context: ConsoleContext) -> None:
         self._log_every = context.log_every
+        self._total_train_positions = context.total_train_positions
         print(
             "training start:"
             f" run={context.run_name}"
             f" device={context.device}"
             f" train_shards={context.train_shards}"
             f" validation_shards={context.validation_shards}"
-            f" total_steps={context.total_steps}"
+            f" total_positions={_format_count(context.total_train_positions)}"
+            f" batch_size={_format_count(context.batch_size)}"
         )
         print(
-            "training stream: combined cyclic stream across all train_datasets;"
+            "training stream:"
+            " combined cyclic stream across all train_datasets;"
+            f" superbatch_positions={_format_count(context.superbatch_positions)};"
+            f" validation_interval_positions={_format_count(context.validation_interval_positions)};"
             f" validation uses non-cyclic passes across {context.validation_shards} validation shard(s)"
         )
 
     def update_train(
         self,
         *,
-        epoch: int,
-        step_in_epoch: int,
         global_step: int,
+        positions_seen: int,
+        superbatch_index: int,
         loss: float,
         lr: float,
     ) -> None:
@@ -81,8 +88,8 @@ class TextReporter(_BaseReporter):
         elapsed = time.monotonic() - self._started_at
         pieces = [
             f"step={global_step}",
-            f"epoch={epoch + 1}",
-            f"step_in_epoch={step_in_epoch}",
+            f"positions={_format_progress(positions_seen, self._total_train_positions)}",
+            f"superbatch={superbatch_index}",
             f"loss={loss:.6f}",
             f"lr={lr:.8f}",
             f"elapsed={_format_seconds(elapsed)}",
@@ -91,8 +98,12 @@ class TextReporter(_BaseReporter):
             pieces.append(f"val={self._latest_validation_loss:.6f}")
         print("train " + " ".join(pieces))
 
-    def validation_started(self, *, global_step: int) -> None:
-        print(f"validation start: step={global_step}")
+    def validation_started(self, *, global_step: int, positions_seen: int) -> None:
+        print(
+            "validation start:"
+            f" step={global_step}"
+            f" positions={_format_count(positions_seen)}"
+        )
 
     def validation_finished(self, metrics: dict[str, object], *, is_best: bool) -> None:
         self._latest_validation_loss = float(metrics["validation_loss"])
@@ -100,9 +111,13 @@ class TextReporter(_BaseReporter):
         print(
             "validation done:"
             f" step={int(metrics['global_step'])}"
+            f" positions={_format_count(int(metrics['positions_seen']))}"
             f" loss={float(metrics['validation_loss']):.6f}"
-            f" eval={float(metrics['validation_eval_loss']):.6f}"
+            f" teacher={float(metrics['validation_teacher_loss']):.6f}"
             f" result={float(metrics['validation_result_loss']):.6f}"
+            f" wdl_acc={float(metrics['wdl_accuracy']):.4f}"
+            f" teacher_result_disagree={float(metrics['teacher_result_disagreement_rate']):.4f}"
+            f" eval_positions={_format_count(int(metrics['validation_positions']))}"
             f" batches={int(metrics['validation_batches'])}"
             f"{suffix}"
         )
@@ -122,44 +137,46 @@ class ProgressReporter(_BaseReporter):
         self._latest_validation_loss: float | None = None
 
     def startup(self, context: ConsoleContext) -> None:
-        total = context.total_steps if context.total_steps > 0 else None
         self._bar = self._tqdm(
-            total=total,
-            initial=context.initial_global_step,
+            total=context.total_train_positions,
+            initial=context.initial_positions_seen,
             dynamic_ncols=True,
             file=sys.stdout,
-            unit="step",
+            unit="pos",
         )
-        total_label = "full-pass" if total is None else str(context.total_steps)
         self._bar.write(
             "training start:"
             f" run={context.run_name}"
             f" device={context.device}"
             f" train_shards={context.train_shards}"
             f" validation_shards={context.validation_shards}"
-            f" total_steps={total_label}"
+            f" total_positions={_format_count(context.total_train_positions)}"
+            f" batch_size={_format_count(context.batch_size)}"
         )
         self._bar.write(
-            "training stream: combined cyclic stream across all train_datasets;"
+            "training stream:"
+            " combined cyclic stream across all train_datasets;"
+            f" superbatch_positions={_format_count(context.superbatch_positions)};"
+            f" validation_interval_positions={_format_count(context.validation_interval_positions)};"
             f" validation uses non-cyclic passes across {context.validation_shards} validation shard(s)"
         )
 
     def update_train(
         self,
         *,
-        epoch: int,
-        step_in_epoch: int,
         global_step: int,
+        positions_seen: int,
+        superbatch_index: int,
         loss: float,
         lr: float,
     ) -> None:
         if self._bar is None:
             return
-        if global_step > self._bar.n:
-            self._bar.update(global_step - self._bar.n)
+        if positions_seen > self._bar.n:
+            self._bar.update(positions_seen - self._bar.n)
         postfix = {
-            "epoch": f"{epoch + 1}",
-            "step": step_in_epoch,
+            "step": global_step,
+            "sb": superbatch_index,
             "loss": f"{loss:.4f}",
             "lr": f"{lr:.2e}",
         }
@@ -167,9 +184,13 @@ class ProgressReporter(_BaseReporter):
             postfix["val"] = f"{self._latest_validation_loss:.4f}"
         self._bar.set_postfix(postfix, refresh=False)
 
-    def validation_started(self, *, global_step: int) -> None:
+    def validation_started(self, *, global_step: int, positions_seen: int) -> None:
         if self._bar is not None:
-            self._bar.write(f"validation start: step={global_step}")
+            self._bar.write(
+                "validation start:"
+                f" step={global_step}"
+                f" positions={_format_count(positions_seen)}"
+            )
 
     def validation_finished(self, metrics: dict[str, object], *, is_best: bool) -> None:
         self._latest_validation_loss = float(metrics["validation_loss"])
@@ -178,9 +199,13 @@ class ProgressReporter(_BaseReporter):
             self._bar.write(
                 "validation done:"
                 f" step={int(metrics['global_step'])}"
+                f" positions={_format_count(int(metrics['positions_seen']))}"
                 f" loss={float(metrics['validation_loss']):.6f}"
-                f" eval={float(metrics['validation_eval_loss']):.6f}"
+                f" teacher={float(metrics['validation_teacher_loss']):.6f}"
                 f" result={float(metrics['validation_result_loss']):.6f}"
+                f" wdl_acc={float(metrics['wdl_accuracy']):.4f}"
+                f" teacher_result_disagree={float(metrics['teacher_result_disagreement_rate']):.4f}"
+                f" eval_positions={_format_count(int(metrics['validation_positions']))}"
                 f" batches={int(metrics['validation_batches'])}"
                 f"{suffix}"
             )
@@ -218,3 +243,14 @@ def _format_seconds(value: float) -> str:
     if hours > 0:
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
     return f"{minutes:02d}:{seconds:02d}"
+
+
+def _format_count(value: int) -> str:
+    return f"{int(value):,}"
+
+
+def _format_progress(current: int, total: int) -> str:
+    if total <= 0:
+        return _format_count(current)
+    fraction = (float(current) / float(total)) * 100.0
+    return f"{_format_count(current)}/{_format_count(total)} ({fraction:.2f}%)"

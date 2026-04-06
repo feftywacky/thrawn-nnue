@@ -31,8 +31,11 @@ The description bytes come next, followed by packed tensors in this order:
 
 ## Semantics
 
+- `num_features` is the sparse feature count for the configured feature set.
+- `ft_size` is the accumulator width for one perspective.
 - The feature transformer is shared between white and black perspectives.
 - The first dense layer always consumes `[stm_acc, nstm_acc]`.
+- That means the first dense layer input width is always `2 * ft_size`.
 - Exported tensors are quantized for compact storage, but verification in this repo dequantizes them back to float for parity checks.
 
 ## Quantization

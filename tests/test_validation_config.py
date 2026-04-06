@@ -11,25 +11,29 @@ from thrawn_nnue.config import TrainConfig
 
 
 class ValidationConfigTests(unittest.TestCase):
-    def test_zero_steps_and_epoch_validation_are_allowed_for_auto_sizing(self) -> None:
+    def test_position_budget_fields_are_allowed_for_auto_interval_validation(self) -> None:
         config = TrainConfig.from_dict(
             {
                 "train_datasets": ["/tmp/train.binpack"],
                 "validation_datasets": ["/tmp/valid.binpack"],
-                "steps_per_epoch": 0,
-                "validation_every": 0,
-                "validation_steps": 0,
+                "total_train_positions": 10_000,
+                "superbatch_positions": 2_000,
+                "validation_interval_positions": 0,
+                "validation_positions": 0,
             }
         )
-        self.assertEqual(config.steps_per_epoch, 0)
-        self.assertEqual(config.validation_every, 0)
-        self.assertEqual(config.validation_steps, 0)
+        self.assertEqual(config.total_train_positions, 10_000)
+        self.assertEqual(config.superbatch_positions, 2_000)
+        self.assertEqual(config.validation_interval_positions, 0)
+        self.assertEqual(config.validation_positions, 0)
 
     def test_score_clip_and_score_scale_are_validated(self) -> None:
         with self.assertRaises(ValueError):
             TrainConfig.from_dict(
                 {
                     "train_datasets": ["/tmp/train.binpack"],
+                    "total_train_positions": 10_000,
+                    "superbatch_positions": 1_000,
                     "score_clip": -1.0,
                 }
             )
@@ -37,6 +41,8 @@ class ValidationConfigTests(unittest.TestCase):
             TrainConfig.from_dict(
                 {
                     "train_datasets": ["/tmp/train.binpack"],
+                    "total_train_positions": 10_000,
+                    "superbatch_positions": 1_000,
                     "score_scale": 0.0,
                 }
             )
@@ -46,7 +52,35 @@ class ValidationConfigTests(unittest.TestCase):
             TrainConfig.from_dict(
                 {
                     "train_datasets": ["/tmp/train.binpack"],
+                    "total_train_positions": 10_000,
+                    "superbatch_positions": 1_000,
                     "console_mode": "json",
+                }
+            )
+
+    def test_position_budget_fields_are_required(self) -> None:
+        with self.assertRaises(ValueError):
+            TrainConfig.from_dict({"train_datasets": ["/tmp/train.binpack"]})
+
+    def test_overlap_between_train_and_validation_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            TrainConfig.from_dict(
+                {
+                    "train_datasets": ["/tmp/shared.binpack"],
+                    "validation_datasets": ["/tmp/shared.binpack"],
+                    "total_train_positions": 10_000,
+                    "superbatch_positions": 1_000,
+                }
+            )
+
+    def test_legacy_epoch_fields_are_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            TrainConfig.from_dict(
+                {
+                    "train_datasets": ["/tmp/train.binpack"],
+                    "total_train_positions": 10_000,
+                    "superbatch_positions": 1_000,
+                    "steps_per_epoch": 100,
                 }
             )
 
@@ -68,6 +102,8 @@ class ValidationConfigTests(unittest.TestCase):
                 {
                     "train_datasets": ["train"],
                     "validation_datasets": ["valid/*.binpack"],
+                    "total_train_positions": 10_000,
+                    "superbatch_positions": 1_000,
                 },
                 base_dir=root,
             )

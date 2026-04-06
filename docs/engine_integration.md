@@ -2,6 +2,8 @@
 
 This repository is trainer-only. The output artifact your engine needs is the exported `.nnue` file.
 
+If you want AVX2, AVX-512, or NEON optimization, that work belongs in the engine repo, not here. This trainer produces and exports weights; your engine owns quantized inference, SIMD kernels, accumulator update speed, and cross-architecture parity.
+
 ## What the native code in this repo is for
 
 The code in [native_binpack/](/Users/feiyulin/Code/thrawn-nnue/native_binpack) is trainer-side infrastructure, not engine inference code.
@@ -74,6 +76,22 @@ In practice your engine will usually:
 - treat positive values as good for side to move
 - map the scalar to your internal eval scale
 - let the side-to-move ordering handle the sign naturally
+
+## SIMD Responsibilities
+
+Trainer-side responsibilities:
+
+- train a network shape that fits your engine budget
+- export weights and scales consistently
+- optionally evolve toward more quantization-aware training in the future
+
+Engine-side responsibilities:
+
+- implement fixed-point inference
+- pack weights and activations into SIMD-friendly layouts
+- write AVX2/NEON accumulator and dense-layer kernels
+- ensure x86 and ARM produce matching results
+- benchmark NPS impact and tune cache behavior
 
 ## Practical plan
 

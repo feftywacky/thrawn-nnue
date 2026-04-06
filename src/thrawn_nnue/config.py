@@ -16,10 +16,10 @@ class TrainConfig:
     device: str = "auto"
     num_loader_threads: int = 2
     batch_size: int = 256
-    steps_per_epoch: int = 1000
-    validation_every: int = 500
-    validation_steps: int = 0
-    max_epochs: int = 10
+    total_train_positions: int = 0
+    superbatch_positions: int = 0
+    validation_interval_positions: int = 0
+    validation_positions: int = 0
     checkpoint_every: int = 250
     log_every: int = 25
     console_mode: str = "progress"
@@ -36,7 +36,9 @@ class TrainConfig:
     score_clip: float = 0.0
     score_scale: float = 1.0
     wdl_scale: float = 410.0
-    result_lambda: float = 0.5
+    eval_lambda: float = 0.5
+    lr_drop_fractions: list[float] = field(default_factory=lambda: [0.80, 0.95])
+    lr_drop_factor: float = 0.1
     export_ft_scale: float = 127.0
     export_dense_scale: float = 64.0
     export_description: str = "thrawn a768 dual nnue"
@@ -81,14 +83,16 @@ class TrainConfig:
             raise ValueError("Only output_perspective='stm' is supported")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if self.steps_per_epoch < 0:
-            raise ValueError("steps_per_epoch must be >= 0")
-        if self.validation_every < 0:
-            raise ValueError("validation_every must be >= 0")
-        if self.max_epochs <= 0:
-            raise ValueError("max_epochs must be positive")
-        if not 0.0 <= self.result_lambda <= 1.0:
-            raise ValueError("result_lambda must be in [0, 1]")
+        if self.total_train_positions <= 0:
+            raise ValueError("total_train_positions must be positive")
+        if self.superbatch_positions <= 0:
+            raise ValueError("superbatch_positions must be positive")
+        if self.validation_interval_positions < 0:
+            raise ValueError("validation_interval_positions must be >= 0")
+        if self.validation_positions < 0:
+            raise ValueError("validation_positions must be >= 0")
+        if not 0.0 <= self.eval_lambda <= 1.0:
+            raise ValueError("eval_lambda must be in [0, 1]")
         if self.score_clip < 0.0:
             raise ValueError("score_clip must be >= 0")
         if self.score_scale <= 0.0:
@@ -97,14 +101,36 @@ class TrainConfig:
             raise ValueError("export scales must be > 0")
         if self.num_loader_threads <= 0:
             raise ValueError("num_loader_threads must be positive")
+        if self.checkpoint_every <= 0:
+            raise ValueError("checkpoint_every must be positive")
+        if self.log_every <= 0:
+            raise ValueError("log_every must be positive")
+        if self.learning_rate <= 0.0:
+            raise ValueError("learning_rate must be positive")
+        if self.weight_decay < 0.0:
+            raise ValueError("weight_decay must be >= 0")
+        if self.clip_grad_norm <= 0.0:
+            raise ValueError("clip_grad_norm must be positive")
         if self.ft_size <= 0 or self.hidden_size <= 0:
             raise ValueError("network sizes must be positive")
         if self.device not in {"auto", "cuda", "mps", "cpu"}:
             raise ValueError("device must be one of: auto, cuda, mps, cpu")
         if self.console_mode not in {"progress", "text"}:
             raise ValueError("console_mode must be one of: progress, text")
-        if self.validation_steps < 0:
-            raise ValueError("validation_steps must be >= 0")
+        if self.lr_drop_factor <= 0.0 or self.lr_drop_factor > 1.0:
+            raise ValueError("lr_drop_factor must be in (0, 1]")
+        previous_fraction = None
+        for fraction in self.lr_drop_fractions:
+            if not 0.0 < float(fraction) < 1.0:
+                raise ValueError("lr_drop_fractions entries must be in (0, 1)")
+            if previous_fraction is not None and float(fraction) <= previous_fraction:
+                raise ValueError("lr_drop_fractions must be strictly increasing")
+            previous_fraction = float(fraction)
+
+        overlap = _dataset_overlap(self.train_datasets, self.validation_datasets)
+        if overlap:
+            overlap_list = ", ".join(overlap)
+            raise ValueError(f"train_datasets and validation_datasets overlap: {overlap_list}")
 
 
 def load_config(path: str | Path) -> TrainConfig:
@@ -145,3 +171,13 @@ def _expand_dataset_value(base_dir: Path, value: str) -> list[str]:
 
 def _looks_like_glob(value: str) -> bool:
     return any(char in value for char in "*?[")
+
+
+def _dataset_overlap(train_datasets: list[str], validation_datasets: list[str]) -> list[str]:
+    train_paths = _resolved_dataset_path_set(train_datasets)
+    validation_paths = _resolved_dataset_path_set(validation_datasets)
+    return sorted(train_paths & validation_paths)
+
+
+def _resolved_dataset_path_set(values: list[str]) -> set[str]:
+    return {str(Path(value).resolve()) for value in values}

@@ -29,13 +29,13 @@ thrawn-nnue inspect-binpack --path /absolute/path/to/train.binpack
 thrawn-nnue train --config configs/default.toml
 ```
 
-Training now defaults to a live single-line progress bar. It shows step progress, epoch, ETA, latest train loss, latest validation loss, and checkpoint notices. If you prefer plain summaries instead, set `console_mode = "text"` in [default.toml](/Users/feiyulin/Code/thrawn-nnue/configs/default.toml) or run:
+Training now defaults to a live single-line progress bar. It shows positions seen out of the configured budget, optimizer step, superbatch index, latest train loss, latest validation loss, and checkpoint notices. If you prefer plain summaries instead, set `console_mode = "text"` in [default.toml](/Users/feiyulin/Code/thrawn-nnue/configs/default.toml) or run:
 
 ```bash
 thrawn-nnue train --config configs/default.toml --console-mode text
 ```
 
-4. Validation runs automatically when `validation_datasets` is configured. Use `validation_every` for step-based validation or `validation_every = 0` for end-of-epoch validation. The best validation checkpoint is written to `runs/.../checkpoints/best.pt`.
+4. Validation runs automatically when `validation_datasets` is configured. Use `validation_interval_positions` for explicit position-based validation, or set `validation_interval_positions = 0` to validate at each `superbatch_positions` boundary. The best validation checkpoint is written to `runs/.../checkpoints/best.pt`.
 
 5. Resume later if needed:
 
@@ -61,6 +61,15 @@ thrawn-nnue verify-export --checkpoint runs/default/checkpoints/step_00010000.pt
 thrawn-nnue metrics --run-dir runs/default
 ```
 
+## Operating The Trainer
+
+- Treat `total_train_positions` as the real run budget. The trainer is no longer organized around epochs.
+- Use `superbatch_positions` as a reporting boundary and as the default validation boundary when `validation_interval_positions = 0`.
+- Use `validation_positions = 0` for a full held-out pass, or set it to a smaller fixed position budget for faster iteration.
+- Run `inspect-binpack` on a representative shard before long training runs to choose `wdl_scale`, `score_clip`, and `score_scale`.
+- Watch validation metrics, especially blended loss, `wdl_accuracy`, and `teacher_result_disagreement_rate`, rather than train loss alone.
+- Export `checkpoints/best.pt` by default, then verify parity and engine strength in the engine repo.
+
 ## Documentation
 
 - Tests: [docs/testing.md](/Users/feiyulin/Code/thrawn-nnue/docs/testing.md)
@@ -83,7 +92,9 @@ thrawn-nnue metrics --run-dir runs/default
 - Training metrics are logged to `metrics.jsonl`, and `thrawn-nnue metrics --run-dir ...` generates summary output plus PNG plots in `plots/`.
 - Multiple `train_datasets` are opened as one combined cyclic training stream, not processed one file at a time.
 - Dataset lists can contain individual files, directories, or glob patterns. Directories are expanded recursively to `.binpack` files.
-- `steps_per_epoch = 0` means one full training-corpus pass per epoch.
-- `validation_every = 0` means validate at the end of each epoch.
-- `validation_steps = 0` means one full validation-corpus pass.
+- `total_train_positions` is the primary run budget.
+- `superbatch_positions` is a reporting and default-validation boundary, not an epoch.
+- `validation_interval_positions = 0` means validate at each superbatch boundary.
+- `validation_positions = 0` means one full validation-corpus pass.
 - Dataset inspection is intended to drive `wdl_scale`, `score_clip`, and `score_scale` choices before a long training run.
+- Train and validation shard lists must not overlap; same-game dedup remains a data-prep responsibility outside the trainer.

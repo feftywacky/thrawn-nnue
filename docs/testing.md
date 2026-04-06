@@ -18,6 +18,8 @@ python3.11 -m unittest discover -s tests -v
 - A-768 feature indexing and dual-perspective transforms
 - Incremental accumulator updates versus full refresh
 - Native `.binpack` fixture generation, parsing, and batch loading
+- Position-budgeted training loop behavior and validation cadence
+- Validation metrics, including WDL accuracy and teacher/result disagreement reporting
 - `.nnue` export header and tensor layout round-trip
 - Checkpoint metadata round-trip when `torch` is installed
 
