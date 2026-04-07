@@ -13,7 +13,7 @@ validation_datasets = [
 ]
 
 device = "mps"
-num_loader_threads = 12
+num_loader_threads = 10
 batch_size = 32768
 
 total_train_positions = 4000000000
