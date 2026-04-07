@@ -18,7 +18,7 @@ except ModuleNotFoundError:
 
 from thrawn_nnue.console import ConsoleContext, ProgressReporter
 from thrawn_nnue.cli import main
-from thrawn_nnue.metrics import generate_run_plots, load_metrics_run, render_summary_text, summarize_run
+from thrawn_nnue.metrics import _checkpoint_diagnostics, generate_run_plots, load_metrics_run, render_summary_text, summarize_run
 
 
 def _write_metrics(path: Path, records: list[dict[str, object]]) -> None:
@@ -30,6 +30,30 @@ def _write_metrics(path: Path, records: list[dict[str, object]]) -> None:
 
 
 class MetricsSummaryTests(unittest.TestCase):
+    def test_checkpoint_diagnostics_falls_back_to_stamped_best_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            checkpoints_dir = run_dir / "checkpoints"
+            checkpoints_dir.mkdir(parents=True, exist_ok=True)
+            stamped_path = checkpoints_dir / "best_step_00000042.pt"
+            stamped_path.write_bytes(b"fixture")
+
+            with patch(
+                "thrawn_nnue.checkpoint.load_checkpoint",
+                return_value={
+                    "best_validation_loss": 0.123,
+                    "best_validation_positions": 8192,
+                    "config": {"batch_size": 1024},
+                    "global_step": 42,
+                    "positions_seen": 8192,
+                },
+            ):
+                diagnostics = _checkpoint_diagnostics(run_dir)
+
+            self.assertEqual(diagnostics["best_validation_loss"], 0.123)
+            self.assertEqual(diagnostics["global_step"], 42)
+            self.assertEqual(diagnostics["positions_seen"], 8192)
+
     def test_load_and_summarize_train_only_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
@@ -303,6 +327,58 @@ class MetricsPlotTests(unittest.TestCase):
             self.assertIn("validation_loss.png", names)
             self.assertIn("lr.png", names)
             self.assertIn("loss_overview.png", names)
+            for output in outputs:
+                self.assertTrue(output.exists())
+
+    def test_generate_plots_with_sparse_validation_points(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            records: list[dict[str, object]] = []
+            for step in range(1, 65):
+                records.append(
+                    {
+                        "event": "train",
+                        "global_step": step,
+                        "positions_seen": step * 64_000_000,
+                        "loss": 0.04 - step * 0.0001,
+                        "teacher_loss": 0.004 - step * 0.00001,
+                        "result_loss": 0.10 - step * 0.0001,
+                        "lr": 0.001 if step < 50 else 0.0001,
+                    }
+                )
+            for step, loss in [(16, 0.033), (32, 0.031), (48, 0.0302), (64, 0.0301)]:
+                records.append(
+                    {
+                        "event": "validation",
+                        "global_step": step,
+                        "positions_seen": step * 64_000_000,
+                        "validation_loss": loss,
+                        "validation_teacher_loss": 0.003,
+                        "validation_result_loss": 0.09,
+                        "wdl_accuracy": 0.60,
+                        "teacher_result_disagreement_rate": 0.35,
+                        "validation_positions": 4_000_000,
+                    }
+                )
+            _write_metrics(run_dir / "metrics.jsonl", records)
+            with patch(
+                "thrawn_nnue.metrics._checkpoint_diagnostics",
+                return_value={
+                    "best_validation_loss": 0.0301,
+                    "best_validation_positions": 4_096_000_000,
+                    "config": {
+                        "batch_size": 1024,
+                        "total_train_positions": 4_096_000_000,
+                        "superbatch_positions": 512_000_000,
+                        "validation_interval_positions": 256_000_000,
+                    },
+                    "global_step": 64,
+                    "positions_seen": 4_096_000_000,
+                },
+            ):
+                run = load_metrics_run(run_dir)
+            outputs = generate_run_plots(run)
+            self.assertEqual({path.name for path in outputs}, {"train_loss.png", "validation_loss.png", "lr.png", "loss_overview.png"})
             for output in outputs:
                 self.assertTrue(output.exists())
 

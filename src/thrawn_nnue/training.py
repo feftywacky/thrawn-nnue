@@ -289,7 +289,7 @@ def _run_validation_and_report(state: TrainState, reporter) -> None:
     reporter.validation_finished(metrics, is_best=is_best)
     if is_best:
         reporter.checkpoint_saved(
-            str(state.run_dir / "checkpoints" / "best.pt"),
+            str(_best_step_checkpoint_path(state.run_dir, state.global_step)),
             is_best=True,
         )
 
@@ -415,9 +415,24 @@ def _maybe_update_best_checkpoint(state: TrainState, validation_loss: float) -> 
 
     state.best_validation_loss = validation_loss
     state.best_validation_positions = state.positions_seen
-    best_checkpoint_path = state.run_dir / "checkpoints" / "best.pt"
-    _save_training_checkpoint(state, best_checkpoint_path)
+    _write_best_checkpoint(state)
     return True
+
+
+def _write_best_checkpoint(state: TrainState) -> Path:
+    checkpoints_dir = state.run_dir / "checkpoints"
+    alias_path = checkpoints_dir / "best.pt"
+    stamped_path = _best_step_checkpoint_path(state.run_dir, state.global_step)
+    _save_training_checkpoint(state, alias_path)
+    _save_training_checkpoint(state, stamped_path)
+    for candidate in checkpoints_dir.glob("best_step_*.pt"):
+        if candidate != stamped_path:
+            candidate.unlink()
+    return stamped_path
+
+
+def _best_step_checkpoint_path(run_dir: Path, global_step: int) -> Path:
+    return run_dir / "checkpoints" / f"best_step_{global_step:08d}.pt"
 
 
 def _log_metrics(state: TrainState, metrics: dict[str, object]) -> None:

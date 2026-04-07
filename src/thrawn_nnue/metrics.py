@@ -48,7 +48,7 @@ def load_metrics_run(run_dir: str | Path) -> MetricsRun:
         validation_records=validation_records,
         best_validation_loss=best_validation_loss,
         best_validation_positions=best_validation_positions,
-        best_checkpoint_exists=(run_path / "checkpoints" / "best.pt").exists(),
+        best_checkpoint_exists=_best_checkpoint_path(run_path) is not None,
         checkpoint_config=checkpoint["config"],
         checkpoint_global_step=checkpoint["global_step"],
         checkpoint_positions_seen=checkpoint["positions_seen"],
@@ -305,6 +305,7 @@ def generate_run_plots(run: MetricsRun) -> list[Path]:
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+        from matplotlib.ticker import FuncFormatter, MaxNLocator
     except ModuleNotFoundError as exc:
         raise RuntimeError("matplotlib is required for thrawn-nnue metrics plotting") from exc
 
@@ -314,114 +315,174 @@ def generate_run_plots(run: MetricsRun) -> list[Path]:
     batch_size = _as_int(_config_value(run, "batch_size"))
 
     if run.train_records:
+        outputs.append(_plot_train_loss(plt, plots_dir / "train_loss.png", run, batch_size=batch_size))
         outputs.append(
-            _plot_losses(
+            _plot_learning_rate(
                 plt,
-                plots_dir / "train_loss.png",
-                run.train_records,
-                "positions_seen",
-                [
-                    (("loss",), "blended loss"),
-                    (("teacher_loss", "eval_loss"), "teacher target"),
-                    (("result_loss",), "game result"),
-                ],
-                "Train Loss",
-                batch_size=batch_size,
-                smooth_primary=True,
-                y_label="Loss",
-                footer_note="blended = weighted teacher-target + game-result loss",
-            )
-        )
-        outputs.append(
-            _plot_losses(
-                plt,
+                FuncFormatter,
+                MaxNLocator,
                 plots_dir / "lr.png",
                 run.train_records,
-                "positions_seen",
-                [(("lr",), "lr")],
-                "Learning Rate",
                 batch_size=batch_size,
-                smooth_primary=False,
-                y_label="Learning Rate",
             )
         )
 
     if run.validation_records:
         outputs.append(
-            _plot_losses(
+            _plot_validation_loss(
                 plt,
                 plots_dir / "validation_loss.png",
-                run.validation_records,
-                "positions_seen",
-                [
-                    (("validation_loss",), "blended loss"),
-                    (("validation_teacher_loss", "validation_eval_loss"), "teacher target"),
-                    (("validation_result_loss",), "game result"),
-                ],
-                "Validation Loss",
+                run,
                 batch_size=batch_size,
-                smooth_primary=False,
-                y_label="Loss",
-                footer_note="blended = weighted teacher-target + game-result loss",
             )
         )
 
     if run.train_records and run.validation_records:
-        outputs.append(_plot_overview(plt, plots_dir / "loss_overview.png", run, batch_size=batch_size))
+        outputs.append(
+            _plot_overview(
+                plt,
+                FuncFormatter,
+                MaxNLocator,
+                plots_dir / "loss_overview.png",
+                run,
+                batch_size=batch_size,
+            )
+        )
 
     return outputs
 
 
-def _plot_losses(
-    plt,
-    output_path: Path,
-    records: list[dict[str, object]],
-    x_key: str,
-    series: list[tuple[tuple[str, ...], str]],
-    title: str,
-    *,
-    batch_size: int | None,
-    smooth_primary: bool,
-    y_label: str,
-    footer_note: str | None = None,
-) -> Path:
-    figure, axis = plt.subplots(figsize=(9, 5.5))
-    x_values = [_record_axis(record, x_key, batch_size=batch_size) for record in records]
-    primary_values: list[float] | None = None
-    primary_smoothed: list[float] | None = None
-    for index, (fields, label) in enumerate(series):
-        y_values = [_required_metric(record, fields) for record in records]
-        if index == 0 and smooth_primary and len(y_values) >= 8:
-            primary_values = y_values
-            primary_smoothed = _moving_average(y_values, window=_smoothing_window(len(y_values)))
-            axis.plot(x_values, y_values, label=f"{label} (raw)", alpha=0.2, linewidth=1.0)
-            axis.plot(x_values, primary_smoothed, label=f"{label} (smoothed)", linewidth=2.2)
-            continue
-        axis.plot(x_values, y_values, label=label, linewidth=2.0 if index == 0 else 1.8)
-    axis.set_title(title)
-    axis.set_xlabel("Positions Seen")
-    axis.set_ylabel(y_label)
-    axis.grid(True, alpha=0.3)
-    axis.legend()
-    if primary_values is not None and primary_smoothed is not None:
-        _set_focus_ylim(axis, primary_values, primary_smoothed)
-    if footer_note is not None:
-        axis.text(
-            0.01,
-            0.01,
-            footer_note,
-            transform=axis.transAxes,
-            fontsize=9,
-            alpha=0.75,
-            va="bottom",
-        )
+def _plot_train_loss(plt, output_path: Path, run: MetricsRun, *, batch_size: int | None) -> Path:
+    figure, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True, height_ratios=[3, 2])
+    positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.train_records]
+    blended = [_required_metric(record, ("loss",)) for record in run.train_records]
+    teacher = [_required_metric(record, ("teacher_loss", "eval_loss")) for record in run.train_records]
+    result = [_required_metric(record, ("result_loss",)) for record in run.train_records]
+    smoothed = _moving_average(blended, window=_smoothing_window(len(blended)))
+
+    top_axis, bottom_axis = axes
+    top_axis.plot(positions, blended, label="blended loss (raw)", alpha=0.14, linewidth=0.9, color="C0")
+    top_axis.plot(positions, smoothed, label="blended loss (smoothed)", linewidth=2.2, color="C1")
+    top_axis.set_title("Train Loss")
+    top_axis.set_ylabel("Blended Loss")
+    top_axis.grid(True, alpha=0.3)
+    top_axis.legend(loc="upper right")
+    _set_focus_ylim(top_axis, smoothed)
+
+    bottom_axis.plot(positions, teacher, label="teacher target", linewidth=1.8, color="C2")
+    bottom_axis.plot(positions, result, label="game result", linewidth=1.8, color="C3")
+    bottom_axis.set_ylabel("Component Loss")
+    bottom_axis.grid(True, alpha=0.3)
+    bottom_axis.legend(loc="upper right")
+    _set_focus_ylim(bottom_axis, teacher, result)
+    _style_positions_axis(bottom_axis)
+    bottom_axis.set_xlabel("Positions Seen (B)")
+    bottom_axis.text(
+        0.01,
+        0.04,
+        "blended = weighted teacher-target + game-result loss",
+        transform=bottom_axis.transAxes,
+        fontsize=9,
+        alpha=0.75,
+        va="bottom",
+    )
+
     figure.tight_layout()
     figure.savefig(output_path)
     plt.close(figure)
     return output_path
 
 
-def _plot_overview(plt, output_path: Path, run: MetricsRun, *, batch_size: int | None) -> Path:
+def _plot_validation_loss(plt, output_path: Path, run: MetricsRun, *, batch_size: int | None) -> Path:
+    figure, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True, height_ratios=[3, 2])
+    positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.validation_records]
+    blended = [_required_metric(record, ("validation_loss",)) for record in run.validation_records]
+    teacher = [
+        _required_metric(record, ("validation_teacher_loss", "validation_eval_loss"))
+        for record in run.validation_records
+    ]
+    result = [_required_metric(record, ("validation_result_loss",)) for record in run.validation_records]
+
+    top_axis, bottom_axis = axes
+    top_axis.plot(positions, blended, marker="o", markersize=4.0, linewidth=2.0, color="C0", label="blended loss")
+    top_axis.set_title("Validation Loss")
+    top_axis.set_ylabel("Blended Loss")
+    top_axis.grid(True, alpha=0.3)
+    top_axis.legend(loc="upper right")
+    _set_focus_ylim(top_axis, blended)
+
+    bottom_axis.plot(
+        positions,
+        teacher,
+        marker="o",
+        markersize=4.0,
+        linewidth=1.8,
+        color="C2",
+        label="teacher target",
+    )
+    bottom_axis.plot(
+        positions,
+        result,
+        marker="o",
+        markersize=4.0,
+        linewidth=1.8,
+        color="C3",
+        label="game result",
+    )
+    bottom_axis.set_ylabel("Component Loss")
+    bottom_axis.grid(True, alpha=0.3)
+    bottom_axis.legend(loc="upper right")
+    _set_focus_ylim(bottom_axis, teacher, result)
+    _style_positions_axis(bottom_axis)
+    bottom_axis.set_xlabel("Positions Seen (B)")
+    bottom_axis.text(
+        0.01,
+        0.04,
+        "blended = weighted teacher-target + game-result loss",
+        transform=bottom_axis.transAxes,
+        fontsize=9,
+        alpha=0.75,
+        va="bottom",
+    )
+
+    figure.tight_layout()
+    figure.savefig(output_path)
+    plt.close(figure)
+    return output_path
+
+
+def _plot_learning_rate(
+    plt,
+    formatter_factory,
+    locator_factory,
+    output_path: Path,
+    records: list[dict[str, object]],
+    *,
+    batch_size: int | None,
+) -> Path:
+    figure, axis = plt.subplots(figsize=(9, 5.5))
+    positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in records]
+    lr_values = [_required_metric(record, ("lr",)) for record in records]
+    positive_values = [value for value in lr_values if value > 0.0]
+    lr_floor = (min(positive_values) / 10.0) if positive_values else 1e-12
+    plotted_values = [value if value > 0.0 else lr_floor for value in lr_values]
+    axis.step(positions, plotted_values, where="post", linewidth=2.0, color="C0", label="learning rate")
+    axis.set_title("Learning Rate")
+    axis.set_xlabel("Positions Seen (B)")
+    axis.set_ylabel("Learning Rate")
+    axis.set_yscale("log")
+    axis.grid(True, alpha=0.3)
+    axis.grid(True, which="minor", alpha=0.15)
+    axis.legend(loc="upper right")
+    axis.xaxis.set_major_formatter(formatter_factory(_positions_billions_formatter))
+    axis.xaxis.set_major_locator(locator_factory(nbins=6))
+    figure.tight_layout()
+    figure.savefig(output_path)
+    plt.close(figure)
+    return output_path
+
+
+def _plot_overview(plt, formatter_factory, locator_factory, output_path: Path, run: MetricsRun, *, batch_size: int | None) -> Path:
     figure, axis = plt.subplots(figsize=(9, 5.5))
     train_positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.train_records]
     train_loss = [_required_metric(record, ("loss",)) for record in run.train_records]
@@ -434,31 +495,63 @@ def _plot_overview(plt, output_path: Path, run: MetricsRun, *, batch_size: int |
 
     axis.plot(
         train_positions,
-        train_loss,
-        label="train blended (raw)",
-        alpha=0.12,
-        linewidth=0.9,
-    )
-    axis.plot(
-        train_positions,
         smoothed_train,
         label="train blended (smoothed)",
         linewidth=2.2,
+        color="C1",
     )
     axis.plot(
         validation_positions,
         validation_loss,
         label="validation blended",
         marker="o",
-        markersize=3.5,
+        markersize=4.0,
         linewidth=2.0,
+        color="C2",
     )
     axis.set_title("Loss Overview")
-    axis.set_xlabel("Positions Seen")
+    axis.set_xlabel("Positions Seen (B)")
     axis.set_ylabel("Loss")
     axis.grid(True, alpha=0.3)
-    axis.legend()
-    _set_focus_ylim(axis, train_loss + validation_loss, smoothed_train + validation_loss)
+    axis.legend(loc="upper right")
+    axis.xaxis.set_major_formatter(formatter_factory(_positions_billions_formatter))
+    axis.xaxis.set_major_locator(locator_factory(nbins=6))
+    _set_focus_ylim(axis, smoothed_train, validation_loss)
+
+    best_index = _best_validation_index(run, batch_size=batch_size)
+    if best_index is not None:
+        best_position = validation_positions[best_index]
+        best_loss = validation_loss[best_index]
+        best_step = int(run.validation_records[best_index].get("global_step", 0))
+        axis.scatter([best_position], [best_loss], s=40, color="C3", zorder=4, label="_nolegend_")
+        axis.annotate(
+            f"best step {best_step}\n{_format_positions_billions(best_position)}, loss {best_loss:.6f}",
+            xy=(best_position, best_loss),
+            xytext=(10, 10),
+            textcoords="offset points",
+            fontsize=9,
+            bbox={"boxstyle": "round,pad=0.3", "fc": "white", "alpha": 0.9},
+            arrowprops={"arrowstyle": "->", "alpha": 0.6},
+        )
+
+    metadata = "\n".join(
+        [
+            f"validation interval: {_format_optional_int(_effective_validation_interval(run))}",
+            f"validation points: {len(run.validation_records)}",
+            f"best checkpoint step: {_format_optional_int(run.checkpoint_global_step)}",
+        ]
+    )
+    axis.text(
+        0.015,
+        0.97,
+        metadata,
+        transform=axis.transAxes,
+        fontsize=9,
+        alpha=0.8,
+        va="top",
+        bbox={"boxstyle": "round,pad=0.3", "fc": "white", "alpha": 0.85},
+    )
+
     figure.tight_layout()
     figure.savefig(output_path)
     plt.close(figure)
@@ -483,20 +576,32 @@ def _smoothing_window(length: int) -> int:
     return max(5, min(401, length // 50))
 
 
-def _set_focus_ylim(axis, raw_values: list[float], trend_values: list[float]) -> None:
-    if not raw_values or not trend_values:
+def _style_positions_axis(axis) -> None:
+    from matplotlib.ticker import FuncFormatter, MaxNLocator
+
+    axis.xaxis.set_major_formatter(FuncFormatter(_positions_billions_formatter))
+    axis.xaxis.set_major_locator(MaxNLocator(nbins=6))
+
+
+def _positions_billions_formatter(value: float, _position: int) -> str:
+    return _format_positions_billions(value)
+
+
+def _format_positions_billions(value: float) -> str:
+    scaled = float(value) / 1_000_000_000.0
+    if abs(scaled) >= 10.0 or scaled.is_integer():
+        return f"{scaled:.0f}B"
+    return f"{scaled:.1f}B"
+
+
+def _set_focus_ylim(axis, *series_groups: list[float]) -> None:
+    values = [value for group in series_groups for value in group if math.isfinite(value)]
+    if not values:
         return
-    trend_min = min(trend_values)
-    trend_max = max(trend_values)
-    spread = max(trend_max - trend_min, 1e-9)
-    lower = min(raw_values)
-    upper = max(raw_values)
-    padded_lower = max(lower, trend_min - spread * 0.35)
-    padded_upper = min(upper, trend_max + spread * 0.35)
-    if padded_upper <= padded_lower:
-        padded_lower = lower
-        padded_upper = upper
-    axis.set_ylim(padded_lower, padded_upper)
+    lower = min(values)
+    upper = max(values)
+    spread = max(upper - lower, 1e-9)
+    axis.set_ylim(lower - spread * 0.12, upper + spread * 0.12)
 
 
 def _load_jsonl(path: Path) -> list[dict[str, object]]:
@@ -511,8 +616,8 @@ def _load_jsonl(path: Path) -> list[dict[str, object]]:
 
 
 def _checkpoint_diagnostics(run_dir: Path) -> dict[str, object]:
-    checkpoint_path = run_dir / "checkpoints" / "best.pt"
-    if not checkpoint_path.exists():
+    checkpoint_path = _best_checkpoint_path(run_dir)
+    if checkpoint_path is None:
         return {
             "best_validation_loss": None,
             "best_validation_positions": None,
@@ -550,6 +655,39 @@ def _checkpoint_diagnostics(run_dir: Path) -> dict[str, object]:
         "global_step": payload.get("global_step"),
         "positions_seen": positions_seen,
     }
+
+
+def _best_checkpoint_path(run_dir: Path) -> Path | None:
+    alias_path = run_dir / "checkpoints" / "best.pt"
+    if alias_path.exists():
+        return alias_path
+    stamped_paths = sorted((run_dir / "checkpoints").glob("best_step_*.pt"))
+    if stamped_paths:
+        return stamped_paths[-1]
+    return None
+
+
+def _effective_validation_interval(run: MetricsRun) -> int | None:
+    configured = _as_int(_config_value(run, "validation_interval_positions"))
+    if configured not in (None, 0):
+        return configured
+    return _as_int(_config_value(run, "superbatch_positions"))
+
+
+def _best_validation_index(run: MetricsRun, *, batch_size: int | None) -> int | None:
+    if not run.validation_records:
+        return None
+    if run.best_validation_positions is not None:
+        for index, record in enumerate(run.validation_records):
+            if _record_positions(record, batch_size) == run.best_validation_positions:
+                return index
+    best_loss = run.best_validation_loss
+    if best_loss is None:
+        best_loss = min(_required_metric(record, ("validation_loss",)) for record in run.validation_records)
+    for index, record in enumerate(run.validation_records):
+        if math.isclose(_required_metric(record, ("validation_loss",)), best_loss, rel_tol=0.0, abs_tol=1e-12):
+            return index
+    return None
 
 
 def _record_step(record: dict[str, object] | None) -> int | None:

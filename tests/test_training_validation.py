@@ -104,11 +104,25 @@ class ValidationTrainingTests(unittest.TestCase):
             state.global_step = 5
             state.positions_seen = 4_096
             self.assertTrue(_maybe_update_best_checkpoint(state, 0.25))
-            self.assertTrue((state.run_dir / "checkpoints" / "best.pt").exists())
+            best_path = state.run_dir / "checkpoints" / "best.pt"
+            stamped_paths = sorted((state.run_dir / "checkpoints").glob("best_step_*.pt"))
+            self.assertTrue(best_path.exists())
+            self.assertEqual([path.name for path in stamped_paths], ["best_step_00000005.pt"])
+            stamped_payload = load_checkpoint(stamped_paths[0])
+            self.assertEqual(stamped_payload["global_step"], 5)
             self.assertEqual(state.best_validation_positions, 4_096)
             self.assertFalse(_maybe_update_best_checkpoint(state, 0.30))
+            self.assertEqual(
+                [path.name for path in (state.run_dir / "checkpoints").glob("best_step_*.pt")],
+                ["best_step_00000005.pt"],
+            )
+            state.global_step = 7
             state.positions_seen = 8_192
             self.assertTrue(_maybe_update_best_checkpoint(state, 0.20))
+            stamped_paths = sorted((state.run_dir / "checkpoints").glob("best_step_*.pt"))
+            self.assertEqual([path.name for path in stamped_paths], ["best_step_00000007.pt"])
+            stamped_payload = load_checkpoint(stamped_paths[0])
+            self.assertEqual(stamped_payload["global_step"], 7)
             self.assertEqual(state.best_validation_positions, 8_192)
 
     def test_train_with_validation_writes_metrics_and_best_checkpoint(self) -> None:
@@ -137,8 +151,10 @@ class ValidationTrainingTests(unittest.TestCase):
             train_from_config(config)
 
             best_path = Path(config.output_dir) / "checkpoints" / "best.pt"
+            stamped_paths = sorted((Path(config.output_dir) / "checkpoints").glob("best_step_*.pt"))
             metrics_path = Path(config.output_dir) / "metrics.jsonl"
             self.assertTrue(best_path.exists())
+            self.assertEqual(len(stamped_paths), 1)
             self.assertTrue(metrics_path.exists())
 
             records = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
