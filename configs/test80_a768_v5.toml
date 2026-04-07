@@ -1,5 +1,5 @@
-run_name = "test80_a768_v5"
-output_dir = "runs/test80_a768_v5"
+run_name = "test80_a768_v5_stmfix"
+output_dir = "runs/test80_a768_v5_stmfix"
 
 train_datasets = [
   "/Users/flin/src/thrawn-nnue/data/test80-2024-01-jan-2tb7p.min-v2.v6.binpack",
@@ -14,7 +14,7 @@ validation_datasets = [
 
 device = "mps"
 num_loader_threads = 12
-batch_size = 16384
+batch_size = 32768
 
 total_train_positions = 4000000000
 superbatch_positions = 500000000
@@ -47,4 +47,4 @@ lr_drop_factor = 0.1
 
 export_ft_scale = 127.0
 export_dense_scale = 96.0
-export_description = "thrawn a768 dual nnue v5 8bucket"
+export_description = "thrawn a768 dual nnue v5 stmfix 8bucket"

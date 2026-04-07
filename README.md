@@ -55,7 +55,15 @@ thrawn-nnue export --checkpoint runs/default/checkpoints/best.pt --out runs/defa
 thrawn-nnue verify-export --checkpoint runs/default/checkpoints/step_00010000.pt --nnue runs/default/model.nnue
 ```
 
-8. Summarize the run and generate plots:
+8. Calibrate engine centipawn scaling from validation data:
+
+```bash
+thrawn-nnue calibrate-scale --nnue runs/default/model.nnue --validation-path /absolute/path/to/valid.binpack
+```
+
+This prints JSON containing `cp_per_raw` and `raw_per_cp`, plus fit quality metrics and a small hardcoded-position sanity block.
+
+9. Summarize the run and generate plots:
 
 ```bash
 thrawn-nnue metrics --run-dir runs/default

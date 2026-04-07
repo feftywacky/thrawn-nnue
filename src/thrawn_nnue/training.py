@@ -252,6 +252,12 @@ def _create_scheduler(config: TrainConfig, optimizer, torch):
 
 def _run_train_step(state: TrainState, batch, torch, *, autocast_enabled: bool):
     tensors = batch.to_torch(state.device)
+    score_cp_stm, result_wdl_stm = _stm_oriented_targets(
+        tensors["score_cp"],
+        tensors["result_wdl"],
+        tensors["stm"],
+        torch,
+    )
     bucket_indices = _output_bucket_indices(tensors["white_counts"], state.config.output_buckets, torch)
     state.model.train()
     state.optimizer.zero_grad(set_to_none=True)
@@ -262,11 +268,11 @@ def _run_train_step(state: TrainState, batch, torch, *, autocast_enabled: bool):
             tensors["stm"],
             bucket_indices,
         )
-        normalized_scores = _normalize_teacher_scores(tensors["score_cp"], state.config, torch)
+        normalized_scores = _normalize_teacher_scores(score_cp_stm, state.config, torch)
         loss, teacher_loss, result_loss = _blended_loss(
             prediction_cp,
             normalized_scores,
-            tensors["result_wdl"],
+            result_wdl_stm,
             state.config.wdl_scale,
             state.config.eval_lambda,
             torch,
@@ -312,6 +318,13 @@ def _normalize_teacher_scores(scores, config: TrainConfig, torch):
     return normalized
 
 
+def _stm_oriented_targets(score_cp, result_wdl, stm, torch):
+    stm_white = stm.ge(0.5)
+    score_cp_stm = torch.where(stm_white, score_cp, -score_cp)
+    result_wdl_stm = torch.where(stm_white, result_wdl, 1.0 - result_wdl)
+    return score_cp_stm, result_wdl_stm
+
+
 def _run_validation(state: TrainState) -> dict[str, object]:
     torch = _require_torch()
     autocast_enabled = _amp_enabled(torch, state.config, state.device)
@@ -347,6 +360,12 @@ def _run_validation(state: TrainState) -> dict[str, object]:
                     remaining_positions -= batch_positions
 
                 tensors = batch.to_torch(state.device)
+                score_cp_stm, result_wdl_stm = _stm_oriented_targets(
+                    tensors["score_cp"],
+                    tensors["result_wdl"],
+                    tensors["stm"],
+                    torch,
+                )
                 bucket_indices = _output_bucket_indices(tensors["white_counts"], state.config.output_buckets, torch)
                 with _autocast_context(torch, state.device, autocast_enabled):
                     prediction_cp = state.model(
@@ -355,11 +374,11 @@ def _run_validation(state: TrainState) -> dict[str, object]:
                         tensors["stm"],
                         bucket_indices,
                     )
-                    normalized_scores = _normalize_teacher_scores(tensors["score_cp"], state.config, torch)
+                    normalized_scores = _normalize_teacher_scores(score_cp_stm, state.config, torch)
                     loss, teacher_loss, result_loss = _blended_loss(
                         prediction_cp,
                         normalized_scores,
-                        tensors["result_wdl"],
+                        result_wdl_stm,
                         state.config.wdl_scale,
                         state.config.eval_lambda,
                         torch,
@@ -367,7 +386,7 @@ def _run_validation(state: TrainState) -> dict[str, object]:
 
                 pred_wdl = _wdl_from_cp(prediction_cp, state.config.wdl_scale, torch)
                 target_wdl = _wdl_from_cp(normalized_scores, state.config.wdl_scale, torch)
-                result_bucket = _wdl_bucket(tensors["result_wdl"])
+                result_bucket = _wdl_bucket(result_wdl_stm)
                 pred_bucket = _wdl_bucket(pred_wdl)
                 target_bucket = _wdl_bucket(target_wdl)
 
