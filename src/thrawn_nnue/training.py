@@ -253,6 +253,7 @@ def _run_training_loop(state: TrainState) -> None:
             superbatch_positions=state.config.superbatch_positions,
             validation_interval_positions=validation_interval_positions,
             log_every=state.config.log_every,
+            prefetch_batches=state.config.prefetch_batches,
         )
     )
 

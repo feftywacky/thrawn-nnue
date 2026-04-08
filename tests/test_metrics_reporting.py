@@ -514,6 +514,7 @@ class MetricsCliTests(unittest.TestCase):
 class ProgressReporterTests(unittest.TestCase):
     def test_progress_reporter_uses_position_budget_totals(self) -> None:
         writes: list[str] = []
+        postfixes: list[dict[str, object]] = []
 
         class FakeBar:
             def __init__(self) -> None:
@@ -526,6 +527,7 @@ class ProgressReporterTests(unittest.TestCase):
                 self.n += amount
 
             def set_postfix(self, postfix: dict[str, object], refresh: bool = False) -> None:
+                postfixes.append(dict(postfix))
                 return None
 
             def close(self) -> None:
@@ -551,12 +553,29 @@ class ProgressReporterTests(unittest.TestCase):
                     superbatch_positions=500,
                     validation_interval_positions=250,
                     log_every=25,
+                    prefetch_batches=2,
                 )
+            )
+            reporter.update_train(
+                global_step=3,
+                positions_seen=384,
+                superbatch_index=1,
+                loss=0.1234,
+                lr=0.001,
+                step_seconds=0.25,
+                train_positions_per_second=1024.0,
             )
 
         self.assertEqual(calls[0]["total"], 1_000)
         self.assertEqual(calls[0]["initial"], 128)
+        self.assertIn("bar_format", calls[0])
         self.assertTrue(any("total_positions=1,000" in message for message in writes))
+        self.assertTrue(any("prefetch_batches=2" in message for message in writes))
+        self.assertTrue(any("train metrics:" in message for message in writes))
+        self.assertEqual(postfixes[-1]["step"], 3)
+        self.assertIn("step_time_s", postfixes[-1])
+        self.assertIn("step_pos_s", postfixes[-1])
+        self.assertNotIn("pos/s", postfixes[-1])
 
 
 if __name__ == "__main__":

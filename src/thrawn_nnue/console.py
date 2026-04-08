@@ -17,6 +17,7 @@ class ConsoleContext:
     superbatch_positions: int
     validation_interval_positions: int
     log_every: int
+    prefetch_batches: int = 0
 
 
 class _BaseReporter:
@@ -67,6 +68,7 @@ class TextReporter(_BaseReporter):
             f" validation_shards={context.validation_shards}"
             f" total_positions={_format_count(context.total_train_positions)}"
             f" batch_size={_format_count(context.batch_size)}"
+            f" prefetch_batches={context.prefetch_batches}"
         )
         print(
             "training stream:"
@@ -75,6 +77,7 @@ class TextReporter(_BaseReporter):
             f" validation_interval_positions={_format_count(context.validation_interval_positions)};"
             f" validation uses non-cyclic passes across {context.validation_shards} validation shard(s)"
         )
+        print(_train_metric_legend_line())
 
     def update_train(
         self,
@@ -96,8 +99,8 @@ class TextReporter(_BaseReporter):
             f"superbatch={superbatch_index}",
             f"loss={loss:.6f}",
             f"lr={lr:.8f}",
-            f"step_time={step_seconds:.3f}s",
-            f"pos_per_sec={_format_rate(train_positions_per_second)}",
+            f"step_time_s={step_seconds:.3f}",
+            f"step_pos_s={_format_rate(train_positions_per_second)}",
             f"elapsed={_format_seconds(elapsed)}",
         ]
         if self._latest_validation_loss is not None:
@@ -150,6 +153,7 @@ class ProgressReporter(_BaseReporter):
             dynamic_ncols=True,
             file=sys.stdout,
             unit="pos",
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
         )
         self._bar.write(
             "training start:"
@@ -159,6 +163,7 @@ class ProgressReporter(_BaseReporter):
             f" validation_shards={context.validation_shards}"
             f" total_positions={_format_count(context.total_train_positions)}"
             f" batch_size={_format_count(context.batch_size)}"
+            f" prefetch_batches={context.prefetch_batches}"
         )
         self._bar.write(
             "training stream:"
@@ -167,6 +172,7 @@ class ProgressReporter(_BaseReporter):
             f" validation_interval_positions={_format_count(context.validation_interval_positions)};"
             f" validation uses non-cyclic passes across {context.validation_shards} validation shard(s)"
         )
+        self._bar.write(_train_metric_legend_line())
 
     def update_train(
         self,
@@ -188,8 +194,8 @@ class ProgressReporter(_BaseReporter):
             "sb": superbatch_index,
             "loss": f"{loss:.4f}",
             "lr": f"{lr:.2e}",
-            "step_s": f"{step_seconds:.3f}",
-            "pos/s": _format_rate(train_positions_per_second),
+            "step_time_s": f"{step_seconds:.3f}",
+            "step_pos_s": _format_rate(train_positions_per_second),
         }
         if self._latest_validation_loss is not None:
             postfix["val"] = f"{self._latest_validation_loss:.4f}"
@@ -273,3 +279,12 @@ def _format_rate(value: float) -> str:
     if clamped >= 100.0:
         return f"{clamped:,.0f}"
     return f"{clamped:,.1f}"
+
+
+def _train_metric_legend_line() -> str:
+    return (
+        "train metrics:"
+        " step=optimizer step;"
+        " step_time_s=last-step wall time (seconds);"
+        " step_pos_s=positions processed in the most recent step"
+    )

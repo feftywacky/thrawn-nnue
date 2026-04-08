@@ -480,8 +480,10 @@ class ValidationTrainingTests(unittest.TestCase):
             self.assertIn("training start:", output)
             self.assertIn("positions=", output)
             self.assertIn("validation done:", output)
-            self.assertIn("step_time=", output)
-            self.assertIn("pos_per_sec=", output)
+            self.assertIn("prefetch_batches=0", output)
+            self.assertIn("train metrics:", output)
+            self.assertIn("step_time_s=", output)
+            self.assertIn("step_pos_s=", output)
             self.assertNotIn('{"event": "train"', output)
             self.assertNotIn('{"event": "validation"', output)
 
