@@ -31,20 +31,27 @@ class InspectAnalysisTests(unittest.TestCase):
             self.assertIn("wdl_scale_diagnostics", stats)
             self.assertIn("recommendation", stats)
             self.assertIn("recommended_wdl_scale", stats["recommendation"])
+            self.assertIn("effective_raw_wdl_scale", stats["recommendation"])
 
     def test_recommendation_flags_high_saturation_for_large_score_distribution(self) -> None:
         synthetic = {
+            "entries_read": 10,
             "mean_abs_score": 7920.0,
             "abs_score_percentiles": {"p95": 14000.0, "p99": 20000.0},
         }
         synthetic["wdl_scale_diagnostics"] = _wdl_scale_diagnostics(synthetic)
         recommendation = _inspect_recommendation(synthetic)
         self.assertTrue(recommendation["saturated_at_default_wdl_scale"])
-        self.assertGreaterEqual(recommendation["recommended_wdl_scale"], 2000.0)
+        self.assertEqual(recommendation["recommended_wdl_scale"], 410.0)
         self.assertGreater(recommendation["recommended_score_scale"], 1.0)
+        self.assertEqual(recommendation["effective_raw_wdl_scale"], 4100.0)
+        self.assertFalse(recommendation["teacher_target_collapse_risk"])
+        self.assertTrue(recommendation["raw_space_pair_collapse_risk"])
+        self.assertIn("collapse teacher targets", " ".join(recommendation["notes"]))
 
     def test_recommendation_stays_mild_for_small_score_distribution(self) -> None:
         synthetic = {
+            "entries_read": 10,
             "mean_abs_score": 180.0,
             "abs_score_percentiles": {"p95": 500.0, "p99": 900.0},
         }
@@ -53,6 +60,21 @@ class InspectAnalysisTests(unittest.TestCase):
         self.assertFalse(recommendation["saturated_at_default_wdl_scale"])
         self.assertEqual(recommendation["recommended_score_clip"], 0.0)
         self.assertEqual(recommendation["recommended_score_scale"], 1.0)
+        self.assertEqual(recommendation["recommended_wdl_scale"], 410.0)
+        self.assertEqual(recommendation["effective_raw_wdl_scale"], 410.0)
+        self.assertFalse(recommendation["teacher_target_collapse_risk"])
+
+    def test_recommendation_flags_empty_or_unreadable_dataset(self) -> None:
+        synthetic = {
+            "entries_read": 0,
+            "mean_abs_score": 0.0,
+            "abs_score_percentiles": {"p95": 0.0, "p99": 0.0},
+        }
+        synthetic["wdl_scale_diagnostics"] = _wdl_scale_diagnostics(synthetic)
+        recommendation = _inspect_recommendation(synthetic)
+        self.assertFalse(recommendation["teacher_target_collapse_risk"])
+        self.assertFalse(recommendation["raw_space_pair_collapse_risk"])
+        self.assertIn("empty or unreadable", " ".join(recommendation["notes"]))
 
     def test_discover_binpack_files_walks_directories(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

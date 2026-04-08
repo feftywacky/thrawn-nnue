@@ -394,8 +394,8 @@ def _wdl_scale_diagnostics(stats: dict[str, object]) -> dict[str, dict[str, floa
     candidate_scales = [410.0, 1000.0, 2000.0, 4000.0, 8000.0]
     diagnostics: dict[str, dict[str, float]] = {}
     for scale in candidate_scales:
-        transformed = 1.0 / (1.0 + np.exp(-(mean_abs_score / scale)))
-        p95_transformed = 1.0 / (1.0 + np.exp(-(float(stats["abs_score_percentiles"]["p95"]) / scale)))
+        transformed = _wdl_target(mean_abs_score, scale)
+        p95_transformed = _wdl_target(float(stats["abs_score_percentiles"]["p95"]), scale)
         diagnostics[str(int(scale))] = {
             "mean_abs_score_target": float(transformed),
             "p95_abs_score_target": float(p95_transformed),
@@ -404,20 +404,47 @@ def _wdl_scale_diagnostics(stats: dict[str, object]) -> dict[str, dict[str, floa
     return diagnostics
 
 
+def _wdl_target(abs_score: float, effective_raw_wdl_scale: float) -> float:
+    return float(1.0 / (1.0 + np.exp(-(abs_score / effective_raw_wdl_scale))))
+
+
+def _recommend_wdl_scale(mean_abs_score: float, abs_p95: float, score_scale: float) -> float:
+    normalized_mean_abs_score = mean_abs_score / score_scale
+    normalized_abs_p95 = abs_p95 / score_scale
+    for candidate in [410.0, 1000.0, 2000.0, 4000.0, 8000.0]:
+        mean_target = _wdl_target(normalized_mean_abs_score, candidate)
+        p95_target = _wdl_target(normalized_abs_p95, candidate)
+        if mean_target < 0.95 and p95_target < 0.995:
+            return candidate
+    return 8000.0
+
+
+def _teacher_target_collapse_risk(mean_abs_score: float, abs_p95: float, effective_raw_wdl_scale: float) -> bool:
+    mean_target = _wdl_target(mean_abs_score, effective_raw_wdl_scale)
+    p95_target = _wdl_target(abs_p95, effective_raw_wdl_scale)
+    return mean_target < 0.55 and p95_target < 0.60
+
+
 def _inspect_recommendation(stats: dict[str, object]) -> dict[str, object]:
+    entries_read = int(stats.get("entries_read", 0))
     abs_p95 = float(stats["abs_score_percentiles"]["p95"])
     abs_p99 = float(stats["abs_score_percentiles"]["p99"])
     mean_abs_score = float(stats["mean_abs_score"])
     diagnostics = stats["wdl_scale_diagnostics"]
 
-    recommended_wdl_scale = 410.0
-    for candidate in [1000.0, 2000.0, 4000.0, 8000.0]:
-        candidate_diag = diagnostics[str(int(candidate))]
-        if candidate_diag["mean_abs_score_target"] < 0.95 and candidate_diag["p95_abs_score_target"] < 0.995:
-            recommended_wdl_scale = candidate
-            break
-    else:
-        recommended_wdl_scale = 8000.0
+    if entries_read == 0:
+        return {
+            "saturated_at_default_wdl_scale": False,
+            "recommended_wdl_scale": 410.0,
+            "recommended_score_clip": 0.0,
+            "recommended_score_scale": 1.0,
+            "effective_raw_wdl_scale": 410.0,
+            "effective_mean_abs_score_target": 0.5,
+            "effective_p95_abs_score_target": 0.5,
+            "teacher_target_collapse_risk": False,
+            "raw_space_pair_collapse_risk": False,
+            "notes": ["dataset is empty or unreadable; verify the binpack path before using this recommendation"],
+        }
 
     recommended_score_clip = 0.0
     if abs_p99 >= 16000:
@@ -431,6 +458,23 @@ def _inspect_recommendation(stats: dict[str, object]) -> dict[str, object]:
     elif mean_abs_score >= 2000:
         recommended_score_scale = 4.0
 
+    raw_space_recommended_wdl_scale = _recommend_wdl_scale(mean_abs_score, abs_p95, 1.0)
+    recommended_wdl_scale = _recommend_wdl_scale(mean_abs_score, abs_p95, recommended_score_scale)
+    effective_raw_wdl_scale = recommended_score_scale * recommended_wdl_scale
+    effective_mean_abs_score_target = _wdl_target(mean_abs_score, effective_raw_wdl_scale)
+    effective_p95_abs_score_target = _wdl_target(abs_p95, effective_raw_wdl_scale)
+    teacher_target_collapse_risk = _teacher_target_collapse_risk(
+        mean_abs_score,
+        abs_p95,
+        effective_raw_wdl_scale,
+    )
+    raw_space_effective_raw_wdl_scale = recommended_score_scale * raw_space_recommended_wdl_scale
+    raw_space_pair_collapse_risk = _teacher_target_collapse_risk(
+        mean_abs_score,
+        abs_p95,
+        raw_space_effective_raw_wdl_scale,
+    )
+
     saturated_at_410 = bool(diagnostics["410"]["high_saturation_proxy"] >= 0.5)
     notes = []
     if saturated_at_410:
@@ -439,6 +483,10 @@ def _inspect_recommendation(stats: dict[str, object]) -> dict[str, object]:
         notes.append("extreme score tails suggest enabling score clipping")
     if recommended_score_scale != 1.0:
         notes.append("score magnitudes look unusually large for direct centipawn-style use")
+    if raw_space_pair_collapse_risk:
+        notes.append("combining score_scale with a raw-space wdl_scale would collapse teacher targets")
+    if teacher_target_collapse_risk:
+        notes.append("recommended score_scale and wdl_scale still keep teacher targets too close to 0.5")
     if not notes:
         notes.append("current score distribution looks usable without aggressive normalization")
 
@@ -447,5 +495,10 @@ def _inspect_recommendation(stats: dict[str, object]) -> dict[str, object]:
         "recommended_wdl_scale": recommended_wdl_scale,
         "recommended_score_clip": recommended_score_clip,
         "recommended_score_scale": recommended_score_scale,
+        "effective_raw_wdl_scale": effective_raw_wdl_scale,
+        "effective_mean_abs_score_target": effective_mean_abs_score_target,
+        "effective_p95_abs_score_target": effective_p95_abs_score_target,
+        "teacher_target_collapse_risk": teacher_target_collapse_risk,
+        "raw_space_pair_collapse_risk": raw_space_pair_collapse_risk,
         "notes": notes,
     }
