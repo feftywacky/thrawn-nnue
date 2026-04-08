@@ -48,6 +48,27 @@ class ValidationConfigTests(unittest.TestCase):
                 }
             )
 
+    def test_prefetch_batches_accepts_zero_and_rejects_negative_values(self) -> None:
+        config = TrainConfig.from_dict(
+            {
+                "train_datasets": ["/tmp/train.binpack"],
+                "total_train_positions": 10_000,
+                "superbatch_positions": 1_000,
+                "prefetch_batches": 0,
+            }
+        )
+        self.assertEqual(config.prefetch_batches, 0)
+
+        with self.assertRaises(ValueError):
+            TrainConfig.from_dict(
+                {
+                    "train_datasets": ["/tmp/train.binpack"],
+                    "total_train_positions": 10_000,
+                    "superbatch_positions": 1_000,
+                    "prefetch_batches": -1,
+                }
+            )
+
     def test_console_mode_is_validated(self) -> None:
         with self.assertRaises(ValueError):
             TrainConfig.from_dict(

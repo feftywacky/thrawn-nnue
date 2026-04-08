@@ -15,6 +15,7 @@ class TrainConfig:
     validation_datasets: list[str] = field(default_factory=list)
     device: str = "auto"
     num_loader_threads: int = 2
+    prefetch_batches: int = 0
     batch_size: int = 256
     total_train_positions: int = 0
     superbatch_positions: int = 0
@@ -103,6 +104,8 @@ class TrainConfig:
             raise ValueError("export scales must be > 0")
         if self.num_loader_threads <= 0:
             raise ValueError("num_loader_threads must be positive")
+        if self.prefetch_batches < 0:
+            raise ValueError("prefetch_batches must be >= 0")
         if self.checkpoint_every <= 0:
             raise ValueError("checkpoint_every must be positive")
         if self.log_every <= 0:

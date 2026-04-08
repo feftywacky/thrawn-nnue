@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import math
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -18,16 +19,50 @@ except ModuleNotFoundError:
 
 from thrawn_nnue.checkpoint import load_checkpoint
 from thrawn_nnue.config import TrainConfig
-from thrawn_nnue.native import inspect_binpack, write_fixture_binpack
+from thrawn_nnue.native import NativeBatch, inspect_binpack, write_fixture_binpack
 from thrawn_nnue.training import (
+    _PreparedBatchSource,
     _create_state,
     _maybe_update_best_checkpoint,
     _normalize_teacher_scores,
-    _stm_oriented_targets,
     _run_validation,
+    _stm_oriented_targets,
     resume_training,
     train_from_config,
 )
+
+
+def _make_native_batch(values: list[float]) -> NativeBatch:
+    size = len(values)
+    return NativeBatch(
+        white_indices=np.zeros((size, 32), dtype=np.int32),
+        black_indices=np.zeros((size, 32), dtype=np.int32),
+        white_counts=np.full((size,), 16, dtype=np.int32),
+        black_counts=np.full((size,), 16, dtype=np.int32),
+        stm=np.ones((size,), dtype=np.float32),
+        score_cp=np.asarray(values, dtype=np.float32),
+        result_wdl=np.full((size,), 0.5, dtype=np.float32),
+    )
+
+
+class _DummyStream:
+    def __init__(self, batches: list[NativeBatch], *, fail_on_call: int | None = None) -> None:
+        self._batches = list(batches)
+        self._fail_on_call = fail_on_call
+        self.requests: list[int] = []
+        self.calls = 0
+
+    def next_batch(self, batch_size: int) -> NativeBatch | None:
+        self.calls += 1
+        self.requests.append(batch_size)
+        if self._fail_on_call is not None and self.calls == self._fail_on_call:
+            raise RuntimeError("synthetic producer failure")
+        if not self._batches:
+            return None
+        batch = self._batches.pop(0)
+        if batch.stm.shape[0] > batch_size:
+            raise AssertionError("requested batch size smaller than fixture batch")
+        return batch
 
 
 @unittest.skipUnless(torch is not None, "PyTorch is required for validation training tests")
@@ -58,6 +93,83 @@ class ValidationTrainingTests(unittest.TestCase):
         expected_result = torch.tensor([[1.0], [1.0], [0.5], [0.5]], dtype=torch.float32)
         self.assertTrue(torch.equal(oriented_score, expected_score))
         self.assertTrue(torch.equal(oriented_result, expected_result))
+
+    def test_prefetched_batches_match_synchronous_order(self) -> None:
+        expected_batches = [_make_native_batch([1.0, 2.0]), _make_native_batch([3.0]), _make_native_batch([4.0, 5.0])]
+
+        sync_stream = _DummyStream([_make_native_batch([1.0, 2.0]), _make_native_batch([3.0]), _make_native_batch([4.0, 5.0])])
+        with _PreparedBatchSource(
+            sync_stream,
+            batch_size=2,
+            total_positions=None,
+            prefetch_batches=0,
+            torch=torch,
+        ) as sync_source:
+            sync_scores = [batch.tensors["score_cp"].squeeze(1).tolist() for batch in sync_source]
+
+        prefetched_stream = _DummyStream(expected_batches)
+        with _PreparedBatchSource(
+            prefetched_stream,
+            batch_size=2,
+            total_positions=None,
+            prefetch_batches=2,
+            torch=torch,
+        ) as prefetched_source:
+            prefetched_scores = [batch.tensors["score_cp"].squeeze(1).tolist() for batch in prefetched_source]
+
+        self.assertEqual(sync_scores, prefetched_scores)
+        self.assertEqual(prefetched_stream.requests, [2, 2, 2, 2])
+
+    def test_prefetch_source_handles_eof_and_exact_position_budget(self) -> None:
+        validation_stream = _DummyStream([_make_native_batch([1.0, 2.0]), _make_native_batch([3.0])])
+        with _PreparedBatchSource(
+            validation_stream,
+            batch_size=2,
+            total_positions=None,
+            prefetch_batches=2,
+            torch=torch,
+        ) as validation_source:
+            validation_sizes = [batch.batch_positions for batch in validation_source]
+        self.assertEqual(validation_sizes, [2, 1])
+
+        budgeted_stream = _DummyStream([_make_native_batch([1.0, 2.0]), _make_native_batch([3.0])])
+        with _PreparedBatchSource(
+            budgeted_stream,
+            batch_size=2,
+            total_positions=3,
+            prefetch_batches=2,
+            torch=torch,
+        ) as budgeted_source:
+            budgeted_sizes = [batch.batch_positions for batch in budgeted_source]
+        self.assertEqual(budgeted_sizes, [2, 1])
+        self.assertEqual(budgeted_stream.requests, [2, 1])
+
+    def test_prefetch_source_propagates_producer_exceptions(self) -> None:
+        stream = _DummyStream([_make_native_batch([1.0, 2.0])], fail_on_call=2)
+        with _PreparedBatchSource(
+            stream,
+            batch_size=2,
+            total_positions=None,
+            prefetch_batches=2,
+            torch=torch,
+        ) as source:
+            first = next(source)
+            self.assertEqual(first.batch_positions, 2)
+            with self.assertRaisesRegex(RuntimeError, "synthetic producer failure"):
+                next(source)
+
+    def test_prefetch_batches_zero_uses_synchronous_path_without_background_thread(self) -> None:
+        stream = _DummyStream([_make_native_batch([1.0])])
+        source = _PreparedBatchSource(
+            stream,
+            batch_size=1,
+            total_positions=None,
+            prefetch_batches=0,
+            torch=torch,
+        )
+        with source:
+            self.assertIsNone(source._thread)
+            self.assertEqual(next(source).batch_positions, 1)
 
     def test_run_validation_does_not_mutate_weights_or_optimizer_and_reports_new_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -90,6 +202,8 @@ class ValidationTrainingTests(unittest.TestCase):
             self.assertIn("validation_teacher_loss", metrics)
             self.assertIn("wdl_accuracy", metrics)
             self.assertIn("teacher_result_disagreement_rate", metrics)
+            self.assertIn("validation_seconds", metrics)
+            self.assertIn("validation_positions_per_second", metrics)
             for key, before in model_before.items():
                 self.assertTrue(torch.equal(before, state.model.state_dict()[key]))
             self.assertEqual(optimizer_before["param_groups"], state.optimizer.state_dict()["param_groups"])
@@ -171,11 +285,15 @@ class ValidationTrainingTests(unittest.TestCase):
             self.assertTrue(metrics_path.exists())
 
             records = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
-            self.assertTrue(any(record.get("event") == "train" for record in records))
+            train_records = [record for record in records if record.get("event") == "train"]
+            self.assertTrue(train_records)
             validation_records = [record for record in records if record.get("event") == "validation"]
             self.assertTrue(validation_records)
             self.assertTrue(all("positions_seen" in record for record in records))
+            self.assertTrue(all("step_seconds" in record for record in train_records))
+            self.assertTrue(all("train_positions_per_second" in record for record in train_records))
             self.assertTrue(all("validation_teacher_loss" in record for record in validation_records))
+            self.assertTrue(all("validation_positions_per_second" in record for record in validation_records))
 
     def test_validation_runs_on_superbatch_boundary_when_interval_is_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -362,6 +480,8 @@ class ValidationTrainingTests(unittest.TestCase):
             self.assertIn("training start:", output)
             self.assertIn("positions=", output)
             self.assertIn("validation done:", output)
+            self.assertIn("step_time=", output)
+            self.assertIn("pos_per_sec=", output)
             self.assertNotIn('{"event": "train"', output)
             self.assertNotIn('{"event": "validation"', output)
 

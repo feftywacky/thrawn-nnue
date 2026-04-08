@@ -31,6 +31,8 @@ class _BaseReporter:
         superbatch_index: int,
         loss: float,
         lr: float,
+        step_seconds: float,
+        train_positions_per_second: float,
     ) -> None:
         raise NotImplementedError
 
@@ -82,6 +84,8 @@ class TextReporter(_BaseReporter):
         superbatch_index: int,
         loss: float,
         lr: float,
+        step_seconds: float,
+        train_positions_per_second: float,
     ) -> None:
         if global_step % self._log_every != 0:
             return
@@ -92,6 +96,8 @@ class TextReporter(_BaseReporter):
             f"superbatch={superbatch_index}",
             f"loss={loss:.6f}",
             f"lr={lr:.8f}",
+            f"step_time={step_seconds:.3f}s",
+            f"pos_per_sec={_format_rate(train_positions_per_second)}",
             f"elapsed={_format_seconds(elapsed)}",
         ]
         if self._latest_validation_loss is not None:
@@ -119,6 +125,7 @@ class TextReporter(_BaseReporter):
             f" teacher_result_disagree={float(metrics['teacher_result_disagreement_rate']):.4f}"
             f" eval_positions={_format_count(int(metrics['validation_positions']))}"
             f" batches={int(metrics['validation_batches'])}"
+            f" pos_per_sec={_format_rate(float(metrics.get('validation_positions_per_second', 0.0)))}"
             f"{suffix}"
         )
 
@@ -169,6 +176,8 @@ class ProgressReporter(_BaseReporter):
         superbatch_index: int,
         loss: float,
         lr: float,
+        step_seconds: float,
+        train_positions_per_second: float,
     ) -> None:
         if self._bar is None:
             return
@@ -179,6 +188,8 @@ class ProgressReporter(_BaseReporter):
             "sb": superbatch_index,
             "loss": f"{loss:.4f}",
             "lr": f"{lr:.2e}",
+            "step_s": f"{step_seconds:.3f}",
+            "pos/s": _format_rate(train_positions_per_second),
         }
         if self._latest_validation_loss is not None:
             postfix["val"] = f"{self._latest_validation_loss:.4f}"
@@ -207,6 +218,7 @@ class ProgressReporter(_BaseReporter):
                 f" teacher_result_disagree={float(metrics['teacher_result_disagreement_rate']):.4f}"
                 f" eval_positions={_format_count(int(metrics['validation_positions']))}"
                 f" batches={int(metrics['validation_batches'])}"
+                f" pos_per_sec={_format_rate(float(metrics.get('validation_positions_per_second', 0.0)))}"
                 f"{suffix}"
             )
 
@@ -254,3 +266,10 @@ def _format_progress(current: int, total: int) -> str:
         return _format_count(current)
     fraction = (float(current) / float(total)) * 100.0
     return f"{_format_count(current)}/{_format_count(total)} ({fraction:.2f}%)"
+
+
+def _format_rate(value: float) -> str:
+    clamped = max(0.0, float(value))
+    if clamped >= 100.0:
+        return f"{clamped:,.0f}"
+    return f"{clamped:,.1f}"

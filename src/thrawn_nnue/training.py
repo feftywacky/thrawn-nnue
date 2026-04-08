@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import math
+from queue import Full, Queue
+from threading import Event, Thread
+import time
 
 from .checkpoint import load_checkpoint, restore_rng_state, save_checkpoint
 from .console import ConsoleContext, create_console_reporter
@@ -35,6 +38,20 @@ class TrainState:
     global_step: int = 0
     positions_seen: int = 0
     superbatch_index: int = 0
+
+
+@dataclass(slots=True)
+class _PreparedBatch:
+    batch_positions: int
+    tensors: dict[str, object]
+
+
+@dataclass(slots=True)
+class _ProducerException:
+    exception: BaseException
+
+
+_PREFETCH_EOF = object()
 
 
 def train_from_config(config: TrainConfig, *, console_mode: str | None = None) -> Path:
@@ -114,6 +131,104 @@ def _create_state(config: TrainConfig) -> TrainState:
     )
 
 
+class _PreparedBatchSource:
+    def __init__(
+        self,
+        stream,
+        *,
+        batch_size: int,
+        total_positions: int | None,
+        prefetch_batches: int,
+        torch,
+    ) -> None:
+        self._stream = stream
+        self._batch_size = batch_size
+        self._remaining_positions = total_positions
+        self._prefetch_batches = prefetch_batches
+        self._torch = torch
+        self._queue: Queue[object] | None = None
+        self._stop_event = Event()
+        self._thread: Thread | None = None
+        self._closed = False
+
+    def __enter__(self) -> "_PreparedBatchSource":
+        if self._prefetch_batches > 0:
+            self._queue = Queue(maxsize=self._prefetch_batches)
+            self._thread = Thread(target=self._run_producer, name="thrawn-batch-prefetch", daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def __iter__(self) -> "_PreparedBatchSource":
+        return self
+
+    def __next__(self) -> _PreparedBatch:
+        if self._prefetch_batches <= 0:
+            return self._next_sync()
+        return self._next_prefetched()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=0.5)
+
+    def _next_sync(self) -> _PreparedBatch:
+        requested_batch_size = _requested_batch_size(self._batch_size, self._remaining_positions)
+        if requested_batch_size is None:
+            raise StopIteration
+        batch = self._stream.next_batch(requested_batch_size)
+        if batch is None:
+            raise StopIteration
+        prepared = _prepare_batch(batch, self._torch)
+        self._remaining_positions = _consume_positions(self._remaining_positions, prepared.batch_positions)
+        return prepared
+
+    def _next_prefetched(self) -> _PreparedBatch:
+        if self._queue is None:
+            raise StopIteration
+        item = self._queue.get()
+        if item is _PREFETCH_EOF:
+            raise StopIteration
+        if isinstance(item, _ProducerException):
+            self.close()
+            raise item.exception
+        return item
+
+    def _run_producer(self) -> None:
+        try:
+            while not self._stop_event.is_set():
+                requested_batch_size = _requested_batch_size(self._batch_size, self._remaining_positions)
+                if requested_batch_size is None:
+                    break
+                batch = self._stream.next_batch(requested_batch_size)
+                if batch is None:
+                    break
+                prepared = _prepare_batch(batch, self._torch)
+                self._remaining_positions = _consume_positions(self._remaining_positions, prepared.batch_positions)
+                if not self._queue_put(prepared):
+                    return
+        except BaseException as exc:
+            self._queue_put(_ProducerException(exc))
+            return
+        self._queue_put(_PREFETCH_EOF)
+
+    def _queue_put(self, item: object) -> bool:
+        if self._queue is None:
+            return False
+        while not self._stop_event.is_set():
+            try:
+                self._queue.put(item, timeout=0.1)
+                return True
+            except Full:
+                continue
+        return False
+
+
 def _run_training_loop(state: TrainState) -> None:
     torch = _require_torch()
     autocast_enabled = _amp_enabled(torch, state.config, state.device)
@@ -147,63 +262,80 @@ def _run_training_loop(state: TrainState) -> None:
             num_threads=state.config.num_loader_threads,
             cyclic=True,
         ) as train_stream:
-            while state.positions_seen < state.config.total_train_positions:
-                remaining_positions = state.config.total_train_positions - state.positions_seen
-                batch = train_stream.next_batch(min(state.config.batch_size, remaining_positions))
-                if batch is None:
-                    raise RuntimeError("Cyclic training stream unexpectedly returned EOF")
+            remaining_positions = state.config.total_train_positions - state.positions_seen
+            with _PreparedBatchSource(
+                train_stream,
+                batch_size=state.config.batch_size,
+                total_positions=remaining_positions,
+                prefetch_batches=state.config.prefetch_batches,
+                torch=torch,
+            ) as train_batches:
+                while state.positions_seen < state.config.total_train_positions:
+                    step_started_at = time.monotonic()
+                    try:
+                        prepared_batch = next(train_batches)
+                    except StopIteration:
+                        raise RuntimeError("Cyclic training stream unexpectedly returned EOF") from None
 
-                batch_positions = _batch_size(batch)
-                loss, teacher_loss, result_loss = _run_train_step(
-                    state,
-                    batch,
-                    torch,
-                    autocast_enabled=autocast_enabled,
-                )
-                if state.scheduler is not None:
-                    state.scheduler.step()
-
-                state.global_step += 1
-                state.positions_seen += batch_positions
-                state.superbatch_index = _superbatch_index(state.positions_seen, state.config.superbatch_positions)
-                current_loss = float(loss.detach().cpu().item())
-                current_lr = float(state.optimizer.param_groups[0]["lr"])
-                reporter.update_train(
-                    global_step=state.global_step,
-                    positions_seen=state.positions_seen,
-                    superbatch_index=state.superbatch_index,
-                    loss=current_loss,
-                    lr=current_lr,
-                )
-
-                if state.global_step % state.config.log_every == 0:
-                    _log_metrics(
+                    batch_positions = prepared_batch.batch_positions
+                    loss, teacher_loss, result_loss = _run_train_step(
                         state,
-                        {
-                            "event": "train",
-                            "global_step": state.global_step,
-                            "positions_seen": state.positions_seen,
-                            "superbatch_index": state.superbatch_index,
-                            "batch_positions": batch_positions,
-                            "loss": current_loss,
-                            "teacher_loss": float(teacher_loss.detach().cpu().item()),
-                            "result_loss": float(result_loss.detach().cpu().item()),
-                            "lr": current_lr,
-                        },
+                        prepared_batch.tensors,
+                        torch,
+                        autocast_enabled=autocast_enabled,
+                    )
+                    if state.scheduler is not None:
+                        state.scheduler.step()
+
+                    state.global_step += 1
+                    state.positions_seen += batch_positions
+                    state.superbatch_index = _superbatch_index(state.positions_seen, state.config.superbatch_positions)
+                    current_loss = float(loss.detach().cpu().item())
+                    current_lr = float(state.optimizer.param_groups[0]["lr"])
+                    step_seconds = max(0.0, time.monotonic() - step_started_at)
+                    train_positions_per_second = (
+                        0.0 if step_seconds <= 0.0 else float(batch_positions) / step_seconds
+                    )
+                    reporter.update_train(
+                        global_step=state.global_step,
+                        positions_seen=state.positions_seen,
+                        superbatch_index=state.superbatch_index,
+                        loss=current_loss,
+                        lr=current_lr,
+                        step_seconds=step_seconds,
+                        train_positions_per_second=train_positions_per_second,
                     )
 
-                if next_validation_positions is not None and state.positions_seen >= next_validation_positions:
-                    _run_validation_and_report(state, reporter)
-                    last_validation_positions = state.positions_seen
-                    next_validation_positions = _next_validation_positions(
-                        state.positions_seen,
-                        validation_interval_positions,
-                    )
+                    if state.global_step % state.config.log_every == 0:
+                        _log_metrics(
+                            state,
+                            {
+                                "event": "train",
+                                "global_step": state.global_step,
+                                "positions_seen": state.positions_seen,
+                                "superbatch_index": state.superbatch_index,
+                                "batch_positions": batch_positions,
+                                "loss": current_loss,
+                                "teacher_loss": float(teacher_loss.detach().cpu().item()),
+                                "result_loss": float(result_loss.detach().cpu().item()),
+                                "lr": current_lr,
+                                "step_seconds": step_seconds,
+                                "train_positions_per_second": train_positions_per_second,
+                            },
+                        )
 
-                if state.global_step % state.config.checkpoint_every == 0:
-                    checkpoint_path = state.run_dir / "checkpoints" / f"step_{state.global_step:08d}.pt"
-                    _save_training_checkpoint(state, checkpoint_path)
-                    reporter.checkpoint_saved(str(checkpoint_path), is_best=False)
+                    if next_validation_positions is not None and state.positions_seen >= next_validation_positions:
+                        _run_validation_and_report(state, reporter)
+                        last_validation_positions = state.positions_seen
+                        next_validation_positions = _next_validation_positions(
+                            state.positions_seen,
+                            validation_interval_positions,
+                        )
+
+                    if state.global_step % state.config.checkpoint_every == 0:
+                        checkpoint_path = state.run_dir / "checkpoints" / f"step_{state.global_step:08d}.pt"
+                        _save_training_checkpoint(state, checkpoint_path)
+                        reporter.checkpoint_saved(str(checkpoint_path), is_best=False)
 
         if state.config.validation_datasets and last_validation_positions != state.positions_seen:
             _run_validation_and_report(state, reporter)
@@ -250,8 +382,8 @@ def _create_scheduler(config: TrainConfig, optimizer, torch):
     )
 
 
-def _run_train_step(state: TrainState, batch, torch, *, autocast_enabled: bool):
-    tensors = batch.to_torch(state.device)
+def _run_train_step(state: TrainState, tensors, torch, *, autocast_enabled: bool):
+    tensors = _move_tensors_to_device(tensors, state.device)
     score_cp_stm, result_wdl_stm = _stm_oriented_targets(
         tensors["score_cp"],
         tensors["result_wdl"],
@@ -328,6 +460,7 @@ def _stm_oriented_targets(score_cp, result_wdl, stm, torch):
 def _run_validation(state: TrainState) -> dict[str, object]:
     torch = _require_torch()
     autocast_enabled = _amp_enabled(torch, state.config, state.device)
+    started_at = time.monotonic()
 
     total_loss = 0.0
     total_teacher_loss = 0.0
@@ -344,71 +477,75 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         num_threads=state.config.num_loader_threads,
         cyclic=False,
     ) as validation_stream:
-        with torch.no_grad():
-            remaining_positions = state.config.validation_positions
-            while True:
-                if remaining_positions == 0 and state.config.validation_positions > 0:
-                    break
-                requested_batch_size = state.config.batch_size
-                if remaining_positions > 0:
-                    requested_batch_size = min(requested_batch_size, remaining_positions)
-                batch = validation_stream.next_batch(requested_batch_size)
-                if batch is None:
-                    break
-                batch_positions = _batch_size(batch)
-                if remaining_positions > 0:
-                    remaining_positions -= batch_positions
-
-                tensors = batch.to_torch(state.device)
-                score_cp_stm, result_wdl_stm = _stm_oriented_targets(
-                    tensors["score_cp"],
-                    tensors["result_wdl"],
-                    tensors["stm"],
-                    torch,
-                )
-                bucket_indices = _output_bucket_indices(tensors["white_counts"], state.config.output_buckets, torch)
-                with _autocast_context(torch, state.device, autocast_enabled):
-                    prediction_cp = state.model(
-                        tensors["white_indices"],
-                        tensors["black_indices"],
+        validation_budget = state.config.validation_positions if state.config.validation_positions > 0 else None
+        with _PreparedBatchSource(
+            validation_stream,
+            batch_size=state.config.batch_size,
+            total_positions=validation_budget,
+            prefetch_batches=state.config.prefetch_batches,
+            torch=torch,
+        ) as validation_batches:
+            with torch.no_grad():
+                for prepared_batch in validation_batches:
+                    batch_positions = prepared_batch.batch_positions
+                    tensors = _move_tensors_to_device(prepared_batch.tensors, state.device)
+                    score_cp_stm, result_wdl_stm = _stm_oriented_targets(
+                        tensors["score_cp"],
+                        tensors["result_wdl"],
                         tensors["stm"],
-                        bucket_indices,
-                    )
-                    normalized_scores = _normalize_teacher_scores(score_cp_stm, state.config, torch)
-                    loss, teacher_loss, result_loss = _blended_loss(
-                        prediction_cp,
-                        normalized_scores,
-                        result_wdl_stm,
-                        state.config.wdl_scale,
-                        state.config.eval_lambda,
                         torch,
                     )
+                    bucket_indices = _output_bucket_indices(
+                        tensors["white_counts"],
+                        state.config.output_buckets,
+                        torch,
+                    )
+                    with _autocast_context(torch, state.device, autocast_enabled):
+                        prediction_cp = state.model(
+                            tensors["white_indices"],
+                            tensors["black_indices"],
+                            tensors["stm"],
+                            bucket_indices,
+                        )
+                        normalized_scores = _normalize_teacher_scores(score_cp_stm, state.config, torch)
+                        loss, teacher_loss, result_loss = _blended_loss(
+                            prediction_cp,
+                            normalized_scores,
+                            result_wdl_stm,
+                            state.config.wdl_scale,
+                            state.config.eval_lambda,
+                            torch,
+                        )
 
-                pred_wdl = _wdl_from_cp(prediction_cp, state.config.wdl_scale, torch)
-                target_wdl = _wdl_from_cp(normalized_scores, state.config.wdl_scale, torch)
-                result_bucket = _wdl_bucket(result_wdl_stm)
-                pred_bucket = _wdl_bucket(pred_wdl)
-                target_bucket = _wdl_bucket(target_wdl)
+                    pred_wdl = _wdl_from_cp(prediction_cp, state.config.wdl_scale, torch)
+                    target_wdl = _wdl_from_cp(normalized_scores, state.config.wdl_scale, torch)
+                    result_bucket = _wdl_bucket(result_wdl_stm)
+                    pred_bucket = _wdl_bucket(pred_wdl)
+                    target_bucket = _wdl_bucket(target_wdl)
 
-                total_loss += float(loss.detach().cpu().item()) * batch_positions
-                total_teacher_loss += float(teacher_loss.detach().cpu().item()) * batch_positions
-                total_result_loss += float(result_loss.detach().cpu().item()) * batch_positions
-                total_correct += int((pred_bucket == result_bucket).sum().detach().cpu().item())
-                total_teacher_result_disagreement += int(
-                    (target_bucket != result_bucket).sum().detach().cpu().item()
-                )
-                total_positions += batch_positions
-                batches += 1
+                    total_loss += float(loss.detach().cpu().item()) * batch_positions
+                    total_teacher_loss += float(teacher_loss.detach().cpu().item()) * batch_positions
+                    total_result_loss += float(result_loss.detach().cpu().item()) * batch_positions
+                    total_correct += int((pred_bucket == result_bucket).sum().detach().cpu().item())
+                    total_teacher_result_disagreement += int(
+                        (target_bucket != result_bucket).sum().detach().cpu().item()
+                    )
+                    total_positions += batch_positions
+                    batches += 1
 
     if was_training:
         state.model.train()
 
+    validation_seconds = max(0.0, time.monotonic() - started_at)
     average_loss = math.inf if total_positions == 0 else total_loss / total_positions
     average_teacher_loss = math.inf if total_positions == 0 else total_teacher_loss / total_positions
     average_result_loss = math.inf if total_positions == 0 else total_result_loss / total_positions
     wdl_accuracy = 0.0 if total_positions == 0 else total_correct / total_positions
     teacher_result_disagreement_rate = (
         0.0 if total_positions == 0 else total_teacher_result_disagreement / total_positions
+    )
+    validation_positions_per_second = (
+        0.0 if total_positions == 0 or validation_seconds <= 0.0 else float(total_positions) / validation_seconds
     )
 
     return {
@@ -422,6 +559,8 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         "teacher_result_disagreement_rate": teacher_result_disagreement_rate,
         "validation_positions": total_positions,
         "validation_batches": batches,
+        "validation_seconds": validation_seconds,
+        "validation_positions_per_second": validation_positions_per_second,
     }
 
 
@@ -592,6 +731,41 @@ def _next_validation_positions(current_positions: int, interval_positions: int) 
 
 def _superbatch_index(positions_seen: int, superbatch_positions: int) -> int:
     return positions_seen // superbatch_positions
+
+
+def _requested_batch_size(batch_size: int, remaining_positions: int | None) -> int | None:
+    if remaining_positions is not None and remaining_positions <= 0:
+        return None
+    if remaining_positions is None:
+        return batch_size
+    return min(batch_size, remaining_positions)
+
+
+def _consume_positions(remaining_positions: int | None, batch_positions: int) -> int | None:
+    if remaining_positions is None:
+        return None
+    return max(0, remaining_positions - batch_positions)
+
+
+def _prepare_batch(batch, torch) -> _PreparedBatch:
+    return _PreparedBatch(
+        batch_positions=_batch_size(batch),
+        tensors={
+            "white_indices": torch.from_numpy(batch.white_indices).to(dtype=torch.long),
+            "black_indices": torch.from_numpy(batch.black_indices).to(dtype=torch.long),
+            "white_counts": torch.from_numpy(batch.white_counts).to(dtype=torch.int32),
+            "black_counts": torch.from_numpy(batch.black_counts).to(dtype=torch.int32),
+            "stm": torch.from_numpy(batch.stm).to(dtype=torch.float32).unsqueeze(1),
+            "score_cp": torch.from_numpy(batch.score_cp).to(dtype=torch.float32).unsqueeze(1),
+            "result_wdl": torch.from_numpy(batch.result_wdl).to(dtype=torch.float32).unsqueeze(1),
+        },
+    )
+
+
+def _move_tensors_to_device(tensors: dict[str, object], device: str) -> dict[str, object]:
+    if device == "cpu":
+        return tensors
+    return {name: tensor.to(device=device) for name, tensor in tensors.items()}
 
 
 def _batch_size(batch) -> int:
