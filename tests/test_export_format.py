@@ -19,8 +19,6 @@ from thrawn_nnue.export import (
     load_export,
     _write_export,
 )
-
-
 class ExportFormatTests(unittest.TestCase):
     def test_header_and_tensor_layout_round_trip(self) -> None:
         exported = ExportedNetwork(
@@ -137,6 +135,34 @@ class ExportFormatTests(unittest.TestCase):
         )
 
         self.assertEqual(outputs, [0.0, 7.0])
+
+    def test_evaluate_export_uses_screlu_before_first_dense(self) -> None:
+        fen = "8/8/8/8/8/8/P7/K6k w - - 0 1"
+
+        exported = ExportedNetwork(
+            description="fixture",
+            num_features=768,
+            ft_size=1,
+            hidden_size=1,
+            output_buckets=1,
+            ft_scale=100.0,
+            dense_scale=100.0,
+            wdl_scale=410.0,
+            ft_bias=np.array([50], dtype=np.int16),
+            ft_weight=np.zeros((768, 1), dtype=np.int16),
+            l1_bias=np.zeros(1, dtype=np.int32),
+            l1_weight=np.array([[100], [0]], dtype=np.int8),
+            out_bias=np.zeros(1, dtype=np.int32),
+            out_weight=np.array([[100]], dtype=np.int16),
+        )
+
+        outputs = evaluate_export(
+            exported,
+            [fen],
+        )
+
+        self.assertEqual(len(outputs), 1)
+        self.assertAlmostEqual(outputs[0], 0.25, places=8)
 
 
 if __name__ == "__main__":

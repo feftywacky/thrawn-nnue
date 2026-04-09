@@ -37,6 +37,9 @@ The description bytes come next, followed by packed tensors in this order:
 - The feature transformer is shared between white and black perspectives.
 - The first dense layer always consumes `[stm_acc, nstm_acc]`.
 - That means the first dense layer input width is always `2 * ft_size`.
+- The concatenated accumulator input uses SCReLU before the first dense layer:
+  clamp to `[0, 1]`, then square elementwise.
+- The first hidden layer output uses clipped ReLU: clamp to `[0, 1]`.
 - Exported tensors are quantized for compact storage, but verification in this repo dequantizes them back to float for parity checks.
 - When `output_buckets > 1`, the engine should compute the hidden activations once, then select the final bucket by the same piece-count bucket rule the trainer uses.
 

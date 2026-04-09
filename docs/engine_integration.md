@@ -62,7 +62,7 @@ At evaluation time:
 1. Start each accumulator from `ft_bias`.
 2. Add FT rows for each active feature in that perspective.
 3. Order them as `[stm_acc, nstm_acc]`.
-4. Apply clipped ReLU to `[0, 1]`.
+4. Apply SCReLU to `[0, 1]`: clamp to `[0, 1]`, then square elementwise.
 5. Apply the first dense layer.
 6. Apply clipped ReLU again.
 7. Apply the final output layer.

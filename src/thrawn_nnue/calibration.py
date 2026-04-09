@@ -47,7 +47,7 @@ class _ExportEvaluator:
         combined_when_black = np.concatenate([black_acc, white_acc], axis=1)
         combined = np.where(stm[:, None], combined_when_white, combined_when_black)
 
-        hidden = np.clip(combined, 0.0, 1.0)
+        hidden = np.square(np.clip(combined, 0.0, 1.0))
         hidden = np.clip(hidden @ self.l1_weight + self.l1_bias, 0.0, 1.0)
         outputs = hidden @ self.out_weight + self.out_bias
 

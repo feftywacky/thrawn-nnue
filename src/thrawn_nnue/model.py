@@ -64,7 +64,9 @@ if torch is not None:
                 torch.cat([white_acc, black_acc], dim=1),
                 torch.cat([black_acc, white_acc], dim=1),
             )
-            hidden = torch.clamp(combined, 0.0, 1.0)
+            # Use SCReLU on the concatenated accumulators to avoid saturating
+            # the first dense layer from sparse surviving activations.
+            hidden = torch.square(torch.clamp(combined, 0.0, 1.0))
             hidden = torch.clamp(self.l1(hidden), 0.0, 1.0)
             outputs = self.output(hidden)
             if self.output_buckets == 1:

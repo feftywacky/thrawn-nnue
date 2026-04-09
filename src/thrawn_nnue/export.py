@@ -228,7 +228,7 @@ def evaluate_export(exported: ExportedNetwork, fens: list[str]) -> list[float]:
             combined = np.concatenate([white_acc, black_acc], axis=0)
         else:
             combined = np.concatenate([black_acc, white_acc], axis=0)
-        hidden = np.clip(combined, 0.0, 1.0)
+        hidden = np.square(np.clip(combined, 0.0, 1.0))
         hidden = np.clip(hidden @ l1_weight + l1_bias, 0.0, 1.0)
         output = hidden @ out_weight + out_bias
         bucket = output_bucket_index(len(board.board), exported.output_buckets)

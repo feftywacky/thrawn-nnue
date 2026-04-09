@@ -53,7 +53,7 @@ The scales are:
 Useful implications:
 
 - accumulator math is naturally `int16` row-add heavy
-- the first dense layer is naturally a dot-product from clipped accumulator activations into `int32`
+- the first dense layer is naturally a dot-product from SCReLU accumulator activations into `int32`
 - the output layer is tiny and usually not the bottleneck
 
 ## What To Optimize First
@@ -76,7 +76,7 @@ Suggested approach:
 
 - keep accumulator state in `int16` or `int32`
 - add and subtract FT rows as raw quantized integers
-- clamp accumulator activations before the first dense layer
+- apply SCReLU to accumulator activations before the first dense layer
 - widen to `int32` for dense accumulation
 - apply biases in `int32`
 - rescale only where necessary for your final eval convention
@@ -133,21 +133,21 @@ Implementation notes:
 - unroll by 2 to 4 vectors if `ft_size` is large
 - prefetch only after measuring; manual prefetching often does nothing or hurts
 
-### 2. Clipped ReLU Before Dense
+### 2. SCReLU Before Dense
 
-Your float reference clamps to `[0, 1]`. In integer inference you will usually map that to an integer activation range and clamp there.
+Your float reference uses SCReLU on the concatenated accumulators: clamp to `[0, 1]`, then square. In integer inference you will usually map that to an integer activation range and reproduce the same transform there.
 
 The important part is consistency:
 
 - choose one fixed-point activation scale
-- clamp identically on every architecture
+- clamp and square identically on every architecture
 - test parity against the float export path
 
 ### 3. First Dense Layer
 
 For the `2 * ft_size -> hidden_size` layer:
 
-- treat it as a dot product between the concatenated clipped accumulators and each hidden neuron's weight vector
+- treat it as a dot product between the concatenated SCReLU accumulators and each hidden neuron's weight vector
 - accumulate into `int32`
 
 Two good layouts:
