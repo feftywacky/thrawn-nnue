@@ -15,14 +15,14 @@ validation_datasets = [
 device = "mps"
 num_loader_threads = 12
 prefetch_batches = 2
-batch_size = 16384
+batch_size = 32768
 
-total_train_positions = 100000000
-superbatch_positions = 25000000
-validation_interval_positions = 25000000
-validation_positions = 4000000
+total_train_positions = 4000000000
+superbatch_positions = 500000000
+validation_interval_positions = 250000000
+validation_positions = 40000000
 
-checkpoint_every = 2500
+checkpoint_every = 12500
 log_every = 25
 console_mode = "progress"
 
@@ -43,7 +43,7 @@ score_clip = 2000.0
 score_scale = 1.0
 wdl_scale = 410.0
 eval_lambda = 0.7
-lr_drop_fractions = []
+lr_drop_fractions = [0.5, 0.8, 0.9]
 lr_drop_factor = 0.1
 
 export_ft_scale = 127.0
