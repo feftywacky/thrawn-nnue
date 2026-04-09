@@ -99,8 +99,7 @@ def calibrate_scale(
                 break
             raw_parts.append(evaluator.eval_batch(batch))
             score_cp = batch.score_cp.astype(np.float64)
-            stm = batch.stm.astype(np.float64)
-            teacher_cp_parts.append(np.where(stm >= 0.5, score_cp, -score_cp))
+            teacher_cp_parts.append(score_cp)
             positions_used += int(batch.score_cp.shape[0])
 
     if not raw_parts:

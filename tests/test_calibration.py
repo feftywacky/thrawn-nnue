@@ -113,7 +113,7 @@ class CalibrationMathTests(unittest.TestCase):
         self.assertNotAlmostEqual(float(result["global_cp_per_raw"]), 10.0, places=3)
         self.assertEqual(result["fit_filter"]["within_window"], 2)
 
-    def test_calibration_uses_stm_oriented_teacher_cp(self) -> None:
+    def test_calibration_rejects_zero_slope_when_teacher_cp_is_already_stm_native(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             nnue_path = root / "tiny.nnue"
@@ -134,17 +134,16 @@ class CalibrationMathTests(unittest.TestCase):
                     evaluator.eval_batch.return_value = np.array([10.0, -10.0], dtype=np.float64)
                     evaluator.eval_fens.return_value = [0.0, 0.0, 0.0]
 
-                    result = calibrate_scale(
-                        nnue_path,
-                        validation_path,
-                        max_positions=2,
-                        batch_size=2,
-                        threads=1,
-                        fit_window_cp=600.0,
-                        min_fit_positions=1,
-                    )
-
-        self.assertAlmostEqual(float(result["cp_per_raw"]), 10.0, places=8)
+                    with self.assertRaisesRegex(ValueError, "approximately zero"):
+                        calibrate_scale(
+                            nnue_path,
+                            validation_path,
+                            max_positions=2,
+                            batch_size=2,
+                            threads=1,
+                            fit_window_cp=600.0,
+                            min_fit_positions=1,
+                        )
 
     def test_quiet_range_fit_requires_minimum_positions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

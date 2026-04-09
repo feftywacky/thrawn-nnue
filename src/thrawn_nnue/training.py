@@ -453,7 +453,8 @@ def _normalize_teacher_scores(scores, config: TrainConfig, torch):
 
 def _stm_oriented_targets(score_cp, result_wdl, stm, torch):
     stm_white = stm.ge(0.5)
-    score_cp_stm = torch.where(stm_white, score_cp, -score_cp)
+    # Binpack teacher scores are already side-to-move oriented.
+    score_cp_stm = score_cp
     result_wdl_stm = torch.where(stm_white, result_wdl, 1.0 - result_wdl)
     return score_cp_stm, result_wdl_stm
 
