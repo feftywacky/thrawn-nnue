@@ -82,7 +82,7 @@ class ValidationTrainingTests(unittest.TestCase):
         expected = torch.tensor([[-400.0], [200.0], [400.0]], dtype=torch.float32)
         self.assertTrue(torch.equal(normalized, expected))
 
-    def test_stm_oriented_targets_keep_teacher_score_and_flip_result(self) -> None:
+    def test_stm_oriented_targets_keep_teacher_score_and_result(self) -> None:
         score_cp = torch.tensor([[120.0], [120.0], [-80.0], [-80.0]], dtype=torch.float32)
         result_wdl = torch.tensor([[1.0], [0.0], [0.5], [0.5]], dtype=torch.float32)
         stm = torch.tensor([[1.0], [0.0], [1.0], [0.0]], dtype=torch.float32)
@@ -90,7 +90,7 @@ class ValidationTrainingTests(unittest.TestCase):
         oriented_score, oriented_result = _stm_oriented_targets(score_cp, result_wdl, stm, torch)
 
         expected_score = torch.tensor([[120.0], [120.0], [-80.0], [-80.0]], dtype=torch.float32)
-        expected_result = torch.tensor([[1.0], [1.0], [0.5], [0.5]], dtype=torch.float32)
+        expected_result = torch.tensor([[1.0], [0.0], [0.5], [0.5]], dtype=torch.float32)
         self.assertTrue(torch.equal(oriented_score, expected_score))
         self.assertTrue(torch.equal(oriented_result, expected_result))
 
