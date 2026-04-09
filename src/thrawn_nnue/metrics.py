@@ -72,7 +72,13 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
     score_clip = _as_float(_config_value(run, "score_clip"))
     score_scale = _as_float(_config_value(run, "score_scale"))
     wdl_scale = _as_float(_config_value(run, "wdl_scale"))
+    teacher_lambda_start = _as_float(_config_value(run, "teacher_lambda_start"))
+    teacher_lambda_end = _as_float(_config_value(run, "teacher_lambda_end"))
     eval_lambda = _as_float(_config_value(run, "eval_lambda"))
+    if teacher_lambda_start is None and eval_lambda is not None:
+        teacher_lambda_start = eval_lambda
+    if teacher_lambda_end is None and eval_lambda is not None:
+        teacher_lambda_end = eval_lambda
 
     latest_train_step = _record_step(latest_train)
     latest_train_positions = _record_positions(latest_train, batch_size)
@@ -209,6 +215,8 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "score_clip": score_clip,
         "score_scale": score_scale,
         "wdl_scale": wdl_scale,
+        "teacher_lambda_start": teacher_lambda_start,
+        "teacher_lambda_end": teacher_lambda_end,
         "eval_lambda": eval_lambda,
     }
     summary["suggestions"] = _build_suggestions(summary)

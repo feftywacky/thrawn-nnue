@@ -12,7 +12,7 @@ import time
 from .checkpoint import load_checkpoint, restore_rng_state, save_checkpoint
 from .console import ConsoleContext, create_console_reporter
 from .config import TrainConfig
-from .native import BinpackStream
+from .native import BinpackFilterConfig, BinpackStream
 
 
 def _require_torch():
@@ -110,12 +110,9 @@ def _create_state(config: TrainConfig) -> TrainState:
         ft_size=config.ft_size,
         hidden_size=config.hidden_size,
         output_buckets=config.output_buckets,
+        head_type=config.head_type,
     ).to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-    )
+    optimizer = _create_optimizer(config, model, torch)
     scheduler = _create_scheduler(config, optimizer, torch)
     scaler = _create_grad_scaler(torch, config, device)
 
@@ -262,6 +259,7 @@ def _run_training_loop(state: TrainState) -> None:
             state.config.train_datasets,
             num_threads=state.config.num_loader_threads,
             cyclic=True,
+            filter_config=_filter_config_from_train_config(state.config),
         ) as train_stream:
             remaining_positions = state.config.total_train_positions - state.positions_seen
             with _PreparedBatchSource(
@@ -279,7 +277,7 @@ def _run_training_loop(state: TrainState) -> None:
                         raise RuntimeError("Cyclic training stream unexpectedly returned EOF") from None
 
                     batch_positions = prepared_batch.batch_positions
-                    loss, teacher_loss, result_loss = _run_train_step(
+                    losses = _run_train_step(
                         state,
                         prepared_batch.tensors,
                         torch,
@@ -291,7 +289,7 @@ def _run_training_loop(state: TrainState) -> None:
                     state.global_step += 1
                     state.positions_seen += batch_positions
                     state.superbatch_index = _superbatch_index(state.positions_seen, state.config.superbatch_positions)
-                    current_loss = float(loss.detach().cpu().item())
+                    current_loss = float(losses["loss"].detach().cpu().item())
                     current_lr = float(state.optimizer.param_groups[0]["lr"])
                     step_seconds = max(0.0, time.monotonic() - step_started_at)
                     train_positions_per_second = (
@@ -317,8 +315,12 @@ def _run_training_loop(state: TrainState) -> None:
                                 "superbatch_index": state.superbatch_index,
                                 "batch_positions": batch_positions,
                                 "loss": current_loss,
-                                "teacher_loss": float(teacher_loss.detach().cpu().item()),
-                                "result_loss": float(result_loss.detach().cpu().item()),
+                                "teacher_loss": float(losses["teacher_loss"].detach().cpu().item()),
+                                "result_loss": float(losses["result_loss"].detach().cpu().item()),
+                                "wdl_ce_loss": float(losses["wdl_ce_loss"].detach().cpu().item()),
+                                "consistency_loss": float(losses["consistency_loss"].detach().cpu().item()),
+                                "is_warmup": bool(losses["is_warmup"]),
+                                "teacher_lambda": _teacher_lambda(state),
                                 "lr": current_lr,
                                 "step_seconds": step_seconds,
                                 "train_positions_per_second": train_positions_per_second,
@@ -383,6 +385,31 @@ def _create_scheduler(config: TrainConfig, optimizer, torch):
     )
 
 
+def _create_optimizer(config: TrainConfig, model, torch):
+    if config.optimizer == "ranger":
+        radam = getattr(torch.optim, "RAdam", None)
+        if radam is not None:
+            return radam(
+                model.parameters(),
+                lr=config.learning_rate,
+                weight_decay=config.weight_decay,
+            )
+    return torch.optim.AdamW(
+        model.parameters(),
+        lr=config.learning_rate,
+        weight_decay=config.weight_decay,
+    )
+
+
+def _filter_config_from_train_config(config: TrainConfig) -> BinpackFilterConfig:
+    return BinpackFilterConfig(
+        min_ply=config.filter_min_ply,
+        max_abs_score_cp=config.filter_max_abs_score_cp,
+        skip_bestmove_captures=config.filter_skip_bestmove_captures,
+        skip_wld=config.filter_wld_skip,
+    )
+
+
 def _run_train_step(state: TrainState, tensors, torch, *, autocast_enabled: bool):
     tensors = _move_tensors_to_device(tensors, state.device)
     score_cp_stm, result_wdl_stm = _stm_oriented_targets(
@@ -395,28 +422,49 @@ def _run_train_step(state: TrainState, tensors, torch, *, autocast_enabled: bool
     state.model.train()
     state.optimizer.zero_grad(set_to_none=True)
     with _autocast_context(torch, state.device, autocast_enabled):
-        prediction_cp = state.model(
-            tensors["white_indices"],
-            tensors["black_indices"],
-            tensors["stm"],
-            bucket_indices,
-        )
         normalized_scores = _normalize_teacher_scores(score_cp_stm, state.config, torch)
-        loss, teacher_loss, result_loss = _blended_loss(
-            prediction_cp,
-            normalized_scores,
-            result_wdl_stm,
-            state.config.wdl_scale,
-            state.config.eval_lambda,
-            torch,
-        )
+        teacher_lambda = _teacher_lambda(state)
+        if state.config.head_type == "dual_value_wdl":
+            prediction_cp, prediction_wdl_logits = state.model(
+                tensors["white_indices"],
+                tensors["black_indices"],
+                tensors["stm"],
+                bucket_indices,
+                return_wdl=True,
+            )
+            losses = _dual_head_loss(
+                prediction_cp,
+                prediction_wdl_logits,
+                normalized_scores,
+                result_wdl_stm,
+                state.config,
+                teacher_lambda,
+                state.positions_seen,
+                torch,
+            )
+        else:
+            prediction_cp = state.model(
+                tensors["white_indices"],
+                tensors["black_indices"],
+                tensors["stm"],
+                bucket_indices,
+            )
+            losses = _scalar_head_loss(
+                prediction_cp,
+                normalized_scores,
+                result_wdl_stm,
+                state.config.wdl_scale,
+                teacher_lambda,
+                torch,
+            )
 
-    state.scaler.scale(loss).backward()
+    state.scaler.scale(losses["loss"]).backward()
     state.scaler.unscale_(state.optimizer)
     torch.nn.utils.clip_grad_norm_(state.model.parameters(), state.config.clip_grad_norm)
     state.scaler.step(state.optimizer)
+    _clip_model_weights(state.model, state.config)
     state.scaler.update()
-    return loss, teacher_loss, result_loss
+    return losses
 
 
 def _run_validation_and_report(state: TrainState, reporter) -> None:
@@ -433,13 +481,104 @@ def _run_validation_and_report(state: TrainState, reporter) -> None:
         )
 
 
-def _blended_loss(prediction_cp, target_cp, result_wdl, wdl_scale: float, eval_lambda: float, torch):
+def _scalar_head_loss(prediction_cp, target_cp, result_wdl, wdl_scale: float, teacher_lambda: float, torch):
     pred_wdl = _wdl_from_cp(prediction_cp, wdl_scale, torch)
     target_wdl = _wdl_from_cp(target_cp, wdl_scale, torch)
     teacher_loss = torch.mean((pred_wdl - target_wdl) ** 2)
     result_loss = torch.mean((pred_wdl - result_wdl) ** 2)
-    loss = eval_lambda * teacher_loss + (1.0 - eval_lambda) * result_loss
-    return loss, teacher_loss, result_loss
+    loss = teacher_lambda * teacher_loss + (1.0 - teacher_lambda) * result_loss
+    return {
+        "loss": loss,
+        "teacher_loss": teacher_loss,
+        "result_loss": result_loss,
+        "wdl_ce_loss": loss.new_zeros(()),
+        "consistency_loss": loss.new_zeros(()),
+        "predicted_cp": prediction_cp,
+        "predicted_wdl": pred_wdl,
+        "is_warmup": False,
+    }
+
+
+def _dual_head_loss(
+    prediction_cp,
+    prediction_wdl_logits,
+    target_cp,
+    result_wdl,
+    config: TrainConfig,
+    teacher_lambda: float,
+    positions_seen: int,
+    torch,
+):
+    scalar_losses = _scalar_head_loss(
+        prediction_cp,
+        target_cp,
+        result_wdl,
+        config.wdl_scale,
+        teacher_lambda,
+        torch,
+    )
+    result_classes = _result_class_indices(result_wdl)
+    wdl_ce_loss = torch.nn.functional.cross_entropy(
+        prediction_wdl_logits,
+        result_classes.reshape(-1),
+    )
+    expected_score = _expected_score_from_logits(prediction_wdl_logits, torch)
+    wdl_raw = _raw_from_expected_score(expected_score, torch)
+    consistency_loss = torch.mean(
+        (
+            _wdl_from_cp(prediction_cp, config.wdl_scale, torch)
+            - _wdl_from_cp(wdl_raw, config.wdl_scale, torch)
+        )
+        ** 2
+    )
+    is_warmup = positions_seen < config.warmup_positions
+    total_loss = scalar_losses["loss"]
+    if not is_warmup:
+        total_loss = total_loss + config.wdl_ce_weight * wdl_ce_loss + config.head_consistency_weight * consistency_loss
+    scalar_losses.update(
+        {
+            "loss": total_loss,
+            "wdl_ce_loss": wdl_ce_loss,
+            "consistency_loss": consistency_loss,
+            "predicted_wdl": expected_score.unsqueeze(1),
+            "predicted_wdl_logits": prediction_wdl_logits,
+            "is_warmup": is_warmup,
+        }
+    )
+    return scalar_losses
+
+
+def _teacher_lambda(state: TrainState) -> float:
+    total_positions = max(1, state.config.total_train_positions)
+    progress = min(1.0, max(0.0, state.positions_seen / total_positions))
+    start = state.config.teacher_lambda_start
+    end = state.config.teacher_lambda_end
+    return float(start + (end - start) * progress)
+
+
+def _result_class_indices(result_wdl):
+    return result_wdl.mul(2.0).round().clamp_min(0.0).clamp_max(2.0).to(dtype=result_wdl.long().dtype)
+
+
+def _expected_score_from_logits(logits, torch):
+    probabilities = torch.softmax(logits, dim=1)
+    return probabilities[:, 2] + 0.5 * probabilities[:, 1]
+
+
+def _raw_from_expected_score(expected, torch):
+    epsilon = torch.finfo(expected.dtype).eps
+    return torch.logit(expected.clamp(min=epsilon, max=1.0 - epsilon)).unsqueeze(1)
+
+
+def _clip_model_weights(model, config: TrainConfig) -> None:
+    dense_limit = (127.0 - 0.5) / max(config.export_dense_scale, 1.0)
+    output_limit = (32767.0 - 0.5) / max(config.export_dense_scale, 1.0)
+    torch = _require_torch()
+    with torch.no_grad():
+        model.l1.weight.clamp_(-dense_limit, dense_limit)
+        model.output.weight.clamp_(-output_limit, output_limit)
+        if getattr(model, "wdl_output", None) is not None:
+            model.wdl_output.weight.clamp_(-output_limit, output_limit)
 
 
 def _normalize_teacher_scores(scores, config: TrainConfig, torch):
@@ -467,6 +606,8 @@ def _run_validation(state: TrainState) -> dict[str, object]:
     total_loss = 0.0
     total_teacher_loss = 0.0
     total_result_loss = 0.0
+    total_wdl_ce_loss = 0.0
+    total_consistency_loss = 0.0
     total_positions = 0
     total_correct = 0
     total_teacher_result_disagreement = 0
@@ -478,6 +619,7 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         state.config.validation_datasets,
         num_threads=state.config.num_loader_threads,
         cyclic=False,
+        filter_config=_filter_config_from_train_config(state.config),
     ) as validation_stream:
         validation_budget = state.config.validation_positions if state.config.validation_positions > 0 else None
         with _PreparedBatchSource(
@@ -503,31 +645,53 @@ def _run_validation(state: TrainState) -> dict[str, object]:
                         torch,
                     )
                     with _autocast_context(torch, state.device, autocast_enabled):
-                        prediction_cp = state.model(
-                            tensors["white_indices"],
-                            tensors["black_indices"],
-                            tensors["stm"],
-                            bucket_indices,
-                        )
                         normalized_scores = _normalize_teacher_scores(score_cp_stm, state.config, torch)
-                        loss, teacher_loss, result_loss = _blended_loss(
-                            prediction_cp,
-                            normalized_scores,
-                            result_wdl_stm,
-                            state.config.wdl_scale,
-                            state.config.eval_lambda,
-                            torch,
-                        )
+                        teacher_lambda = _teacher_lambda(state)
+                        if state.config.head_type == "dual_value_wdl":
+                            prediction_cp, prediction_wdl_logits = state.model(
+                                tensors["white_indices"],
+                                tensors["black_indices"],
+                                tensors["stm"],
+                                bucket_indices,
+                                return_wdl=True,
+                            )
+                            losses = _dual_head_loss(
+                                prediction_cp,
+                                prediction_wdl_logits,
+                                normalized_scores,
+                                result_wdl_stm,
+                                state.config,
+                                teacher_lambda,
+                                state.positions_seen,
+                                torch,
+                            )
+                        else:
+                            prediction_cp = state.model(
+                                tensors["white_indices"],
+                                tensors["black_indices"],
+                                tensors["stm"],
+                                bucket_indices,
+                            )
+                            losses = _scalar_head_loss(
+                                prediction_cp,
+                                normalized_scores,
+                                result_wdl_stm,
+                                state.config.wdl_scale,
+                                teacher_lambda,
+                                torch,
+                            )
 
-                    pred_wdl = _wdl_from_cp(prediction_cp, state.config.wdl_scale, torch)
+                    pred_wdl = losses["predicted_wdl"]
                     target_wdl = _wdl_from_cp(normalized_scores, state.config.wdl_scale, torch)
                     result_bucket = _wdl_bucket(result_wdl_stm)
                     pred_bucket = _wdl_bucket(pred_wdl)
                     target_bucket = _wdl_bucket(target_wdl)
 
-                    total_loss += float(loss.detach().cpu().item()) * batch_positions
-                    total_teacher_loss += float(teacher_loss.detach().cpu().item()) * batch_positions
-                    total_result_loss += float(result_loss.detach().cpu().item()) * batch_positions
+                    total_loss += float(losses["loss"].detach().cpu().item()) * batch_positions
+                    total_teacher_loss += float(losses["teacher_loss"].detach().cpu().item()) * batch_positions
+                    total_result_loss += float(losses["result_loss"].detach().cpu().item()) * batch_positions
+                    total_wdl_ce_loss += float(losses["wdl_ce_loss"].detach().cpu().item()) * batch_positions
+                    total_consistency_loss += float(losses["consistency_loss"].detach().cpu().item()) * batch_positions
                     total_correct += int((pred_bucket == result_bucket).sum().detach().cpu().item())
                     total_teacher_result_disagreement += int(
                         (target_bucket != result_bucket).sum().detach().cpu().item()
@@ -542,6 +706,8 @@ def _run_validation(state: TrainState) -> dict[str, object]:
     average_loss = math.inf if total_positions == 0 else total_loss / total_positions
     average_teacher_loss = math.inf if total_positions == 0 else total_teacher_loss / total_positions
     average_result_loss = math.inf if total_positions == 0 else total_result_loss / total_positions
+    average_wdl_ce_loss = math.inf if total_positions == 0 else total_wdl_ce_loss / total_positions
+    average_consistency_loss = math.inf if total_positions == 0 else total_consistency_loss / total_positions
     wdl_accuracy = 0.0 if total_positions == 0 else total_correct / total_positions
     teacher_result_disagreement_rate = (
         0.0 if total_positions == 0 else total_teacher_result_disagreement / total_positions
@@ -557,12 +723,15 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         "validation_loss": average_loss,
         "validation_teacher_loss": average_teacher_loss,
         "validation_result_loss": average_result_loss,
+        "validation_wdl_ce_loss": average_wdl_ce_loss,
+        "validation_consistency_loss": average_consistency_loss,
         "wdl_accuracy": wdl_accuracy,
         "teacher_result_disagreement_rate": teacher_result_disagreement_rate,
         "validation_positions": total_positions,
         "validation_batches": batches,
         "validation_seconds": validation_seconds,
         "validation_positions_per_second": validation_positions_per_second,
+        "teacher_lambda": _teacher_lambda(state),
     }
 
 
@@ -757,6 +926,8 @@ def _prepare_batch(batch, torch) -> _PreparedBatch:
             "black_indices": torch.from_numpy(batch.black_indices).to(dtype=torch.long),
             "white_counts": torch.from_numpy(batch.white_counts).to(dtype=torch.int32),
             "black_counts": torch.from_numpy(batch.black_counts).to(dtype=torch.int32),
+            "ply": torch.from_numpy(batch.ply).to(dtype=torch.int32),
+            "is_capture": torch.from_numpy(batch.is_capture).to(dtype=torch.bool),
             "stm": torch.from_numpy(batch.stm).to(dtype=torch.float32).unsqueeze(1),
             "score_cp": torch.from_numpy(batch.score_cp).to(dtype=torch.float32).unsqueeze(1),
             "result_wdl": torch.from_numpy(batch.result_wdl).to(dtype=torch.float32).unsqueeze(1),

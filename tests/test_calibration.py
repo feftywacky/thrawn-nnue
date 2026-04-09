@@ -308,6 +308,51 @@ class CalibrationCliTests(unittest.TestCase):
         self.assertIn("hardcoded_positions", decoded)
         self.assertIn("symmetry_checks", decoded)
 
+    def test_prepare_binpack_cli_outputs_json(self) -> None:
+        payload = {
+            "entries_read": 100,
+            "entries_written": 64,
+            "rejected": {"min_ply": 10, "score_cap": 12, "capture": 8, "wld": 6},
+            "bucket_counts_before": [8] * 8,
+            "bucket_counts_after": [12] * 8,
+        }
+
+        argv = sys.argv
+        stdout = io.StringIO()
+        try:
+            sys.argv = [
+                "thrawn-nnue",
+                "prepare-binpack",
+                "--path",
+                "/tmp/input.binpack",
+                "--out",
+                "/tmp/output.binpack",
+                "--min-ply",
+                "16",
+                "--max-abs-score-cp",
+                "1200",
+                "--skip-bestmove-captures",
+                "--skip-wld",
+                "--target-per-bucket",
+                "30",
+            ]
+            with redirect_stdout(stdout), patch("thrawn_nnue.cli.prepare_binpack", return_value=payload) as patched:
+                main()
+                args, kwargs = patched.call_args
+                self.assertEqual(args[0], ["/tmp/input.binpack"])
+                self.assertEqual(args[1], "/tmp/output.binpack")
+                self.assertEqual(kwargs["target_per_bucket"], 30)
+                self.assertTrue(kwargs["filter_config"].skip_bestmove_captures)
+                self.assertTrue(kwargs["filter_config"].skip_wld)
+                self.assertEqual(kwargs["filter_config"].min_ply, 16)
+                self.assertEqual(kwargs["filter_config"].max_abs_score_cp, 1200.0)
+        finally:
+            sys.argv = argv
+
+        decoded = json.loads(stdout.getvalue())
+        self.assertEqual(decoded["entries_written"], 64)
+        self.assertIn("bucket_counts_after", decoded)
+
 
 if __name__ == "__main__":
     unittest.main()

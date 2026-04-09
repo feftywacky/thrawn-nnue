@@ -27,9 +27,31 @@ struct ThrawnBatchView {
     std::int32_t* black_indices;
     std::int32_t* white_counts;
     std::int32_t* black_counts;
+    std::uint16_t* ply;
+    std::uint8_t* is_capture;
     float* stm;
     float* score_cp;
     float* result_wdl;
+};
+
+struct ThrawnFilterOptions {
+    std::uint16_t min_ply;
+    float max_abs_score_cp;
+    std::int32_t skip_bestmove_captures;
+    std::int32_t skip_wld;
+    float min_score_result_prob;
+};
+
+struct ThrawnPrepareStats {
+    std::uint64_t entries_read;
+    std::uint64_t entries_written;
+    std::uint64_t rejected_min_ply;
+    std::uint64_t rejected_score_cap;
+    std::uint64_t rejected_capture;
+    std::uint64_t rejected_wld;
+    std::uint32_t output_buckets;
+    std::uint64_t bucket_counts_before[32];
+    std::uint64_t bucket_counts_after[32];
 };
 
 struct ThrawnInspectStats {
@@ -64,12 +86,28 @@ struct ThrawnInspectStats {
     std::uint64_t abs_score_ge_16000;
 };
 
-void* thrawn_binpack_open_many(const char* const* paths, std::int32_t num_paths, std::int32_t num_threads, std::int32_t cyclic);
+void* thrawn_binpack_open_many(
+    const char* const* paths,
+    std::int32_t num_paths,
+    std::int32_t num_threads,
+    std::int32_t cyclic,
+    const ThrawnFilterOptions* filter_options
+);
 void thrawn_binpack_close(void* handle);
 ThrawnBatchView* thrawn_binpack_next_batch(void* handle, std::int32_t batch_size);
 void thrawn_batch_free(ThrawnBatchView* batch);
 std::int32_t thrawn_inspect_binpack(const char* path, ThrawnInspectStats* out_stats);
 std::int32_t thrawn_write_fixture_binpack(const char* path);
+std::int32_t thrawn_prepare_binpack(
+    const char* const* paths,
+    std::int32_t num_paths,
+    const char* output_path,
+    const ThrawnFilterOptions* filter_options,
+    std::int32_t output_buckets,
+    double rebalance_cap,
+    std::uint64_t target_per_bucket,
+    ThrawnPrepareStats* out_stats
+);
 const char* thrawn_last_error();
 
 }
@@ -85,18 +123,40 @@ struct ReaderHandle {
     explicit ReaderHandle(
         std::vector<std::string> input_paths,
         std::int32_t num_threads,
-        bool cyclic
+        bool cyclic,
+        ThrawnFilterOptions filter_options
     ) :
         paths(std::move(input_paths)),
+        filters(filter_options),
         reader(std::make_unique<CompressedTrainingDataEntryParallelReader>(
             std::max(1, num_threads),
             paths,
             std::ios_base::binary,
-            cyclic
+            cyclic,
+            make_skip_predicate(filters)
         ))
     {}
 
+    static std::function<bool(const TrainingDataEntry&)> make_skip_predicate(ThrawnFilterOptions filters) {
+        return [filters](const TrainingDataEntry& entry) {
+            if (filters.min_ply > 0 && entry.ply < filters.min_ply) {
+                return true;
+            }
+            if (filters.max_abs_score_cp > 0.0f && std::abs(static_cast<float>(entry.score)) > filters.max_abs_score_cp) {
+                return true;
+            }
+            if (filters.skip_bestmove_captures != 0 && entry.isCapturingMove()) {
+                return true;
+            }
+            if (filters.skip_wld != 0 && entry.score_result_prob() < static_cast<double>(filters.min_score_result_prob)) {
+                return true;
+            }
+            return false;
+        };
+    }
+
     std::vector<std::string> paths;
+    ThrawnFilterOptions filters;
     std::unique_ptr<CompressedTrainingDataEntryParallelReader> reader;
 };
 
@@ -144,6 +204,15 @@ struct ReaderHandle {
         return 0.0f;
     }
     return 0.5f;
+}
+
+[[nodiscard]] std::int32_t output_bucket_index(std::int32_t piece_count, std::int32_t output_buckets) {
+    if (output_buckets <= 1) {
+        return 0;
+    }
+    const auto clamped_piece_count = std::clamp(piece_count, 2, 32);
+    const auto phase_progress = 32 - clamped_piece_count;
+    return std::min(output_buckets - 1, (phase_progress * output_buckets) / 31);
 }
 
 template <std::size_t N>
@@ -201,13 +270,38 @@ TrainingDataEntry make_entry(
     return entry;
 }
 
+enum class RejectReason : std::uint8_t {
+    Keep = 0,
+    MinPly = 1,
+    ScoreCap = 2,
+    Capture = 3,
+    Wld = 4,
+};
+
+[[nodiscard]] RejectReason reject_reason(const TrainingDataEntry& entry, const ThrawnFilterOptions& filters) {
+    if (filters.min_ply > 0 && entry.ply < filters.min_ply) {
+        return RejectReason::MinPly;
+    }
+    if (filters.max_abs_score_cp > 0.0f && std::abs(static_cast<float>(entry.score)) > filters.max_abs_score_cp) {
+        return RejectReason::ScoreCap;
+    }
+    if (filters.skip_bestmove_captures != 0 && entry.isCapturingMove()) {
+        return RejectReason::Capture;
+    }
+    if (filters.skip_wld != 0 && entry.score_result_prob() < static_cast<double>(filters.min_score_result_prob)) {
+        return RejectReason::Wld;
+    }
+    return RejectReason::Keep;
+}
+
 }  // namespace
 
 extern "C" void* thrawn_binpack_open_many(
     const char* const* paths,
     std::int32_t num_paths,
     std::int32_t num_threads,
-    std::int32_t cyclic
+    std::int32_t cyclic,
+    const ThrawnFilterOptions* filter_options
 ) {
     clear_error();
     try {
@@ -224,7 +318,12 @@ extern "C" void* thrawn_binpack_open_many(
             owned_paths.emplace_back(paths[i]);
         }
 
-        auto* handle = new ReaderHandle(std::move(owned_paths), num_threads, cyclic != 0);
+        ThrawnFilterOptions filters{};
+        filters.min_score_result_prob = 0.10f;
+        if (filter_options != nullptr) {
+            filters = *filter_options;
+        }
+        auto* handle = new ReaderHandle(std::move(owned_paths), num_threads, cyclic != 0, filters);
         return handle;
     } catch (const std::exception& ex) {
         store_error(ex);
@@ -261,6 +360,8 @@ extern "C" ThrawnBatchView* thrawn_binpack_next_batch(void* handle, std::int32_t
         batch->black_indices = alloc_array<std::int32_t>(static_cast<std::size_t>(filled) * kMaxActiveFeatures);
         batch->white_counts = alloc_array<std::int32_t>(filled);
         batch->black_counts = alloc_array<std::int32_t>(filled);
+        batch->ply = alloc_array<std::uint16_t>(filled);
+        batch->is_capture = alloc_array<std::uint8_t>(filled);
         batch->stm = alloc_array<float>(filled);
         batch->score_cp = alloc_array<float>(filled);
         batch->result_wdl = alloc_array<float>(filled);
@@ -290,6 +391,8 @@ extern "C" ThrawnBatchView* thrawn_binpack_next_batch(void* handle, std::int32_t
                 chess::Color::Black,
                 batch->black_indices + base
             );
+            batch->ply[i] = entry.ply;
+            batch->is_capture[i] = entry.isCapturingMove() ? 1 : 0;
             batch->stm[i] = entry.pos.sideToMove() == chess::Color::White ? 1.0f : 0.0f;
             batch->score_cp[i] = static_cast<float>(entry.score);
             batch->result_wdl[i] = result_to_wdl(entry.result);
@@ -311,6 +414,8 @@ extern "C" void thrawn_batch_free(ThrawnBatchView* batch) {
     delete[] batch->black_indices;
     delete[] batch->white_counts;
     delete[] batch->black_counts;
+    delete[] batch->ply;
+    delete[] batch->is_capture;
     delete[] batch->stm;
     delete[] batch->score_cp;
     delete[] batch->result_wdl;
@@ -437,6 +542,127 @@ extern "C" std::int32_t thrawn_write_fixture_binpack(const char* path) {
             1,
             -1
         ));
+        return 1;
+    } catch (const std::exception& ex) {
+        store_error(ex);
+        return 0;
+    }
+}
+
+extern "C" std::int32_t thrawn_prepare_binpack(
+    const char* const* paths,
+    std::int32_t num_paths,
+    const char* output_path,
+    const ThrawnFilterOptions* filter_options,
+    std::int32_t output_buckets,
+    double rebalance_cap,
+    std::uint64_t target_per_bucket,
+    ThrawnPrepareStats* out_stats
+) {
+    clear_error();
+    try {
+        if (paths == nullptr || num_paths <= 0) {
+            throw std::runtime_error("prepare-binpack requires at least one input path");
+        }
+        if (output_path == nullptr) {
+            throw std::runtime_error("prepare-binpack output path must not be null");
+        }
+        if (out_stats == nullptr) {
+            throw std::runtime_error("prepare-binpack stats must not be null");
+        }
+        if (output_buckets <= 0 || output_buckets > 32) {
+            throw std::runtime_error("prepare-binpack output_buckets must be in [1, 32]");
+        }
+
+        ThrawnFilterOptions filters{};
+        filters.min_score_result_prob = 0.10f;
+        if (filter_options != nullptr) {
+            filters = *filter_options;
+        }
+
+        std::vector<std::string> owned_paths;
+        owned_paths.reserve(static_cast<std::size_t>(num_paths));
+        for (std::int32_t i = 0; i < num_paths; ++i) {
+            if (paths[i] == nullptr) {
+                throw std::runtime_error("prepare-binpack input path must not be null");
+            }
+            owned_paths.emplace_back(paths[i]);
+        }
+
+        ThrawnPrepareStats stats{};
+        stats.output_buckets = static_cast<std::uint32_t>(output_buckets);
+        std::vector<std::uint64_t> filtered_bucket_counts(static_cast<std::size_t>(output_buckets), 0);
+
+        for (const auto& path : owned_paths) {
+            CompressedTrainingDataEntryReader reader(path, std::ios_base::binary);
+            while (reader.hasNext()) {
+                const auto entry = reader.next();
+                ++stats.entries_read;
+                const auto reason = reject_reason(entry, filters);
+                if (reason == RejectReason::MinPly) {
+                    ++stats.rejected_min_ply;
+                    continue;
+                }
+                if (reason == RejectReason::ScoreCap) {
+                    ++stats.rejected_score_cap;
+                    continue;
+                }
+                if (reason == RejectReason::Capture) {
+                    ++stats.rejected_capture;
+                    continue;
+                }
+                if (reason == RejectReason::Wld) {
+                    ++stats.rejected_wld;
+                    continue;
+                }
+                const auto bucket = output_bucket_index(static_cast<std::int32_t>(entry.pos.piecesBB().count()), output_buckets);
+                ++stats.bucket_counts_before[bucket];
+                ++filtered_bucket_counts[static_cast<std::size_t>(bucket)];
+            }
+        }
+
+        std::vector<double> bucket_multipliers(static_cast<std::size_t>(output_buckets), 1.0);
+        if (target_per_bucket > 0) {
+            for (std::int32_t bucket = 0; bucket < output_buckets; ++bucket) {
+                const auto count = filtered_bucket_counts[static_cast<std::size_t>(bucket)];
+                if (count == 0) {
+                    bucket_multipliers[static_cast<std::size_t>(bucket)] = 0.0;
+                    continue;
+                }
+                const auto desired = static_cast<double>(target_per_bucket) / static_cast<double>(count);
+                bucket_multipliers[static_cast<std::size_t>(bucket)] = std::min(std::max(1.0, desired), std::max(1.0, rebalance_cap));
+            }
+        }
+
+        CompressedTrainingDataEntryWriter writer(output_path, std::ios_base::binary | std::ios_base::trunc);
+        std::vector<double> bucket_remainders(static_cast<std::size_t>(output_buckets), 0.0);
+        for (const auto& path : owned_paths) {
+            CompressedTrainingDataEntryReader reader(path, std::ios_base::binary);
+            while (reader.hasNext()) {
+                const auto entry = reader.next();
+                if (reject_reason(entry, filters) != RejectReason::Keep) {
+                    continue;
+                }
+                const auto bucket = output_bucket_index(static_cast<std::int32_t>(entry.pos.piecesBB().count()), output_buckets);
+                const auto multiplier = bucket_multipliers[static_cast<std::size_t>(bucket)];
+                if (multiplier <= 0.0) {
+                    continue;
+                }
+                auto copies = static_cast<std::uint64_t>(std::floor(multiplier));
+                bucket_remainders[static_cast<std::size_t>(bucket)] += multiplier - std::floor(multiplier);
+                if (bucket_remainders[static_cast<std::size_t>(bucket)] >= 1.0) {
+                    ++copies;
+                    bucket_remainders[static_cast<std::size_t>(bucket)] -= 1.0;
+                }
+                for (std::uint64_t copy = 0; copy < copies; ++copy) {
+                    writer.addTrainingDataEntry(entry);
+                    ++stats.entries_written;
+                    ++stats.bucket_counts_after[bucket];
+                }
+            }
+        }
+
+        *out_stats = stats;
         return 1;
     } catch (const std::exception& ex) {
         store_error(ex);

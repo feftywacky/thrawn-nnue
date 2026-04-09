@@ -23,6 +23,12 @@ thrawn-nnue inspect-binpack --path /absolute/path/to/train.binpack
 
 `inspect-binpack` now reports score percentiles, absolute-score tail counts, WDL saturation diagnostics for common `wdl_scale` values, and a recommended starting normalization setup.
 
+You can also prepare a filtered shard before long runs:
+
+```bash
+thrawn-nnue prepare-binpack --path /absolute/path/to/train.binpack --out /absolute/path/to/prepared.binpack
+```
+
 3. Train:
 
 ```bash
@@ -62,6 +68,7 @@ thrawn-nnue calibrate-scale --nnue runs/default/model.nnue --validation-path /ab
 ```
 
 This prints JSON containing `cp_per_raw` and `raw_per_cp`, plus fit quality metrics and a small hardcoded-position sanity block.
+For version-4 dual-head exports it also reports per-head fit metrics and a `preferred_head`.
 
 9. Summarize the run and generate plots:
 
@@ -79,22 +86,9 @@ thrawn-nnue metrics --run-dir runs/default
 - Watch validation metrics, especially blended loss, `wdl_accuracy`, and `teacher_result_disagreement_rate`, rather than train loss alone.
 - `feature_set = "a768"` is the preferred config spelling; the older `a768_dual` alias is still accepted.
 - Set `output_buckets = 8` for production-style runs so the final layer can separate opening and endgame behavior while keeping the same dual-accumulator update path.
+- Use [test80_a768_v9.toml](/Users/feiyulin/Code/thrawn-nnue/configs/test80_a768_v9.toml) as the scratch-training reference for the dual-head v9 run.
 - Export `checkpoints/best.pt` by default, then verify parity and engine strength in the engine repo.
-
-## Documentation
-
-- Tests: [docs/testing.md](/Users/feiyulin/Code/thrawn-nnue/docs/testing.md)
-- Trainer workflow: [docs/trainer_workflow.md](/Users/feiyulin/Code/thrawn-nnue/docs/trainer_workflow.md)
-- Exported binary format: [docs/nnue_format.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_format.md)
-- Engine integration: [docs/engine_integration.md](/Users/feiyulin/Code/thrawn-nnue/docs/engine_integration.md)
-
-## Repo layout
-
-- [src/thrawn_nnue](/Users/feiyulin/Code/thrawn-nnue/src/thrawn_nnue): Python package, model, training loop, checkpoints, export, CLI
-- [native_binpack/](/Users/feiyulin/Code/thrawn-nnue/native_binpack): native `.binpack` reader and feature extraction bridge
-- [configs/](/Users/feiyulin/Code/thrawn-nnue/configs): training configs
-- [docs/](/Users/feiyulin/Code/thrawn-nnue/docs): longer-form documentation
-- [tests/](/Users/feiyulin/Code/thrawn-nnue/tests): test suite
+- The unified trainer/export/engine contract lives in [nnue_spec.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_spec.md).
 
 ## Notes
 

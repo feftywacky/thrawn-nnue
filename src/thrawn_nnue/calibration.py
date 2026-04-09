@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .export import load_export
+from .export import evaluate_export, load_export
 from .native import BinpackStream, discover_binpack_files
 
 
@@ -25,8 +25,10 @@ class _ExportEvaluator:
         self.l1_weight = exported.l1_weight.astype(np.float32) / exported.dense_scale
         self.out_bias = exported.out_bias.astype(np.float32) / exported.dense_scale
         self.out_weight = exported.out_weight.astype(np.float32) / exported.dense_scale
+        self.wdl_out_bias = None if exported.wdl_out_bias is None else exported.wdl_out_bias.astype(np.float32) / exported.dense_scale
+        self.wdl_out_weight = None if exported.wdl_out_weight is None else exported.wdl_out_weight.astype(np.float32) / exported.dense_scale
 
-    def eval_batch(self, batch) -> np.ndarray:
+    def eval_batch(self, batch, *, head: str = "value") -> np.ndarray:
         white_indices = batch.white_indices
         black_indices = batch.black_indices
         white_mask = white_indices >= 0
@@ -52,10 +54,14 @@ class _ExportEvaluator:
         outputs = hidden @ self.out_weight + self.out_bias
 
         if self._exported.output_buckets <= 1:
-            return outputs[:, 0].astype(np.float64)
+            if head == "value" or self._exported.head_type == "scalar":
+                return outputs[:, 0].astype(np.float64)
+            return _collapse_wdl_outputs(hidden, self.wdl_out_weight, self.wdl_out_bias, 1, np.zeros(outputs.shape[0], dtype=np.int64))
 
         bucket_indices = _output_bucket_indices(batch.white_counts, self._exported.output_buckets)
-        return outputs[np.arange(outputs.shape[0]), bucket_indices].astype(np.float64)
+        if head == "value" or self._exported.head_type == "scalar":
+            return outputs[np.arange(outputs.shape[0]), bucket_indices].astype(np.float64)
+        return _collapse_wdl_outputs(hidden, self.wdl_out_weight, self.wdl_out_bias, self._exported.output_buckets, bucket_indices)
 
     def eval_fens(self, fens: list[str]) -> list[float]:
         from .export import evaluate_export
@@ -87,7 +93,9 @@ def calibrate_scale(
     evaluator = _ExportEvaluator(nnue_path)
     dataset_paths = discover_binpack_files(validation_path)
 
-    raw_parts: list[np.ndarray] = []
+    raw_parts_by_head: dict[str, list[np.ndarray]] = {"value": []}
+    if evaluator._exported.head_type == "dual_value_wdl":
+        raw_parts_by_head["wdl"] = []
     teacher_cp_parts: list[np.ndarray] = []
     positions_used = 0
 
@@ -97,19 +105,16 @@ def calibrate_scale(
             batch = stream.next_batch(requested)
             if batch is None:
                 break
-            raw_parts.append(evaluator.eval_batch(batch))
+            for head in raw_parts_by_head:
+                raw_parts_by_head[head].append(evaluator.eval_batch(batch, head=head))
             score_cp = batch.score_cp.astype(np.float64)
             teacher_cp_parts.append(score_cp)
             positions_used += int(batch.score_cp.shape[0])
 
-    if not raw_parts:
+    if not raw_parts_by_head["value"]:
         raise ValueError("No positions were read from validation data")
 
-    raw = np.concatenate(raw_parts, axis=0)
     teacher_cp = np.concatenate(teacher_cp_parts, axis=0)
-
-    global_cp_per_raw = _fit_scale_through_origin(raw, teacher_cp)
-    global_fit_metrics = _fit_metrics(raw, teacher_cp, global_cp_per_raw)
 
     quiet_mask = np.abs(teacher_cp) <= float(fit_window_cp)
     within_window = int(np.count_nonzero(quiet_mask))
@@ -120,17 +125,33 @@ def calibrate_scale(
             f"for |teacher_cp| <= {fit_window_cp}"
         )
 
-    quiet_raw = raw[quiet_mask]
-    quiet_cp = teacher_cp[quiet_mask]
-    cp_per_raw = _fit_scale_through_origin(quiet_raw, quiet_cp)
-    if abs(cp_per_raw) <= 1e-12:
-        raise ValueError("Cannot fit scale: fitted cp_per_raw is approximately zero")
-    fit_metrics = _fit_metrics(quiet_raw, quiet_cp, cp_per_raw)
+    head_results: dict[str, dict[str, object]] = {}
+    for head, parts in raw_parts_by_head.items():
+        raw = np.concatenate(parts, axis=0)
+        global_cp_per_raw = _fit_scale_through_origin(raw, teacher_cp)
+        quiet_raw = raw[quiet_mask]
+        quiet_cp = teacher_cp[quiet_mask]
+        cp_per_raw = _fit_scale_through_origin(quiet_raw, quiet_cp)
+        if abs(cp_per_raw) <= 1e-12:
+            raise ValueError("Cannot fit scale: fitted cp_per_raw is approximately zero")
+        head_results[head] = {
+            "cp_per_raw": float(cp_per_raw),
+            "raw_per_cp": float(1.0 / cp_per_raw),
+            "fit_metrics": _fit_metrics(quiet_raw, quiet_cp, cp_per_raw),
+            "global_cp_per_raw": float(global_cp_per_raw),
+            "global_fit_metrics": _fit_metrics(raw, teacher_cp, global_cp_per_raw),
+        }
+
+    preferred_head = min(
+        head_results.items(),
+        key=lambda item: float(item[1]["fit_metrics"]["rmse_cp"]),
+    )[0]
+    selected = head_results[preferred_head]
 
     hardcoded_fens = [fen for _, fen in HARD_CODED_POSITIONS]
     hardcoded_black_fens = [_flip_side_to_move(fen) for fen in hardcoded_fens]
-    hardcoded_raw = evaluator.eval_fens(hardcoded_fens)
-    hardcoded_black_raw = evaluator.eval_fens(hardcoded_black_fens)
+    hardcoded_raw = evaluator.eval_fens(hardcoded_fens) if preferred_head == "value" else evaluate_export(evaluator._exported, hardcoded_fens, head="wdl")
+    hardcoded_black_raw = evaluator.eval_fens(hardcoded_black_fens) if preferred_head == "value" else evaluate_export(evaluator._exported, hardcoded_black_fens, head="wdl")
     hardcoded_positions = [
         {
             "name": name,
@@ -163,7 +184,7 @@ def calibrate_scale(
     sanity_flags: list[str] = []
     if abs(starting_position_cp) > 150.0:
         sanity_flags.append("starting_position_scaled_cp_magnitude_gt_150")
-    if float(fit_metrics["corr"]) < 0.6:
+    if float(selected["fit_metrics"]["corr"]) < 0.6:
         sanity_flags.append("quiet_fit_correlation_lt_0.6")
     for check in symmetry_checks:
         if check["name"] == "starting_position":
@@ -171,10 +192,12 @@ def calibrate_scale(
         if not (check["white_scaled_cp"] > 0.0 and check["black_scaled_cp"] < 0.0):
             sanity_flags.append(f"symmetry_sign_mismatch_{check['name']}")
 
-    normalization_constant = float(100.0 / cp_per_raw)
+    normalization_constant = float(100.0 / float(selected["cp_per_raw"]))
 
     return {
         "positions_used": int(positions_used),
+        "preferred_head": preferred_head,
+        "head_metrics": head_results,
         "teacher_perspective": "stm",
         "fit_scope": "quiet_range",
         "fit_filter": {
@@ -183,11 +206,11 @@ def calibrate_scale(
             "used_for_fit": int(quiet_raw.shape[0]),
             "window_cp": float(fit_window_cp),
         },
-        "cp_per_raw": float(cp_per_raw),
-        "raw_per_cp": float(1.0 / cp_per_raw),
-        "fit_metrics": fit_metrics,
-        "global_cp_per_raw": float(global_cp_per_raw),
-        "global_fit_metrics": global_fit_metrics,
+        "cp_per_raw": float(selected["cp_per_raw"]),
+        "raw_per_cp": float(selected["raw_per_cp"]),
+        "fit_metrics": selected["fit_metrics"],
+        "global_cp_per_raw": float(selected["global_cp_per_raw"]),
+        "global_fit_metrics": selected["global_fit_metrics"],
         "normalization_constant": normalization_constant,
         "normalization_constant_rounded": int(round(normalization_constant)),
         "sanity_flags": sanity_flags,
@@ -240,3 +263,23 @@ def _flip_side_to_move(fen: str) -> str:
     else:
         raise ValueError(f"Invalid side-to-move token in FEN: {fen}")
     return " ".join(parts)
+
+
+def _collapse_wdl_outputs(
+    hidden: np.ndarray,
+    wdl_out_weight: np.ndarray | None,
+    wdl_out_bias: np.ndarray | None,
+    output_buckets: int,
+    bucket_indices: np.ndarray,
+) -> np.ndarray:
+    if wdl_out_weight is None or wdl_out_bias is None:
+        raise ValueError("WDL head not present in export")
+    raw_outputs = hidden @ wdl_out_weight + wdl_out_bias
+    logits = raw_outputs.reshape(hidden.shape[0], output_buckets, 3)[np.arange(hidden.shape[0]), bucket_indices]
+    shifted = logits - np.max(logits, axis=1, keepdims=True)
+    probabilities = np.exp(shifted)
+    probabilities = probabilities / np.sum(probabilities, axis=1, keepdims=True)
+    expected = probabilities[:, 2] + 0.5 * probabilities[:, 1]
+    epsilon = np.finfo(np.float32).eps
+    clamped = np.clip(expected, epsilon, 1.0 - epsilon)
+    return np.log(clamped / (1.0 - clamped)).astype(np.float64)

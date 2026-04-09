@@ -164,6 +164,44 @@ class ExportFormatTests(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertAlmostEqual(outputs[0], 0.25, places=8)
 
+    def test_version4_dual_head_round_trip_and_wdl_collapse(self) -> None:
+        exported = ExportedNetwork(
+            description="fixture-v4",
+            num_features=768,
+            ft_size=1,
+            hidden_size=1,
+            output_buckets=1,
+            ft_scale=1.0,
+            dense_scale=1.0,
+            wdl_scale=410.0,
+            ft_bias=np.zeros(1, dtype=np.int16),
+            ft_weight=np.zeros((768, 1), dtype=np.int16),
+            l1_bias=np.zeros(1, dtype=np.int32),
+            l1_weight=np.zeros((2, 1), dtype=np.int8),
+            out_bias=np.array([3], dtype=np.int32),
+            out_weight=np.zeros((1, 1), dtype=np.int16),
+            version=4,
+            head_type="dual_value_wdl",
+            wdl_out_bias=np.array([0, 0, 2], dtype=np.int32),
+            wdl_out_weight=np.zeros((1, 3), dtype=np.int16),
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "fixture-v4.nnue"
+            with path.open("wb") as handle:
+                _write_export(handle, exported)
+            loaded = load_export(path)
+
+        self.assertEqual(loaded.version, 4)
+        self.assertEqual(loaded.head_type, "dual_value_wdl")
+        self.assertTrue(np.array_equal(loaded.wdl_out_bias, exported.wdl_out_bias))
+        self.assertTrue(np.array_equal(loaded.wdl_out_weight, exported.wdl_out_weight))
+
+        value_outputs = evaluate_export(loaded, ["8/8/8/8/8/8/8/K6k w - - 0 1"], head="value")
+        wdl_outputs = evaluate_export(loaded, ["8/8/8/8/8/8/8/K6k w - - 0 1"], head="wdl")
+        self.assertEqual(value_outputs, [3.0])
+        self.assertGreater(wdl_outputs[0], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()
