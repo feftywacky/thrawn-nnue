@@ -78,7 +78,7 @@ thrawn-nnue metrics --run-dir runs/default
 - Use `validation_positions = 0` for a full held-out pass, or set it to a smaller fixed position budget for faster iteration.
 - Run `inspect-binpack` on a representative shard before long training runs to choose `wdl_scale`, `score_clip`, and `score_scale`.
 - Watch validation metrics, especially blended loss, `wdl_accuracy`, and `teacher_result_disagreement_rate`, rather than train loss alone.
-- `feature_set = "a768"` is the preferred config spelling; the older `a768_dual` alias is still accepted.
+- `feature_set = "a768"` is the only supported feature-set spelling.
 - Set `output_buckets = 8` for production-style runs so the final layer can separate opening and endgame behavior while keeping the same dual-accumulator update path.
 - Use [test80_a768_v10.toml](/Users/feiyulin/Code/thrawn-nnue/configs/test80_a768_v10.toml) as the scalar scratch-training reference for the v10 mainline run.
 - The v10 baseline uses raw T80 shards, `score_clip = 1200.0`, and scalar version-3 export.

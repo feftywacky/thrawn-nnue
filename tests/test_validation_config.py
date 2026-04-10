@@ -80,17 +80,16 @@ class ValidationConfigTests(unittest.TestCase):
                 }
             )
 
-    def test_a768_dual_alias_is_normalized_and_output_buckets_must_be_positive(self) -> None:
-        config = TrainConfig.from_dict(
-            {
-                "train_datasets": ["/tmp/train.binpack"],
-                "total_train_positions": 10_000,
-                "superbatch_positions": 1_000,
-                "feature_set": "a768_dual",
-            }
-        )
-        self.assertEqual(config.feature_set, "a768")
-
+    def test_feature_set_must_be_a768_and_output_buckets_must_be_positive(self) -> None:
+        with self.assertRaises(ValueError):
+            TrainConfig.from_dict(
+                {
+                    "train_datasets": ["/tmp/train.binpack"],
+                    "total_train_positions": 10_000,
+                    "superbatch_positions": 1_000,
+                    "feature_set": "a768_dual",
+                }
+            )
         with self.assertRaises(ValueError):
             TrainConfig.from_dict(
                 {

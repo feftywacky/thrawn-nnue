@@ -112,8 +112,8 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         _metric_value(latest_validation, "validation_loss"),
     )
     teacher_gap = _gap(
-        _metric_value(latest_train_at_validation, "teacher_loss", "eval_loss"),
-        _metric_value(latest_validation, "validation_teacher_loss", "validation_eval_loss"),
+        _metric_value(latest_train_at_validation, "teacher_loss"),
+        _metric_value(latest_validation, "validation_teacher_loss"),
     )
     result_gap = _gap(
         _metric_value(latest_train_at_validation, "result_loss"),
@@ -121,11 +121,11 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
     )
 
     train_teacher_to_result_ratio = _ratio(
-        _metric_value(latest_train, "teacher_loss", "eval_loss"),
+        _metric_value(latest_train, "teacher_loss"),
         _metric_value(latest_train, "result_loss"),
     )
     validation_teacher_to_result_ratio = _ratio(
-        _metric_value(latest_validation, "validation_teacher_loss", "validation_eval_loss"),
+        _metric_value(latest_validation, "validation_teacher_loss"),
         _metric_value(latest_validation, "validation_result_loss"),
     )
     teacher_signal_collapsed = False
@@ -163,17 +163,13 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "latest_train_step": latest_train_step,
         "positions_seen": latest_train_positions,
         "latest_train_loss": _metric_value(latest_train, "loss"),
-        "latest_train_teacher_loss": _metric_value(latest_train, "teacher_loss", "eval_loss"),
+        "latest_train_teacher_loss": _metric_value(latest_train, "teacher_loss"),
         "latest_train_result_loss": _metric_value(latest_train, "result_loss"),
         "latest_lr": latest_lr,
         "latest_validation_step": latest_validation_step,
         "latest_validation_positions": latest_validation_positions,
         "latest_validation_loss": _metric_value(latest_validation, "validation_loss"),
-        "latest_validation_teacher_loss": _metric_value(
-            latest_validation,
-            "validation_teacher_loss",
-            "validation_eval_loss",
-        ),
+        "latest_validation_teacher_loss": _metric_value(latest_validation, "validation_teacher_loss"),
         "latest_validation_result_loss": _metric_value(latest_validation, "validation_result_loss"),
         "latest_validation_wdl_accuracy": _metric_value(latest_validation, "wdl_accuracy"),
         "latest_validation_teacher_result_disagreement_rate": _metric_value(
@@ -356,7 +352,7 @@ def _plot_train_loss(plt, output_path: Path, run: MetricsRun, *, batch_size: int
     figure, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True, height_ratios=[3, 2])
     positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.train_records]
     blended = [_required_metric(record, ("loss",)) for record in run.train_records]
-    teacher = [_required_metric(record, ("teacher_loss", "eval_loss")) for record in run.train_records]
+    teacher = [_required_metric(record, ("teacher_loss",)) for record in run.train_records]
     result = [_required_metric(record, ("result_loss",)) for record in run.train_records]
     smoothed = _moving_average(blended, window=_smoothing_window(len(blended)))
 
@@ -397,10 +393,7 @@ def _plot_validation_loss(plt, output_path: Path, run: MetricsRun, *, batch_size
     figure, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True, height_ratios=[3, 2])
     positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.validation_records]
     blended = [_required_metric(record, ("validation_loss",)) for record in run.validation_records]
-    teacher = [
-        _required_metric(record, ("validation_teacher_loss", "validation_eval_loss"))
-        for record in run.validation_records
-    ]
+    teacher = [_required_metric(record, ("validation_teacher_loss",)) for record in run.validation_records]
     result = [_required_metric(record, ("validation_result_loss",)) for record in run.validation_records]
 
     top_axis, bottom_axis = axes
@@ -641,12 +634,7 @@ def _checkpoint_diagnostics(run_dir: Path) -> dict[str, object]:
     config = payload.get("config")
     batch_size = _as_int(None if config is None else config.get("batch_size"))
     best_validation_positions = payload.get("best_validation_positions")
-    if best_validation_positions is None and payload.get("best_validation_step") is not None and batch_size is not None:
-        best_validation_positions = int(payload["best_validation_step"]) * batch_size
-
     positions_seen = payload.get("positions_seen")
-    if positions_seen is None and payload.get("global_step") is not None and batch_size is not None:
-        positions_seen = int(payload["global_step"]) * batch_size
 
     return {
         "best_validation_loss": payload.get("best_validation_loss"),

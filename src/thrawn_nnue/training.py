@@ -83,10 +83,10 @@ def resume_training(checkpoint_path: str | Path, *, console_mode: str | None = N
         state.scaler.load_state_dict(payload["scaler_state"])
     restore_rng_state(payload["rng_state"])
     state.best_validation_loss = payload.get("best_validation_loss")
-    state.best_validation_positions = _payload_best_validation_positions(payload, config)
+    state.best_validation_positions = _payload_best_validation_positions(payload)
     state.global_step = int(payload["global_step"])
-    state.positions_seen = _payload_positions_seen(payload, config)
-    state.superbatch_index = _payload_superbatch_index(payload, config)
+    state.positions_seen = _payload_positions_seen(payload)
+    state.superbatch_index = _payload_superbatch_index(payload)
     state.model.to(state.device)
     _run_training_loop(state)
     final_checkpoint = state.run_dir / "checkpoints" / f"step_{state.global_step:08d}.pt"
@@ -804,21 +804,15 @@ def _wdl_bucket(values):
     return values.mul(3.0).clamp_min(0.0).clamp_max(2.999999).to(dtype=values.dtype).to(dtype=values.long().dtype)
 
 
-def _payload_positions_seen(payload: dict[str, object], config: TrainConfig) -> int:
-    if "positions_seen" in payload:
-        return int(payload["positions_seen"])
-    return int(payload["global_step"]) * config.batch_size
+def _payload_positions_seen(payload: dict[str, object]) -> int:
+    return int(payload["positions_seen"])
 
 
-def _payload_superbatch_index(payload: dict[str, object], config: TrainConfig) -> int:
-    if "superbatch_index" in payload:
-        return int(payload["superbatch_index"])
-    return _superbatch_index(_payload_positions_seen(payload, config), config.superbatch_positions)
+def _payload_superbatch_index(payload: dict[str, object]) -> int:
+    return int(payload["superbatch_index"])
 
 
-def _payload_best_validation_positions(payload: dict[str, object], config: TrainConfig) -> int | None:
+def _payload_best_validation_positions(payload: dict[str, object]) -> int | None:
     if payload.get("best_validation_positions") is not None:
         return int(payload["best_validation_positions"])
-    if payload.get("best_validation_step") is not None:
-        return int(payload["best_validation_step"]) * config.batch_size
     return None

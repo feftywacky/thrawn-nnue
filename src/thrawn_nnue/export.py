@@ -16,7 +16,6 @@ VERSION = 3
 FEATURE_SET_ID = "a768_dual_v1"
 OUTPUT_PERSPECTIVE_STM = 1
 HEADER_PREFIX_STRUCT = struct.Struct("<8sI")
-LEGACY_HEADER_REST_STRUCT = struct.Struct("<16sIIIIfffI")
 HEADER_REST_STRUCT = struct.Struct("<16sIIIIIfffI")
 DEFAULT_VERIFICATION_FENS = [
     "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
@@ -86,41 +85,23 @@ def load_export(path: str | Path) -> ExportedNetwork:
 
         if magic != MAGIC:
             raise ValueError("Unexpected .nnue magic")
-        if version not in {1, 2, VERSION}:
+        if version != VERSION:
             raise ValueError(f"Unsupported .nnue version: {version}")
-
-        if version in {1, 2}:
-            raw_rest = handle.read(LEGACY_HEADER_REST_STRUCT.size)
-            if len(raw_rest) != LEGACY_HEADER_REST_STRUCT.size:
-                raise ValueError("File too small to contain a legacy Thrawn NNUE header")
-            (
-                feature_set,
-                num_features,
-                ft_size,
-                hidden_size,
-                output_perspective,
-                ft_scale,
-                dense_scale,
-                wdl_scale,
-                description_length,
-            ) = LEGACY_HEADER_REST_STRUCT.unpack(raw_rest)
-            output_buckets = 1
-        else:
-            raw_rest = handle.read(HEADER_REST_STRUCT.size)
-            if len(raw_rest) != HEADER_REST_STRUCT.size:
-                raise ValueError("File too small to contain a Thrawn NNUE header")
-            (
-                feature_set,
-                num_features,
-                ft_size,
-                hidden_size,
-                output_buckets,
-                output_perspective,
-                ft_scale,
-                dense_scale,
-                wdl_scale,
-                description_length,
-            ) = HEADER_REST_STRUCT.unpack(raw_rest)
+        raw_rest = handle.read(HEADER_REST_STRUCT.size)
+        if len(raw_rest) != HEADER_REST_STRUCT.size:
+            raise ValueError("File too small to contain a Thrawn NNUE header")
+        (
+            feature_set,
+            num_features,
+            ft_size,
+            hidden_size,
+            output_buckets,
+            output_perspective,
+            ft_scale,
+            dense_scale,
+            wdl_scale,
+            description_length,
+        ) = HEADER_REST_STRUCT.unpack(raw_rest)
 
         if feature_set.rstrip(b"\x00").decode("ascii") != FEATURE_SET_ID:
             raise ValueError("Unexpected feature-set identifier")
@@ -135,13 +116,10 @@ def load_export(path: str | Path) -> ExportedNetwork:
         l1_weight = np.frombuffer(handle.read(ft_size * 2 * hidden_size), dtype=np.int8).copy()
         l1_weight = l1_weight.reshape(ft_size * 2, hidden_size)
         out_bias = np.frombuffer(handle.read(output_buckets * 4), dtype="<i4").copy()
-        if version == 1:
-            out_weight = np.frombuffer(handle.read(hidden_size), dtype=np.int8).copy().reshape(hidden_size, 1)
-        else:
-            out_weight = np.frombuffer(
-                handle.read(hidden_size * output_buckets * 2),
-                dtype="<i2",
-            ).copy().reshape(hidden_size, output_buckets)
+        out_weight = np.frombuffer(
+            handle.read(hidden_size * output_buckets * 2),
+            dtype="<i2",
+        ).copy().reshape(hidden_size, output_buckets)
         return ExportedNetwork(
             description=description,
             version=version,

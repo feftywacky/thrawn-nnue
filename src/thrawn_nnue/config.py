@@ -179,9 +179,9 @@ def _looks_like_glob(value: str) -> bool:
 
 
 def _canonical_feature_set(value: str) -> str:
-    if value in {"a768", "a768_dual"}:
+    if value == "a768":
         return "a768"
-    raise ValueError("Only feature_set='a768' (or legacy alias 'a768_dual') is supported")
+    raise ValueError("Only feature_set='a768' is supported")
 
 
 def _dataset_overlap(train_datasets: list[str], validation_datasets: list[str]) -> list[str]:
