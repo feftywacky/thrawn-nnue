@@ -26,6 +26,7 @@ class TrainConfig:
     console_mode: str = "progress"
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
+    output_regularization: float = 0.0
     clip_grad_norm: float = 1.0
     amp: bool = True
     feature_set: str = "a768"
@@ -114,6 +115,8 @@ class TrainConfig:
             raise ValueError("learning_rate must be positive")
         if self.weight_decay < 0.0:
             raise ValueError("weight_decay must be >= 0")
+        if self.output_regularization < 0.0:
+            raise ValueError("output_regularization must be >= 0")
         if self.clip_grad_norm <= 0.0:
             raise ValueError("clip_grad_norm must be positive")
         if self.ft_size <= 0 or self.hidden_size <= 0:

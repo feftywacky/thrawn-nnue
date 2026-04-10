@@ -73,6 +73,7 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
     score_scale = _as_float(_config_value(run, "score_scale"))
     wdl_scale = _as_float(_config_value(run, "wdl_scale"))
     eval_lambda = _as_float(_config_value(run, "eval_lambda"))
+    output_regularization = _as_float(_config_value(run, "output_regularization"))
 
     latest_train_step = _record_step(latest_train)
     latest_train_positions = _record_positions(latest_train, batch_size)
@@ -165,12 +166,14 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "latest_train_loss": _metric_value(latest_train, "loss"),
         "latest_train_teacher_loss": _metric_value(latest_train, "teacher_loss"),
         "latest_train_result_loss": _metric_value(latest_train, "result_loss"),
+        "latest_train_output_reg_loss": _metric_value(latest_train, "output_reg_loss"),
         "latest_lr": latest_lr,
         "latest_validation_step": latest_validation_step,
         "latest_validation_positions": latest_validation_positions,
         "latest_validation_loss": _metric_value(latest_validation, "validation_loss"),
         "latest_validation_teacher_loss": _metric_value(latest_validation, "validation_teacher_loss"),
         "latest_validation_result_loss": _metric_value(latest_validation, "validation_result_loss"),
+        "latest_validation_output_reg_loss": _metric_value(latest_validation, "validation_output_reg_loss"),
         "latest_validation_wdl_accuracy": _metric_value(latest_validation, "wdl_accuracy"),
         "latest_validation_teacher_result_disagreement_rate": _metric_value(
             latest_validation,
@@ -206,6 +209,7 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "score_scale": score_scale,
         "wdl_scale": wdl_scale,
         "eval_lambda": eval_lambda,
+        "output_regularization": output_regularization,
     }
     summary["suggestions"] = _build_suggestions(summary)
     return summary
@@ -226,6 +230,7 @@ def render_summary_text(summary: dict[str, object]) -> str:
                 f"latest_train_loss: {_format_optional_float(summary['latest_train_loss'])}",
                 f"latest_train_teacher_loss: {_format_optional_float(summary['latest_train_teacher_loss'])}",
                 f"latest_train_result_loss: {_format_optional_float(summary['latest_train_result_loss'])}",
+                f"latest_train_output_reg_loss: {_format_optional_float(summary['latest_train_output_reg_loss'])}",
                 f"latest_lr: {_format_optional_float(summary['latest_lr'], precision=8)}",
             ]
         )
@@ -237,6 +242,10 @@ def render_summary_text(summary: dict[str, object]) -> str:
                 f"latest_validation_loss: {_format_optional_float(summary['latest_validation_loss'])}",
                 f"latest_validation_teacher_loss: {_format_optional_float(summary['latest_validation_teacher_loss'])}",
                 f"latest_validation_result_loss: {_format_optional_float(summary['latest_validation_result_loss'])}",
+                (
+                    "latest_validation_output_reg_loss: "
+                    f"{_format_optional_float(summary['latest_validation_output_reg_loss'])}"
+                ),
                 f"latest_validation_wdl_accuracy: {_format_optional_float(summary['latest_validation_wdl_accuracy'])}",
                 (
                     "latest_validation_teacher_result_disagreement_rate: "
@@ -274,6 +283,7 @@ def render_summary_text(summary: dict[str, object]) -> str:
     lines.append(f"latest_lr_fraction_of_initial: {_format_optional_float(summary['latest_lr_fraction_of_initial'])}")
     lines.append(f"lr_near_zero: {summary['lr_near_zero']}")
     lines.append(f"scheduler_exhausted: {summary['scheduler_exhausted']}")
+    lines.append(f"output_regularization: {_format_optional_float(summary['output_regularization'])}")
     lines.append("")
     lines.append("Generalization")
     lines.append(f"best_validation_gap: {_format_optional_float(summary['best_validation_gap'])}")

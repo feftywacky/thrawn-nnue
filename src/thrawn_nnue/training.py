@@ -315,6 +315,7 @@ def _run_training_loop(state: TrainState) -> None:
                                 "loss": current_loss,
                                 "teacher_loss": float(losses["teacher_loss"].detach().cpu().item()),
                                 "result_loss": float(losses["result_loss"].detach().cpu().item()),
+                                "output_reg_loss": float(losses["output_reg_loss"].detach().cpu().item()),
                                 "eval_lambda": state.config.eval_lambda,
                                 "lr": current_lr,
                                 "step_seconds": step_seconds,
@@ -413,6 +414,7 @@ def _run_train_step(state: TrainState, tensors, torch, *, autocast_enabled: bool
             result_wdl_stm,
             state.config.wdl_scale,
             state.config.eval_lambda,
+            state.config.output_regularization,
             torch,
         )
 
@@ -439,16 +441,30 @@ def _run_validation_and_report(state: TrainState, reporter) -> None:
         )
 
 
-def _scalar_head_loss(prediction_cp, target_cp, result_wdl, wdl_scale: float, teacher_lambda: float, torch):
+def _scalar_head_loss(
+    prediction_cp,
+    target_cp,
+    result_wdl,
+    wdl_scale: float,
+    teacher_lambda: float,
+    output_regularization: float,
+    torch,
+):
     pred_wdl = _wdl_from_cp(prediction_cp, wdl_scale, torch)
     target_wdl = _wdl_from_cp(target_cp, wdl_scale, torch)
     teacher_loss = torch.mean((pred_wdl - target_wdl) ** 2)
     result_loss = torch.mean((pred_wdl - result_wdl) ** 2)
-    loss = teacher_lambda * teacher_loss + (1.0 - teacher_lambda) * result_loss
+    output_reg_loss = torch.mean(prediction_cp.square())
+    loss = (
+        teacher_lambda * teacher_loss
+        + (1.0 - teacher_lambda) * result_loss
+        + output_regularization * output_reg_loss
+    )
     return {
         "loss": loss,
         "teacher_loss": teacher_loss,
         "result_loss": result_loss,
+        "output_reg_loss": output_reg_loss,
         "predicted_cp": prediction_cp,
         "predicted_wdl": pred_wdl,
     }
@@ -488,6 +504,7 @@ def _run_validation(state: TrainState) -> dict[str, object]:
     total_loss = 0.0
     total_teacher_loss = 0.0
     total_result_loss = 0.0
+    total_output_reg_loss = 0.0
     total_positions = 0
     total_correct = 0
     total_teacher_result_disagreement = 0
@@ -537,6 +554,7 @@ def _run_validation(state: TrainState) -> dict[str, object]:
                             result_wdl_stm,
                             state.config.wdl_scale,
                             state.config.eval_lambda,
+                            state.config.output_regularization,
                             torch,
                         )
 
@@ -549,6 +567,7 @@ def _run_validation(state: TrainState) -> dict[str, object]:
                     total_loss += float(losses["loss"].detach().cpu().item()) * batch_positions
                     total_teacher_loss += float(losses["teacher_loss"].detach().cpu().item()) * batch_positions
                     total_result_loss += float(losses["result_loss"].detach().cpu().item()) * batch_positions
+                    total_output_reg_loss += float(losses["output_reg_loss"].detach().cpu().item()) * batch_positions
                     total_correct += int((pred_bucket == result_bucket).sum().detach().cpu().item())
                     total_teacher_result_disagreement += int(
                         (target_bucket != result_bucket).sum().detach().cpu().item()
@@ -563,6 +582,7 @@ def _run_validation(state: TrainState) -> dict[str, object]:
     average_loss = math.inf if total_positions == 0 else total_loss / total_positions
     average_teacher_loss = math.inf if total_positions == 0 else total_teacher_loss / total_positions
     average_result_loss = math.inf if total_positions == 0 else total_result_loss / total_positions
+    average_output_reg_loss = math.inf if total_positions == 0 else total_output_reg_loss / total_positions
     wdl_accuracy = 0.0 if total_positions == 0 else total_correct / total_positions
     teacher_result_disagreement_rate = (
         0.0 if total_positions == 0 else total_teacher_result_disagreement / total_positions
@@ -578,6 +598,7 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         "validation_loss": average_loss,
         "validation_teacher_loss": average_teacher_loss,
         "validation_result_loss": average_result_loss,
+        "validation_output_reg_loss": average_output_reg_loss,
         "wdl_accuracy": wdl_accuracy,
         "teacher_result_disagreement_rate": teacher_result_disagreement_rate,
         "validation_positions": total_positions,
