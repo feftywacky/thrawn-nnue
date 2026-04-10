@@ -8,7 +8,7 @@ from .calibration import calibrate_scale
 from .config import load_config
 from .export import export_checkpoint, verify_export
 from .metrics import generate_run_plots, load_metrics_run, render_summary_text, summarize_run
-from .native import BinpackFilterConfig, discover_binpack_files, inspect_binpack, inspect_binpack_collection, prepare_binpack
+from .native import discover_binpack_files, inspect_binpack, inspect_binpack_collection
 from .training import resume_training, train_from_config
 
 
@@ -41,21 +41,6 @@ def main() -> None:
         help="Inspect all .binpack files under a directory and aggregate the results",
     )
     inspect_all_parser.add_argument("--path", required=True)
-
-    prepare_parser = subparsers.add_parser(
-        "prepare-binpack",
-        help="Filter and rebalance one or more .binpack datasets into a prepared output shard",
-    )
-    prepare_parser.add_argument("--path", action="append", required=True)
-    prepare_parser.add_argument("--out", required=True)
-    prepare_parser.add_argument("--min-ply", type=int, default=0)
-    prepare_parser.add_argument("--max-abs-score-cp", type=float, default=0.0)
-    prepare_parser.add_argument("--skip-bestmove-captures", action="store_true")
-    prepare_parser.add_argument("--skip-wld", action="store_true")
-    prepare_parser.add_argument("--min-score-result-prob", type=float, default=0.10)
-    prepare_parser.add_argument("--output-buckets", type=int, default=8)
-    prepare_parser.add_argument("--rebalance-cap", type=float, default=3.0)
-    prepare_parser.add_argument("--target-per-bucket", type=int, default=0)
 
     metrics_parser = subparsers.add_parser("metrics", help="Summarize a training run and generate plots")
     metrics_parser.add_argument("--run-dir", required=True)
@@ -105,24 +90,6 @@ def main() -> None:
         paths = discover_binpack_files(args.path)
         stats = inspect_binpack_collection(paths)
         print(json.dumps(stats, indent=2, sort_keys=True))
-        return
-
-    if args.command == "prepare-binpack":
-        result = prepare_binpack(
-            args.path,
-            args.out,
-            filter_config=BinpackFilterConfig(
-                min_ply=args.min_ply,
-                max_abs_score_cp=args.max_abs_score_cp,
-                skip_bestmove_captures=args.skip_bestmove_captures,
-                skip_wld=args.skip_wld,
-                min_score_result_prob=args.min_score_result_prob,
-            ),
-            output_buckets=args.output_buckets,
-            rebalance_cap=args.rebalance_cap,
-            target_per_bucket=args.target_per_bucket,
-        )
-        print(json.dumps(result, indent=2, sort_keys=True))
         return
 
     if args.command == "metrics":

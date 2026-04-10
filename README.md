@@ -21,13 +21,7 @@ This repo expects `numpy` and `torch`. The native `.binpack` bridge is built aut
 thrawn-nnue inspect-binpack --path /absolute/path/to/train.binpack
 ```
 
-`inspect-binpack` now reports score percentiles, absolute-score tail counts, WDL saturation diagnostics for common `wdl_scale` values, and a recommended starting normalization setup.
-
-You can also prepare a filtered shard before long runs:
-
-```bash
-thrawn-nnue prepare-binpack --path /absolute/path/to/train.binpack --out /absolute/path/to/prepared.binpack
-```
+`inspect-binpack` reports score percentiles, absolute-score tail counts, WDL saturation diagnostics for common `wdl_scale` values, and a recommended starting normalization setup.
 
 3. Train:
 
@@ -68,7 +62,7 @@ thrawn-nnue calibrate-scale --nnue runs/default/model.nnue --validation-path /ab
 ```
 
 This prints JSON containing `cp_per_raw` and `raw_per_cp`, plus fit quality metrics and a small hardcoded-position sanity block.
-For version-4 dual-head exports it also reports per-head fit metrics and a `preferred_head`.
+Scalar v10 runs should calibrate on the raw June T80 holdout without enabling extra repo-side filtering.
 
 9. Summarize the run and generate plots:
 
@@ -86,9 +80,10 @@ thrawn-nnue metrics --run-dir runs/default
 - Watch validation metrics, especially blended loss, `wdl_accuracy`, and `teacher_result_disagreement_rate`, rather than train loss alone.
 - `feature_set = "a768"` is the preferred config spelling; the older `a768_dual` alias is still accepted.
 - Set `output_buckets = 8` for production-style runs so the final layer can separate opening and endgame behavior while keeping the same dual-accumulator update path.
-- Use [test80_a768_v9.toml](/Users/feiyulin/Code/thrawn-nnue/configs/test80_a768_v9.toml) as the scratch-training reference for the dual-head v9 run.
+- Use [test80_a768_v10.toml](/Users/feiyulin/Code/thrawn-nnue/configs/test80_a768_v10.toml) as the scalar scratch-training reference for the v10 mainline run.
+- The v10 baseline uses raw T80 shards, `score_clip = 1200.0`, and scalar version-3 export.
 - Export `checkpoints/best.pt` by default, then verify parity and engine strength in the engine repo.
-- The unified trainer/export/engine contract lives in [nnue_spec.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_spec.md).
+- The NNUE contract and engine-usage notes live in [nnue_spec.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_spec.md).
 
 ## Notes
 

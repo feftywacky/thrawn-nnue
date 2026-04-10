@@ -22,35 +22,9 @@ class _BatchView(ctypes.Structure):
         ("black_indices", ctypes.POINTER(ctypes.c_int32)),
         ("white_counts", ctypes.POINTER(ctypes.c_int32)),
         ("black_counts", ctypes.POINTER(ctypes.c_int32)),
-        ("ply", ctypes.POINTER(ctypes.c_uint16)),
-        ("is_capture", ctypes.POINTER(ctypes.c_uint8)),
         ("stm", ctypes.POINTER(ctypes.c_float)),
         ("score_cp", ctypes.POINTER(ctypes.c_float)),
         ("result_wdl", ctypes.POINTER(ctypes.c_float)),
-    ]
-
-
-class _FilterOptions(ctypes.Structure):
-    _fields_ = [
-        ("min_ply", ctypes.c_uint16),
-        ("max_abs_score_cp", ctypes.c_float),
-        ("skip_bestmove_captures", ctypes.c_int32),
-        ("skip_wld", ctypes.c_int32),
-        ("min_score_result_prob", ctypes.c_float),
-    ]
-
-
-class _PrepareStats(ctypes.Structure):
-    _fields_ = [
-        ("entries_read", ctypes.c_uint64),
-        ("entries_written", ctypes.c_uint64),
-        ("rejected_min_ply", ctypes.c_uint64),
-        ("rejected_score_cap", ctypes.c_uint64),
-        ("rejected_capture", ctypes.c_uint64),
-        ("rejected_wld", ctypes.c_uint64),
-        ("output_buckets", ctypes.c_uint32),
-        ("bucket_counts_before", ctypes.c_uint64 * 32),
-        ("bucket_counts_after", ctypes.c_uint64 * 32),
     ]
 
 
@@ -94,47 +68,9 @@ class NativeBatch:
     black_indices: np.ndarray
     white_counts: np.ndarray
     black_counts: np.ndarray
-    ply: np.ndarray
-    is_capture: np.ndarray
     stm: np.ndarray
     score_cp: np.ndarray
     result_wdl: np.ndarray
-
-    def to_torch(self, device: str):
-        try:
-            import torch
-        except ModuleNotFoundError as exc:
-            raise RuntimeError("PyTorch is required for training commands") from exc
-
-        return {
-            "white_indices": torch.from_numpy(self.white_indices).to(device=device, dtype=torch.long),
-            "black_indices": torch.from_numpy(self.black_indices).to(device=device, dtype=torch.long),
-            "white_counts": torch.from_numpy(self.white_counts).to(device=device, dtype=torch.int32),
-            "black_counts": torch.from_numpy(self.black_counts).to(device=device, dtype=torch.int32),
-            "ply": torch.from_numpy(self.ply).to(device=device, dtype=torch.int32),
-            "is_capture": torch.from_numpy(self.is_capture).to(device=device, dtype=torch.bool),
-            "stm": torch.from_numpy(self.stm).to(device=device, dtype=torch.float32).unsqueeze(1),
-            "score_cp": torch.from_numpy(self.score_cp).to(device=device, dtype=torch.float32).unsqueeze(1),
-            "result_wdl": torch.from_numpy(self.result_wdl).to(device=device, dtype=torch.float32).unsqueeze(1),
-        }
-
-
-@dataclass(slots=True)
-class BinpackFilterConfig:
-    min_ply: int = 0
-    max_abs_score_cp: float = 0.0
-    skip_bestmove_captures: bool = False
-    skip_wld: bool = False
-    min_score_result_prob: float = 0.10
-
-    def to_native(self) -> _FilterOptions:
-        return _FilterOptions(
-            min_ply=max(0, int(self.min_ply)),
-            max_abs_score_cp=float(self.max_abs_score_cp),
-            skip_bestmove_captures=1 if self.skip_bestmove_captures else 0,
-            skip_wld=1 if self.skip_wld else 0,
-            min_score_result_prob=float(self.min_score_result_prob),
-        )
 
 
 def build_native_extension(force: bool = False) -> Path:
@@ -143,7 +79,7 @@ def build_native_extension(force: bool = False) -> Path:
     build_dir.mkdir(parents=True, exist_ok=True)
 
     existing = _find_library(build_dir)
-    if existing is not None and not force:
+    if existing is not None and not force and not _native_sources_newer(repo_root / "native_binpack", existing):
         return existing
 
     subprocess.run(
@@ -265,65 +201,6 @@ def write_fixture_binpack(path: str | Path) -> None:
         raise NativeError(_last_error(lib))
 
 
-def prepare_binpack(
-    paths: list[str | Path],
-    output_path: str | Path,
-    *,
-    filter_config: BinpackFilterConfig | None = None,
-    output_buckets: int = 8,
-    rebalance_cap: float = 3.0,
-    target_per_bucket: int = 0,
-) -> dict[str, object]:
-    if not paths:
-        raise ValueError("At least one input .binpack path is required")
-    lib = _load_library()
-    if not hasattr(lib, "thrawn_prepare_binpack"):
-        build_native_extension(force=True)
-        lib = ctypes.CDLL(str(_find_library((Path(__file__).resolve().parents[2] / "build" / "native_binpack"))))
-        _configure_library_symbols(lib)
-    if not hasattr(lib, "thrawn_prepare_binpack"):
-        raise NativeError("The native library does not expose thrawn_prepare_binpack")
-    resolved_paths = [os.fsencode(Path(path).resolve()) for path in paths]
-    path_array = (ctypes.c_char_p * len(resolved_paths))(*resolved_paths)
-    native_filter = (filter_config or BinpackFilterConfig()).to_native()
-    stats = _PrepareStats()
-    ok = lib.thrawn_prepare_binpack(
-        path_array,
-        len(resolved_paths),
-        os.fsencode(Path(output_path).resolve()),
-        ctypes.byref(native_filter),
-        int(output_buckets),
-        float(rebalance_cap),
-        int(target_per_bucket),
-        ctypes.byref(stats),
-    )
-    if ok != 1:
-        raise NativeError(_last_error(lib))
-    buckets = int(stats.output_buckets)
-    return {
-        "output_path": str(Path(output_path).resolve()),
-        "entries_read": int(stats.entries_read),
-        "entries_written": int(stats.entries_written),
-        "rejected": {
-            "min_ply": int(stats.rejected_min_ply),
-            "score_cap": int(stats.rejected_score_cap),
-            "capture": int(stats.rejected_capture),
-            "wld": int(stats.rejected_wld),
-        },
-        "bucket_counts_before": [int(stats.bucket_counts_before[index]) for index in range(buckets)],
-        "bucket_counts_after": [int(stats.bucket_counts_after[index]) for index in range(buckets)],
-        "filter": {
-            "min_ply": int(native_filter.min_ply),
-            "max_abs_score_cp": float(native_filter.max_abs_score_cp),
-            "skip_bestmove_captures": bool(native_filter.skip_bestmove_captures),
-            "skip_wld": bool(native_filter.skip_wld),
-            "min_score_result_prob": float(native_filter.min_score_result_prob),
-        },
-        "rebalance_cap": float(rebalance_cap),
-        "target_per_bucket": int(target_per_bucket),
-    }
-
-
 class BinpackStream:
     def __init__(
         self,
@@ -331,7 +208,6 @@ class BinpackStream:
         *,
         num_threads: int = 1,
         cyclic: bool = False,
-        filter_config: BinpackFilterConfig | None = None,
     ):
         if not paths:
             raise ValueError("At least one dataset path is required")
@@ -340,13 +216,11 @@ class BinpackStream:
         self._lib = _load_library()
         encoded_paths = [os.fsencode(Path(path).resolve()) for path in paths]
         self._path_array = (ctypes.c_char_p * len(encoded_paths))(*encoded_paths)
-        self._filter = (filter_config or BinpackFilterConfig()).to_native()
         self._handle = self._lib.thrawn_binpack_open_many(
             self._path_array,
             len(encoded_paths),
             num_threads,
             1 if cyclic else 0,
-            ctypes.byref(self._filter),
         )
         if not self._handle:
             raise NativeError(_last_error(self._lib))
@@ -372,8 +246,6 @@ class BinpackStream:
             black_indices = np.ctypeslib.as_array(view.black_indices, shape=(size, max_active)).copy()
             white_counts = np.ctypeslib.as_array(view.white_counts, shape=(size,)).copy()
             black_counts = np.ctypeslib.as_array(view.black_counts, shape=(size,)).copy()
-            ply = np.ctypeslib.as_array(view.ply, shape=(size,)).copy()
-            is_capture = np.ctypeslib.as_array(view.is_capture, shape=(size,)).copy()
             stm = np.ctypeslib.as_array(view.stm, shape=(size,)).copy()
             score_cp = np.ctypeslib.as_array(view.score_cp, shape=(size,)).copy()
             result_wdl = np.ctypeslib.as_array(view.result_wdl, shape=(size,)).copy()
@@ -382,8 +254,6 @@ class BinpackStream:
                 black_indices=black_indices,
                 white_counts=white_counts,
                 black_counts=black_counts,
-                ply=ply,
-                is_capture=is_capture,
                 stm=stm,
                 score_cp=score_cp,
                 result_wdl=result_wdl,
@@ -429,7 +299,6 @@ def _configure_library_symbols(lib: ctypes.CDLL) -> None:
         ctypes.c_int32,
         ctypes.c_int32,
         ctypes.c_int32,
-        ctypes.POINTER(_FilterOptions),
     ]
     lib.thrawn_binpack_open_many.restype = ctypes.c_void_p
     lib.thrawn_binpack_close.argtypes = [ctypes.c_void_p]
@@ -442,20 +311,6 @@ def _configure_library_symbols(lib: ctypes.CDLL) -> None:
     lib.thrawn_inspect_binpack.restype = ctypes.c_int32
     lib.thrawn_write_fixture_binpack.argtypes = [ctypes.c_char_p]
     lib.thrawn_write_fixture_binpack.restype = ctypes.c_int32
-    try:
-        lib.thrawn_prepare_binpack.argtypes = [
-            ctypes.POINTER(ctypes.c_char_p),
-            ctypes.c_int32,
-            ctypes.c_char_p,
-            ctypes.POINTER(_FilterOptions),
-            ctypes.c_int32,
-            ctypes.c_double,
-            ctypes.c_uint64,
-            ctypes.POINTER(_PrepareStats),
-        ]
-        lib.thrawn_prepare_binpack.restype = ctypes.c_int32
-    except AttributeError:
-        pass
     lib.thrawn_last_error.argtypes = []
     lib.thrawn_last_error.restype = ctypes.c_char_p
 
@@ -465,6 +320,15 @@ def _last_error(lib: ctypes.CDLL) -> str:
     if not raw:
         return ""
     return raw.decode("utf-8")
+
+
+def _native_sources_newer(source_root: Path, built_library: Path) -> bool:
+    library_mtime = built_library.stat().st_mtime
+    for pattern in ("CMakeLists.txt", "**/*.cpp", "**/*.h"):
+        for candidate in source_root.glob(pattern):
+            if candidate.is_file() and candidate.stat().st_mtime > library_mtime:
+                return True
+    return False
 
 
 def _safe_fraction(count: int, total: int) -> float:

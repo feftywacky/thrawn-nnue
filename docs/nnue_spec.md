@@ -1,37 +1,97 @@
 # NNUE Specification
 
-This document is the unified trainer, export, and engine contract for the NNUE models produced by this repository after the v9 training rework.
+This document describes the production NNUE contract for the v10 mainline network in this repository and how to use it well in an engine.
 
-## 1. Scope
+## 1. Recommended Network
 
-This specification covers:
+The preferred v10 network is a small scalar `a768` NNUE:
 
-- the v9 scratch-training pipeline
-- dataset filtering and preparation
-- the `a768` dual-perspective network architecture
-- the version-4 export format
-- engine inference semantics for both heads
-- validation and sanity requirements
+- feature space: `768`
+- per-perspective accumulator size: `256`
+- hidden layer size: `32`
+- output buckets: `8`
+- output head: scalar only
+- output perspective: side to move
 
-## 2. Architecture Contract
+The architecture is:
 
-The network uses:
+```text
+white_accumulator: 768 -> 256
+black_accumulator: 768 -> 256
+combine by side to move: [us_acc | them_acc] -> 512
+SCReLU
+Linear(512, 32)
+Clipped ReLU
+Linear(32, 8)
+select one bucket by material phase
+```
 
-- feature set: `a768`
-- active features per perspective: `32`
-- two shared accumulators: white perspective and black perspective
-- side-to-move ordered concatenation
-- SCReLU on the concatenated accumulator vector
-- trunk: `1536 -> 128`
-- piece-count output buckets: `8`
-- head type: `dual_value_wdl`
+This shape is the mainline balance for v10: fast incremental updates, small dense layers, and enough phase specialization to avoid a single global output for every material regime.
 
-The v9 dense head is:
+## 2. Feature Indexing Contract
 
-- value head: `128 -> 8`
-- WDL head: `128 -> 8 x 3`
+The feature space is always:
 
-The output bucket is selected from total piece count:
+- `6` piece types
+- `2` relative colors
+- `64` oriented squares
+
+Per-piece indexing:
+
+```text
+piece_type_index:
+P=0 N=1 B=2 R=3 Q=4 K=5
+```
+
+The important rule is that feature meaning is defined per accumulator, not as one global STM-relative tensor.
+
+For the white-perspective accumulator:
+
+- white pieces use relative-color bit `0`
+- black pieces use relative-color bit `1`
+- squares are not flipped
+
+For the black-perspective accumulator:
+
+- black pieces use relative-color bit `0`
+- white pieces use relative-color bit `1`
+- squares are flipped vertically
+
+The feature index formula is:
+
+```text
+feature_index = (piece_type_index * 2 + relative_color_bit) * 64 + oriented_square
+```
+
+This repo does **not** use one friendly/enemy tensor that is rewritten into STM-relative form before PyTorch. It always produces two accumulators, one from white’s perspective and one from black’s perspective.
+
+## 3. Accumulator And Inference Rules
+
+Accumulator refresh/update semantics:
+
+```text
+white_acc = ft_bias + sum(ft_weight[white_features])
+black_acc = ft_bias + sum(ft_weight[black_features])
+```
+
+Side to move only affects concatenation order:
+
+```text
+if stm == white:
+    combined = [white_acc | black_acc]
+else:
+    combined = [black_acc | white_acc]
+```
+
+Dense inference is:
+
+```text
+hidden0 = square(clamp(combined, 0, 1))
+hidden1 = clamp(hidden0 @ l1_weight + l1_bias, 0, 1)
+outputs = hidden1 @ out_weight + out_bias
+```
+
+The selected scalar output is chosen by total piece count:
 
 ```text
 clamped_piece_count = clamp(piece_count, 2, 32)
@@ -39,120 +99,22 @@ phase_progress = 32 - clamped_piece_count
 bucket = min(output_buckets - 1, (phase_progress * output_buckets) / 31)
 ```
 
-## 3. Feature Semantics
+For best engine performance:
 
-The feature space remains:
+- keep the exact accumulator semantics above
+- keep SCReLU and clamp behavior identical
+- use incremental accumulator updates in search
+- keep trainer/export/engine bucket selection identical
 
-- 6 piece types
-- 2 relative colors
-- 64 oriented squares
+## 4. Export Contract
 
-Indexing rules:
+The preferred v10 format is scalar export version `3`.
 
-```text
-piece_type_index:
-P=0 N=1 B=2 R=3 Q=4 K=5
-
-relative_color_bit:
-white perspective: white=0 black=1
-black perspective: black=0 white=1
-
-square orientation:
-white perspective: unchanged
-black perspective: vertical flip only
-```
-
-Feature index:
-
-```text
-bucket = piece_type_index * 2 + relative_color_bit
-feature_index = bucket * 64 + oriented_square
-```
-
-## 4. Training Pipeline
-
-The trainer is position-budget based, not epoch based.
-
-The default v9 config is [test80_a768_v9.toml](/Users/feiyulin/Code/thrawn-nnue/configs/test80_a768_v9.toml) with:
-
-- `total_train_positions = 500000000`
-- `validation_positions = 20000000`
-- `batch_size = 16384`
-- `optimizer = "ranger"` with `RAdam` fallback when a full Ranger implementation is unavailable
-- `teacher_lambda_start = 1.0`
-- `teacher_lambda_end = 0.75`
-- `warmup_positions = 50000000`
-
-### 4.1 Runtime filtering
-
-The loader may filter positions before they reach Python using:
-
-- `filter_min_ply`
-- `filter_max_abs_score_cp`
-- `filter_skip_bestmove_captures`
-- `filter_wld_skip`
-
-`filter_wld_skip` removes positions where the packed result is too unlikely under the upstream Stockfish-style score/result model already embedded in the binpack tooling.
-
-### 4.2 Offline preparation
-
-The repository provides:
-
-```bash
-thrawn-nnue prepare-binpack --path input.binpack --out prepared.binpack
-```
-
-This command:
-
-- applies the same filtering policy as runtime training
-- records rejection reasons
-- reports bucket occupancy before and after rebalancing
-- can duplicate underrepresented buckets up to `rebalance_cap`
-
-### 4.3 Losses
-
-The value head uses Stockfish-style scalar-in-WDL-space loss:
-
-```text
-pred_wdl = sigmoid(prediction_cp / wdl_scale)
-target_wdl = sigmoid(target_cp / wdl_scale)
-value_loss =
-    teacher_lambda * mse(pred_wdl, target_wdl)
-  + (1 - teacher_lambda) * mse(pred_wdl, result_wdl)
-```
-
-The WDL head uses hard-label cross entropy on:
-
-- loss
-- draw
-- win
-
-The consistency term ties the two heads together:
-
-```text
-expected = Pwin + 0.5 * Pdraw
-wdl_raw = logit(clamp(expected))
-consistency_loss = mse(sigmoid(value_head / wdl_scale), sigmoid(wdl_raw / wdl_scale))
-```
-
-Training phases:
-
-- warmup phase: first `50M` train positions, value loss only
-- main phase: value loss + `wdl_ce_weight * wdl_ce_loss` + `head_consistency_weight * consistency_loss`
-
-## 5. Export Format
-
-Version 3 remains the scalar-only export format.
-
-Version 4 is the dual-head export format and is the preferred format for v9.
-
-### 5.1 Header
-
-Little-endian header:
+Header:
 
 ```text
 magic[8]                = "THNNUE\0\1"
-uint32 version          = 4
+uint32 version          = 3
 char feature_set[16]    = "a768_dual_v1"
 uint32 num_features
 uint32 ft_size
@@ -165,7 +127,7 @@ float  wdl_scale
 uint32 description_length
 ```
 
-### 5.2 Version 4 payload
+Payload:
 
 ```text
 description bytes
@@ -175,74 +137,35 @@ int32  l1_bias[hidden_size]
 int8   l1_weight[ft_size * 2][hidden_size]
 int32  out_bias[output_buckets]
 int16  out_weight[hidden_size][output_buckets]
-int32  wdl_out_bias[output_buckets * 3]
-int16  wdl_out_weight[hidden_size][output_buckets * 3]
 ```
 
-Version 3 omits the final two tensors and is interpreted as `head_type = scalar`.
+## 5. Score Interpretation And Calibration
 
-## 6. Engine Inference Contract
+The selected output bucket produces a raw scalar, not a centipawn score by itself.
 
-Accumulator and trunk semantics are unchanged:
+Before shipping a net to the engine:
 
-```text
-white_acc = ft_bias + sum(ft_weight[white_features])
-black_acc = ft_bias + sum(ft_weight[black_features])
+1. Export the best checkpoint.
+2. Run `thrawn-nnue verify-export` to confirm checkpoint/export parity.
+3. Run `thrawn-nnue calibrate-scale` on the June holdout shard.
+4. Use the fitted `cp_per_raw` or its derived normalization constant in the engine.
 
-combined =
-    [white_acc | black_acc] if stm == white
-    [black_acc | white_acc] if stm == black
+Recommended workflow:
 
-hidden0 = square(clamp(combined, 0, 1))
-hidden1 = clamp(hidden0 @ l1_weight + l1_bias, 0, 1)
-```
+- calibrate on the same held-out month used for validation
+- keep raw output in NNUE space internally until the final engine score conversion
+- store the fitted normalization constant alongside the net version you ship
 
-The engine then evaluates the selected bucket:
+## 6. Practical Usage Guidance
 
-- value head: `value_raw = hidden1 @ out_weight + out_bias`
-- WDL head: `wdl_logits = hidden1 @ wdl_out_weight + wdl_out_bias`
+For strongest results with this NNUE:
 
-To collapse the WDL head into a scalar:
+- prefer `checkpoints/best.pt` rather than the last checkpoint
+- keep `8` buckets enabled in both trainer and engine
+- preserve the small `256 -> 32` dense path for speed
+- treat the engine loader and the trainer export path as one contract, not two similar implementations
 
-```text
-probabilities = softmax(wdl_logits)
-expected = Pwin + 0.5 * Pdraw
-wdl_raw = logit(clamp(expected))
-```
-
-The engine MUST NOT use `logit(Pwin - Ploss)`.
-
-## 7. Calibration
-
-The repository calibrates against validation `.binpack` data:
-
-```bash
-thrawn-nnue calibrate-scale --nnue model.nnue --validation-path /path/to/validation.binpack
-```
-
-For version-4 exports the calibrator fits both:
-
-- the value head
-- the WDL-collapsed head
-
-It reports:
-
-- per-head `cp_per_raw`
-- per-head fit metrics
-- a `preferred_head`
-- hardcoded sanity positions
-
-## 8. Validation And Sanity
-
-Minimum validation requirements:
-
-1. export a checkpoint
-2. verify checkpoint vs export parity
-3. validate opening, middlegame, and endgame positions
-4. validate both sides to move
-5. validate incremental updates against refresh
-
-The trainer and engine SHOULD track a fixed sanity suite containing:
+Before integrating a net into search, validate a fixed sanity suite:
 
 - starting position
 - white up pawn
@@ -250,21 +173,12 @@ The trainer and engine SHOULD track a fixed sanity suite containing:
 - white up bishop
 - white up rook
 - white up queen
-- simple won endgames
-- reduced-material drawish positions
+- simple winning endgames
+- reduced-material drawish cases
 
-At minimum, materially winning positions SHOULD not score below the start position on either the value head or the collapsed WDL head.
+The sanity suite should confirm:
 
-## 9. Performance Priorities
-
-Implementation order SHOULD be:
-
-1. scalar refresh path
-2. incremental accumulator updates
-3. export parity checks
-4. SIMD accumulator kernels
-5. SCReLU packing
-6. SIMD `1536 -> 128` dense kernel
-7. optional SIMD head kernels
-
-The accumulator path remains the highest-value optimization target.
+- outputs are not constant
+- materially better positions score above the start position
+- side-to-move symmetry has the expected sign behavior
+- export quantization has not destroyed the network signal

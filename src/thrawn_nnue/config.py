@@ -34,22 +34,11 @@ class TrainConfig:
     ft_size: int = 256
     hidden_size: int = 32
     output_buckets: int = 1
-    head_type: str = "scalar"
     output_perspective: str = "stm"
     score_clip: float = 0.0
     score_scale: float = 1.0
     wdl_scale: float = 410.0
-    eval_lambda: float | None = None
-    teacher_lambda_start: float = 1.0
-    teacher_lambda_end: float = 0.75
-    wdl_ce_weight: float = 0.25
-    head_consistency_weight: float = 0.05
-    warmup_positions: int = 0
-    optimizer: str = "adamw"
-    filter_min_ply: int = 0
-    filter_max_abs_score_cp: float = 0.0
-    filter_skip_bestmove_captures: bool = False
-    filter_wld_skip: bool = False
+    eval_lambda: float = 0.7
     lr_drop_fractions: list[float] = field(default_factory=lambda: [0.80, 0.95])
     lr_drop_factor: float = 0.1
     export_ft_scale: float = 127.0
@@ -87,10 +76,6 @@ class TrainConfig:
 
     def validate(self) -> None:
         self.feature_set = _canonical_feature_set(self.feature_set)
-        self.head_type = _canonical_head_type(self.head_type)
-        if self.eval_lambda is not None:
-            self.teacher_lambda_start = float(self.eval_lambda)
-            self.teacher_lambda_end = float(self.eval_lambda)
         if self.num_features != 768:
             raise ValueError("A-768 requires num_features=768")
         if self.max_active_features != 32:
@@ -113,16 +98,8 @@ class TrainConfig:
             raise ValueError("score_clip must be >= 0")
         if self.score_scale <= 0.0:
             raise ValueError("score_scale must be > 0")
-        if not 0.0 <= self.teacher_lambda_start <= 1.0:
-            raise ValueError("teacher_lambda_start must be in [0, 1]")
-        if not 0.0 <= self.teacher_lambda_end <= 1.0:
-            raise ValueError("teacher_lambda_end must be in [0, 1]")
-        if self.wdl_ce_weight < 0.0:
-            raise ValueError("wdl_ce_weight must be >= 0")
-        if self.head_consistency_weight < 0.0:
-            raise ValueError("head_consistency_weight must be >= 0")
-        if self.warmup_positions < 0:
-            raise ValueError("warmup_positions must be >= 0")
+        if not 0.0 <= self.eval_lambda <= 1.0:
+            raise ValueError("eval_lambda must be in [0, 1]")
         if self.export_ft_scale <= 0.0 or self.export_dense_scale <= 0.0:
             raise ValueError("export scales must be > 0")
         if self.num_loader_threads <= 0:
@@ -141,16 +118,10 @@ class TrainConfig:
             raise ValueError("clip_grad_norm must be positive")
         if self.ft_size <= 0 or self.hidden_size <= 0:
             raise ValueError("network sizes must be positive")
-        if self.optimizer not in {"adamw", "ranger"}:
-            raise ValueError("optimizer must be one of: adamw, ranger")
         if self.device not in {"auto", "cuda", "mps", "cpu"}:
             raise ValueError("device must be one of: auto, cuda, mps, cpu")
         if self.console_mode not in {"progress", "text"}:
             raise ValueError("console_mode must be one of: progress, text")
-        if self.filter_min_ply < 0:
-            raise ValueError("filter_min_ply must be >= 0")
-        if self.filter_max_abs_score_cp < 0.0:
-            raise ValueError("filter_max_abs_score_cp must be >= 0")
         if self.lr_drop_factor <= 0.0 or self.lr_drop_factor > 1.0:
             raise ValueError("lr_drop_factor must be in (0, 1]")
         previous_fraction = None
@@ -211,14 +182,6 @@ def _canonical_feature_set(value: str) -> str:
     if value in {"a768", "a768_dual"}:
         return "a768"
     raise ValueError("Only feature_set='a768' (or legacy alias 'a768_dual') is supported")
-
-
-def _canonical_head_type(value: str) -> str:
-    if value in {"scalar", "value"}:
-        return "scalar"
-    if value in {"dual_value_wdl", "dual"}:
-        return "dual_value_wdl"
-    raise ValueError("head_type must be one of: scalar, dual_value_wdl")
 
 
 def _dataset_overlap(train_datasets: list[str], validation_datasets: list[str]) -> list[str]:

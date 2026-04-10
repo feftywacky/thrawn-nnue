@@ -12,7 +12,7 @@ from .features import active_feature_indices, output_bucket_index
 
 
 MAGIC = b"THNNUE\x00\x01"
-VERSION = 4
+VERSION = 3
 FEATURE_SET_ID = "a768_dual_v1"
 OUTPUT_PERSPECTIVE_STM = 1
 HEADER_PREFIX_STRUCT = struct.Struct("<8sI")
@@ -42,9 +42,6 @@ class ExportedNetwork:
     out_bias: np.ndarray
     out_weight: np.ndarray
     version: int = 3
-    head_type: str = "scalar"
-    wdl_out_bias: np.ndarray | None = None
-    wdl_out_weight: np.ndarray | None = None
 
 
 def _require_torch():
@@ -68,7 +65,6 @@ def export_checkpoint(checkpoint_path: str | Path, output_path: str | Path) -> P
         ft_size=config.ft_size,
         hidden_size=config.hidden_size,
         output_buckets=config.output_buckets,
-        head_type=config.head_type,
     )
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
@@ -90,7 +86,7 @@ def load_export(path: str | Path) -> ExportedNetwork:
 
         if magic != MAGIC:
             raise ValueError("Unexpected .nnue magic")
-        if version not in {1, 2, 3, VERSION}:
+        if version not in {1, 2, VERSION}:
             raise ValueError(f"Unsupported .nnue version: {version}")
 
         if version in {1, 2}:
@@ -109,7 +105,6 @@ def load_export(path: str | Path) -> ExportedNetwork:
                 description_length,
             ) = LEGACY_HEADER_REST_STRUCT.unpack(raw_rest)
             output_buckets = 1
-            head_type = "scalar"
         else:
             raw_rest = handle.read(HEADER_REST_STRUCT.size)
             if len(raw_rest) != HEADER_REST_STRUCT.size:
@@ -126,7 +121,6 @@ def load_export(path: str | Path) -> ExportedNetwork:
                 wdl_scale,
                 description_length,
             ) = HEADER_REST_STRUCT.unpack(raw_rest)
-            head_type = "scalar" if version == 3 else "dual_value_wdl"
 
         if feature_set.rstrip(b"\x00").decode("ascii") != FEATURE_SET_ID:
             raise ValueError("Unexpected feature-set identifier")
@@ -148,18 +142,9 @@ def load_export(path: str | Path) -> ExportedNetwork:
                 handle.read(hidden_size * output_buckets * 2),
                 dtype="<i2",
             ).copy().reshape(hidden_size, output_buckets)
-        wdl_out_bias = None
-        wdl_out_weight = None
-        if version >= 4:
-            wdl_out_bias = np.frombuffer(handle.read(output_buckets * 3 * 4), dtype="<i4").copy()
-            wdl_out_weight = np.frombuffer(
-                handle.read(hidden_size * output_buckets * 3 * 2),
-                dtype="<i2",
-            ).copy().reshape(hidden_size, output_buckets * 3)
         return ExportedNetwork(
             description=description,
             version=version,
-            head_type=head_type,
             num_features=num_features,
             ft_size=ft_size,
             hidden_size=hidden_size,
@@ -173,8 +158,6 @@ def load_export(path: str | Path) -> ExportedNetwork:
             l1_weight=l1_weight,
             out_bias=out_bias,
             out_weight=out_weight,
-            wdl_out_bias=wdl_out_bias,
-            wdl_out_weight=wdl_out_weight,
         )
 
 
@@ -191,7 +174,6 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
         ft_size=config.ft_size,
         hidden_size=config.hidden_size,
         output_buckets=config.output_buckets,
-        head_type=config.head_type,
     )
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
@@ -199,29 +181,21 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
     fens = fens or DEFAULT_VERIFICATION_FENS
     with torch.no_grad():
         predictions = []
-        wdl_predictions = []
         for fen in fens:
             white_indices, black_indices, stm, bucket_indices = _batch_arrays_from_fens(
                 [fen],
                 output_buckets=config.output_buckets,
             )
-            pred = model(
+            prediction = model(
                 torch.from_numpy(white_indices).long(),
                 torch.from_numpy(black_indices).long(),
                 torch.from_numpy(stm).float().unsqueeze(1),
                 torch.from_numpy(bucket_indices).long(),
-                return_wdl=config.head_type == "dual_value_wdl",
             )
-            if config.head_type == "dual_value_wdl":
-                value_pred, wdl_logits = pred
-                predictions.append(float(value_pred.squeeze().cpu().item()))
-                expected = torch.softmax(wdl_logits, dim=1)[:, 2] + 0.5 * torch.softmax(wdl_logits, dim=1)[:, 1]
-                wdl_predictions.append(float(torch.logit(expected.clamp(1e-6, 1.0 - 1e-6)).cpu().item()))
-            else:
-                predictions.append(float(pred.squeeze().cpu().item()))
+            predictions.append(float(prediction.squeeze().cpu().item()))
 
     exported = load_export(nnue_path)
-    exported_predictions = evaluate_export(exported, fens, head="value")
+    exported_predictions = evaluate_export(exported, fens)
 
     abs_errors = [abs(a - b) for a, b in zip(predictions, exported_predictions)]
     result = {
@@ -235,25 +209,16 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
         "export_dense_scale": float(exported.dense_scale),
         "quantization": _export_quantization_diagnostics(exported),
     }
-    if exported.head_type == "dual_value_wdl":
-        exported_wdl_predictions = evaluate_export(exported, fens, head="wdl")
-        wdl_errors = [abs(a - b) for a, b in zip(wdl_predictions, exported_wdl_predictions)]
-        result["checkpoint_wdl_predictions"] = wdl_predictions
-        result["exported_wdl_predictions"] = exported_wdl_predictions
-        result["wdl_max_abs_error"] = max(wdl_errors) if wdl_errors else 0.0
-        result["wdl_mean_abs_error"] = (sum(wdl_errors) / len(wdl_errors)) if wdl_errors else 0.0
     return result
 
 
-def evaluate_export(exported: ExportedNetwork, fens: list[str], *, head: str = "value") -> list[float]:
+def evaluate_export(exported: ExportedNetwork, fens: list[str]) -> list[float]:
     ft_bias = exported.ft_bias.astype(np.float32) / exported.ft_scale
     ft_weight = exported.ft_weight.astype(np.float32) / exported.ft_scale
     l1_bias = exported.l1_bias.astype(np.float32) / exported.dense_scale
     l1_weight = exported.l1_weight.astype(np.float32) / exported.dense_scale
     out_bias = exported.out_bias.astype(np.float32) / exported.dense_scale
     out_weight = exported.out_weight.astype(np.float32) / exported.dense_scale
-    wdl_out_bias = None if exported.wdl_out_bias is None else exported.wdl_out_bias.astype(np.float32) / exported.dense_scale
-    wdl_out_weight = None if exported.wdl_out_weight is None else exported.wdl_out_weight.astype(np.float32) / exported.dense_scale
 
     results: list[float] = []
     for fen in fens:
@@ -270,23 +235,11 @@ def evaluate_export(exported: ExportedNetwork, fens: list[str], *, head: str = "
         hidden = np.clip(hidden @ l1_weight + l1_bias, 0.0, 1.0)
         output = hidden @ out_weight + out_bias
         bucket = output_bucket_index(len(board.board), exported.output_buckets)
-        if head == "value" or exported.head_type == "scalar":
-            results.append(float(output[bucket]))
-            continue
-        if head != "wdl":
-            raise ValueError(f"Unknown export head: {head}")
-        if wdl_out_bias is None or wdl_out_weight is None:
-            raise ValueError("Requested WDL head from scalar export")
-        wdl_output = hidden @ wdl_out_weight + wdl_out_bias
-        logits = wdl_output.reshape(exported.output_buckets, 3)[bucket]
-        probabilities = _softmax_numpy(logits)
-        expected = probabilities[2] + 0.5 * probabilities[1]
-        results.append(float(_logit_numpy(expected)))
+        results.append(float(output[bucket]))
     return results
 
 
 def _exported_network_from_model(model, config) -> ExportedNetwork:
-    head_type = getattr(config, "head_type", "scalar")
     ft_weight = model.ft.weight.detach().cpu().numpy()
     ft_bias = model.ft_bias.detach().cpu().numpy()
     l1_weight = model.l1.weight.detach().cpu().numpy().T
@@ -294,19 +247,11 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
     out_weight = model.output.weight.detach().cpu().numpy().T
     out_bias = model.output.bias.detach().cpu().numpy()
     ft_scale = _fit_quantization_scale([ft_bias, ft_weight], config.export_ft_scale, np.int16)
-    dense_values = [l1_weight, out_weight]
-    wdl_out_weight = None
-    wdl_out_bias = None
-    if getattr(model, "wdl_output", None) is not None:
-        wdl_out_weight = model.wdl_output.weight.detach().cpu().numpy().T
-        wdl_out_bias = model.wdl_output.bias.detach().cpu().numpy()
-        dense_values.append(wdl_out_weight)
     dense_scale = _fit_quantization_scale([l1_weight], config.export_dense_scale, np.int8)
 
     return ExportedNetwork(
         description=config.export_description,
-        version=VERSION if head_type == "dual_value_wdl" else 3,
-        head_type=head_type,
+        version=VERSION,
         num_features=config.num_features,
         ft_size=config.ft_size,
         hidden_size=config.hidden_size,
@@ -320,8 +265,6 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
         l1_weight=_quantize(l1_weight, dense_scale, np.int8),
         out_bias=_quantize(out_bias, dense_scale, np.int32),
         out_weight=_quantize(out_weight, dense_scale, np.int16),
-        wdl_out_bias=None if wdl_out_bias is None else _quantize(wdl_out_bias, dense_scale, np.int32),
-        wdl_out_weight=None if wdl_out_weight is None else _quantize(wdl_out_weight, dense_scale, np.int16),
     )
 
 
@@ -343,7 +286,7 @@ def _fit_quantization_scale(values: list[np.ndarray], requested_scale: float, dt
 
 
 def _export_quantization_diagnostics(exported: ExportedNetwork) -> dict[str, dict[str, float]]:
-    diagnostics = {
+    return {
         "ft_bias": _quantized_tensor_stats(exported.ft_bias),
         "ft_weight": _quantized_tensor_stats(exported.ft_weight),
         "l1_bias": _quantized_tensor_stats(exported.l1_bias),
@@ -351,10 +294,6 @@ def _export_quantization_diagnostics(exported: ExportedNetwork) -> dict[str, dic
         "out_bias": _quantized_tensor_stats(exported.out_bias),
         "out_weight": _quantized_tensor_stats(exported.out_weight),
     }
-    if exported.wdl_out_bias is not None and exported.wdl_out_weight is not None:
-        diagnostics["wdl_out_bias"] = _quantized_tensor_stats(exported.wdl_out_bias)
-        diagnostics["wdl_out_weight"] = _quantized_tensor_stats(exported.wdl_out_weight)
-    return diagnostics
 
 
 def _quantized_tensor_stats(values: np.ndarray) -> dict[str, float]:
@@ -400,21 +339,6 @@ def _write_export(handle, exported: ExportedNetwork) -> None:
     handle.write(exported.l1_weight.astype(np.int8).tobytes())
     handle.write(exported.out_bias.astype("<i4").tobytes())
     handle.write(exported.out_weight.astype("<i2").tobytes())
-    if exported.version >= 4 and exported.wdl_out_bias is not None and exported.wdl_out_weight is not None:
-        handle.write(exported.wdl_out_bias.astype("<i4").tobytes())
-        handle.write(exported.wdl_out_weight.astype("<i2").tobytes())
-
-
-def _softmax_numpy(values: np.ndarray) -> np.ndarray:
-    shifted = values - np.max(values)
-    exps = np.exp(shifted)
-    return exps / np.sum(exps)
-
-
-def _logit_numpy(value: float) -> float:
-    epsilon = np.finfo(np.float32).eps
-    clamped = float(np.clip(value, epsilon, 1.0 - epsilon))
-    return float(np.log(clamped / (1.0 - clamped)))
 
 
 def _batch_arrays_from_fens(

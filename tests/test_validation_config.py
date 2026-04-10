@@ -163,39 +163,38 @@ class ValidationConfigTests(unittest.TestCase):
                 [str((valid_dir / "c.binpack").resolve())],
             )
 
-    def test_dual_head_training_fields_and_legacy_eval_lambda_alias_are_supported(self) -> None:
-        config = TrainConfig.from_dict(
-            {
-                "train_datasets": ["/tmp/train.binpack"],
-                "total_train_positions": 10_000,
-                "superbatch_positions": 1_000,
-                "head_type": "dual_value_wdl",
-                "optimizer": "ranger",
-                "teacher_lambda_start": 1.0,
-                "teacher_lambda_end": 0.75,
-                "warmup_positions": 500,
-                "filter_min_ply": 16,
-                "filter_max_abs_score_cp": 1200.0,
-                "filter_skip_bestmove_captures": True,
-                "filter_wld_skip": True,
-            }
-        )
-        self.assertEqual(config.head_type, "dual_value_wdl")
-        self.assertEqual(config.optimizer, "ranger")
-        self.assertEqual(config.filter_min_ply, 16)
-        self.assertTrue(config.filter_skip_bestmove_captures)
-        self.assertTrue(config.filter_wld_skip)
+    def test_removed_v9_fields_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unknown config keys"):
+            TrainConfig.from_dict(
+                {
+                    "train_datasets": ["/tmp/train.binpack"],
+                    "total_train_positions": 10_000,
+                    "superbatch_positions": 1_000,
+                    "head_type": "dual_value_wdl",
+                    "optimizer": "ranger",
+                    "teacher_lambda_start": 1.0,
+                    "teacher_lambda_end": 0.75,
+                    "warmup_positions": 500,
+                    "filter_min_ply": 16,
+                    "filter_max_abs_score_cp": 1200.0,
+                    "filter_skip_bestmove_captures": True,
+                    "filter_wld_skip": True,
+                }
+            )
 
-        legacy = TrainConfig.from_dict(
-            {
-                "train_datasets": ["/tmp/train.binpack"],
-                "total_train_positions": 10_000,
-                "superbatch_positions": 1_000,
-                "eval_lambda": 0.6,
-            }
-        )
-        self.assertEqual(legacy.teacher_lambda_start, 0.6)
-        self.assertEqual(legacy.teacher_lambda_end, 0.6)
+    def test_v10_reference_config_loads_with_scalar_256x32_settings(self) -> None:
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "test80_a768_v10.toml"
+        config = TrainConfig.from_toml(config_path)
+
+        self.assertEqual(config.run_name, "test80_a768_v10")
+        self.assertEqual(config.batch_size, 32_768)
+        self.assertEqual(config.total_train_positions, 2_000_000_000)
+        self.assertEqual(config.ft_size, 256)
+        self.assertEqual(config.hidden_size, 32)
+        self.assertEqual(config.output_buckets, 8)
+        self.assertFalse(config.amp)
+        self.assertEqual(config.score_clip, 1200.0)
+        self.assertEqual(config.eval_lambda, 0.7)
 
 
 if __name__ == "__main__":
