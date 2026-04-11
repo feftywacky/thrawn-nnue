@@ -28,7 +28,7 @@ console_mode = "progress"
 
 learning_rate = 0.001
 weight_decay = 0.00002
-output_regularization = 0.000001
+output_regularization = 0.00001
 clip_grad_norm = 1.0
 amp = false
 
