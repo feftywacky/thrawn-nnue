@@ -22,6 +22,7 @@ from thrawn_nnue.config import TrainConfig
 from thrawn_nnue.native import NativeBatch, inspect_binpack, write_fixture_binpack
 from thrawn_nnue.training import (
     _PreparedBatchSource,
+    _clip_model_weights,
     _create_state,
     _maybe_update_best_checkpoint,
     _normalize_teacher_scores,
@@ -93,6 +94,43 @@ class ValidationTrainingTests(unittest.TestCase):
         expected_result = torch.tensor([[1.0], [0.0], [0.5], [0.5]], dtype=torch.float32)
         self.assertTrue(torch.equal(oriented_score, expected_score))
         self.assertTrue(torch.equal(oriented_result, expected_result))
+
+    def test_clip_model_weights_keeps_l1_limit_independent_of_export_dense_scale(self) -> None:
+        class _Layer:
+            def __init__(self, weights):
+                self.weight = torch.tensor(weights, dtype=torch.float32)
+
+        class _Model:
+            def __init__(self) -> None:
+                self.l1 = _Layer([[2.0, -2.0]])
+                self.output = _Layer([[1000.0, -1000.0]])
+
+        model_low = _Model()
+        model_high = _Model()
+        low_scale_config = TrainConfig.from_dict(
+            {
+                "train_datasets": ["/tmp/train.binpack"],
+                "total_train_positions": 10_000,
+                "superbatch_positions": 1_000,
+                "export_dense_scale": 32.0,
+            }
+        )
+        high_scale_config = TrainConfig.from_dict(
+            {
+                "train_datasets": ["/tmp/train.binpack"],
+                "total_train_positions": 10_000,
+                "superbatch_positions": 1_000,
+                "export_dense_scale": 128.0,
+            }
+        )
+
+        _clip_model_weights(model_low, low_scale_config)
+        _clip_model_weights(model_high, high_scale_config)
+
+        expected_l1_limit = torch.tensor((127.0 - 0.5) / 96.0, dtype=torch.float32)
+        self.assertTrue(torch.allclose(model_low.l1.weight.abs(), expected_l1_limit.expand_as(model_low.l1.weight)))
+        self.assertTrue(torch.allclose(model_high.l1.weight.abs(), expected_l1_limit.expand_as(model_high.l1.weight)))
+        self.assertGreater(float(model_low.output.weight.abs().max()), float(model_high.output.weight.abs().max()))
 
     def test_prefetched_batches_match_synchronous_order(self) -> None:
         expected_batches = [_make_native_batch([1.0, 2.0]), _make_native_batch([3.0]), _make_native_batch([4.0, 5.0])]

@@ -52,6 +52,7 @@ class _ProducerException:
 
 
 _PREFETCH_EOF = object()
+_L1_WEIGHT_CLIP_LIMIT = (127.0 - 0.5) / 96.0
 
 
 def train_from_config(config: TrainConfig, *, console_mode: str | None = None) -> Path:
@@ -471,7 +472,7 @@ def _scalar_head_loss(
 
 
 def _clip_model_weights(model, config: TrainConfig) -> None:
-    dense_limit = (127.0 - 0.5) / max(config.export_dense_scale, 1.0)
+    dense_limit = _L1_WEIGHT_CLIP_LIMIT
     output_limit = (32767.0 - 0.5) / max(config.export_dense_scale, 1.0)
     torch = _require_torch()
     with torch.no_grad():
