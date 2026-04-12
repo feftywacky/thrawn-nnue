@@ -21,8 +21,8 @@ class _ExportEvaluator:
         self._exported = exported
         self.ft_bias = exported.ft_bias.astype(np.float32) / exported.ft_scale
         self.ft_weight = exported.ft_weight.astype(np.float32) / exported.ft_scale
-        self.l1_bias = exported.l1_bias.astype(np.float32) / exported.dense_scale
-        self.l1_weight = exported.l1_weight.astype(np.float32) / exported.dense_scale
+        self.l1_bias = exported.l1_bias.astype(np.float32) / exported.l1_scale
+        self.l1_weight = exported.l1_weight.astype(np.float32) / exported.l1_scale
         self.out_bias = exported.out_bias.astype(np.float32) / exported.dense_scale
         self.out_weight = exported.out_weight.astype(np.float32) / exported.dense_scale
 

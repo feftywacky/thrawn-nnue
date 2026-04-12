@@ -19,6 +19,8 @@ from thrawn_nnue.export import (
     load_export,
     _write_export,
 )
+
+
 class ExportFormatTests(unittest.TestCase):
     def test_header_and_tensor_layout_round_trip(self) -> None:
         exported = ExportedNetwork(
@@ -28,12 +30,13 @@ class ExportFormatTests(unittest.TestCase):
             hidden_size=2,
             output_buckets=3,
             ft_scale=127.0,
+            l1_scale=4096.0,
             dense_scale=64.0,
             wdl_scale=410.0,
             ft_bias=np.arange(4, dtype=np.int16),
             ft_weight=np.arange(768 * 4, dtype=np.int16).reshape(768, 4),
             l1_bias=np.array([7, -3], dtype=np.int32),
-            l1_weight=np.arange(8 * 2, dtype=np.int8).reshape(8, 2),
+            l1_weight=np.arange(8 * 2, dtype=np.int16).reshape(8, 2),
             out_bias=np.array([11, 13, 17], dtype=np.int32),
             out_weight=np.array([[5, 6, 7], [-2, -3, -4]], dtype=np.int16),
         )
@@ -49,6 +52,7 @@ class ExportFormatTests(unittest.TestCase):
             self.assertEqual(loaded.ft_size, 4)
             self.assertEqual(loaded.hidden_size, 2)
             self.assertEqual(loaded.output_buckets, 3)
+            self.assertEqual(loaded.l1_scale, exported.l1_scale)
             self.assertTrue(np.array_equal(loaded.ft_bias, exported.ft_bias))
             self.assertTrue(np.array_equal(loaded.ft_weight, exported.ft_weight))
             self.assertTrue(np.array_equal(loaded.l1_bias, exported.l1_bias))
@@ -61,7 +65,7 @@ class ExportFormatTests(unittest.TestCase):
         self.assertLess(scale, 64.0)
         self.assertLessEqual(5.0 * scale, 127.0)
 
-    def test_export_uses_adaptive_dense_scale_when_weights_are_large(self) -> None:
+    def test_export_uses_separate_auto_fit_l1_scale_when_weights_are_large(self) -> None:
         class FakeTensor:
             def __init__(self, values):
                 self._values = np.asarray(values, dtype=np.float32)
@@ -100,12 +104,14 @@ class ExportFormatTests(unittest.TestCase):
 
         exported = _exported_network_from_model(model, config)
 
-        self.assertLess(exported.dense_scale, 64.0)
+        self.assertEqual(exported.dense_scale, 64.0)
+        self.assertGreater(exported.l1_scale, exported.dense_scale)
         diagnostics = _export_quantization_diagnostics(exported)
         self.assertEqual(diagnostics["l1_weight"]["positive_limit_hits"], 0.0)
         self.assertEqual(diagnostics["l1_weight"]["negative_limit_hits"], 0.0)
         self.assertEqual(diagnostics["out_weight"]["positive_limit_hits"], 0.0)
         self.assertEqual(diagnostics["out_weight"]["negative_limit_hits"], 0.0)
+        self.assertGreater(diagnostics["l1_weight"]["max_abs_quantized"], 127.0)
         self.assertGreater(diagnostics["out_weight"]["max_abs_quantized"], 127.0)
 
     def test_evaluate_export_selects_phase_bucket(self) -> None:
@@ -116,12 +122,13 @@ class ExportFormatTests(unittest.TestCase):
             hidden_size=1,
             output_buckets=8,
             ft_scale=1.0,
+            l1_scale=1.0,
             dense_scale=1.0,
             wdl_scale=410.0,
             ft_bias=np.zeros(1, dtype=np.int16),
             ft_weight=np.zeros((768, 1), dtype=np.int16),
             l1_bias=np.zeros(1, dtype=np.int32),
-            l1_weight=np.zeros((2, 1), dtype=np.int8),
+            l1_weight=np.zeros((2, 1), dtype=np.int16),
             out_bias=np.arange(8, dtype=np.int32),
             out_weight=np.zeros((1, 8), dtype=np.int16),
         )
@@ -146,12 +153,13 @@ class ExportFormatTests(unittest.TestCase):
             hidden_size=1,
             output_buckets=1,
             ft_scale=100.0,
+            l1_scale=100.0,
             dense_scale=100.0,
             wdl_scale=410.0,
             ft_bias=np.array([50], dtype=np.int16),
             ft_weight=np.zeros((768, 1), dtype=np.int16),
             l1_bias=np.zeros(1, dtype=np.int32),
-            l1_weight=np.array([[100], [0]], dtype=np.int8),
+            l1_weight=np.array([[100], [0]], dtype=np.int16),
             out_bias=np.zeros(1, dtype=np.int32),
             out_weight=np.array([[100]], dtype=np.int16),
         )
@@ -164,7 +172,32 @@ class ExportFormatTests(unittest.TestCase):
         self.assertEqual(len(outputs), 1)
         self.assertAlmostEqual(outputs[0], 0.25, places=8)
 
-    def test_version3_scalar_round_trip_supports_v10_256x32_8bucket_layout(self) -> None:
+    def test_evaluate_export_uses_l1_scale_separately_from_dense_scale(self) -> None:
+        fen = "8/8/8/8/8/8/P7/K6k w - - 0 1"
+
+        exported = ExportedNetwork(
+            description="fixture",
+            num_features=768,
+            ft_size=1,
+            hidden_size=1,
+            output_buckets=1,
+            ft_scale=100.0,
+            l1_scale=1000.0,
+            dense_scale=10.0,
+            wdl_scale=410.0,
+            ft_bias=np.array([100], dtype=np.int16),
+            ft_weight=np.zeros((768, 1), dtype=np.int16),
+            l1_bias=np.zeros(1, dtype=np.int32),
+            l1_weight=np.array([[500], [0]], dtype=np.int16),
+            out_bias=np.zeros(1, dtype=np.int32),
+            out_weight=np.array([[10]], dtype=np.int16),
+        )
+
+        outputs = evaluate_export(exported, [fen])
+
+        self.assertEqual(outputs, [0.5])
+
+    def test_version3_scalar_round_trip_supports_legacy_256x32_8bucket_layout(self) -> None:
         ft_weight = np.zeros((768, 256), dtype=np.int16)
         ft_weight[12, 0] = 7
         ft_weight[396, 1] = -5
@@ -182,6 +215,7 @@ class ExportFormatTests(unittest.TestCase):
             hidden_size=32,
             output_buckets=8,
             ft_scale=127.0,
+            l1_scale=96.0,
             dense_scale=96.0,
             wdl_scale=410.0,
             ft_bias=np.zeros(256, dtype=np.int16),
@@ -190,6 +224,7 @@ class ExportFormatTests(unittest.TestCase):
             l1_weight=l1_weight,
             out_bias=np.arange(8, dtype=np.int32),
             out_weight=out_weight,
+            version=3,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -199,6 +234,7 @@ class ExportFormatTests(unittest.TestCase):
             loaded = load_export(path)
 
         self.assertEqual(loaded.version, 3)
+        self.assertEqual(loaded.l1_scale, loaded.dense_scale)
         self.assertEqual(loaded.ft_weight.shape, (768, 256))
         self.assertEqual(loaded.l1_weight.shape, (512, 32))
         self.assertEqual(loaded.out_weight.shape, (32, 8))

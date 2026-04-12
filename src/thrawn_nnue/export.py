@@ -12,11 +12,12 @@ from .features import active_feature_indices, output_bucket_index
 
 
 MAGIC = b"THNNUE\x00\x01"
-VERSION = 3
+VERSION = 4
 FEATURE_SET_ID = "a768_dual_v1"
 OUTPUT_PERSPECTIVE_STM = 1
 HEADER_PREFIX_STRUCT = struct.Struct("<8sI")
-HEADER_REST_STRUCT = struct.Struct("<16sIIIIIfffI")
+HEADER_V3_REST_STRUCT = struct.Struct("<16sIIIIIfffI")
+HEADER_V4_REST_STRUCT = struct.Struct("<16sIIIIIffffI")
 DEFAULT_VERIFICATION_FENS = [
     "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1",
     "r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/2P5/PP3PPP/RNBQKBNR b KQkq - 0 3",
@@ -32,6 +33,7 @@ class ExportedNetwork:
     hidden_size: int
     output_buckets: int
     ft_scale: float
+    l1_scale: float
     dense_scale: float
     wdl_scale: float
     ft_bias: np.ndarray
@@ -40,7 +42,7 @@ class ExportedNetwork:
     l1_weight: np.ndarray
     out_bias: np.ndarray
     out_weight: np.ndarray
-    version: int = 3
+    version: int = VERSION
 
 
 def _require_torch():
@@ -85,23 +87,43 @@ def load_export(path: str | Path) -> ExportedNetwork:
 
         if magic != MAGIC:
             raise ValueError("Unexpected .nnue magic")
-        if version != VERSION:
+        if version == 3:
+            header_struct = HEADER_V3_REST_STRUCT
+        elif version == VERSION:
+            header_struct = HEADER_V4_REST_STRUCT
+        else:
             raise ValueError(f"Unsupported .nnue version: {version}")
-        raw_rest = handle.read(HEADER_REST_STRUCT.size)
-        if len(raw_rest) != HEADER_REST_STRUCT.size:
+        raw_rest = handle.read(header_struct.size)
+        if len(raw_rest) != header_struct.size:
             raise ValueError("File too small to contain a Thrawn NNUE header")
-        (
-            feature_set,
-            num_features,
-            ft_size,
-            hidden_size,
-            output_buckets,
-            output_perspective,
-            ft_scale,
-            dense_scale,
-            wdl_scale,
-            description_length,
-        ) = HEADER_REST_STRUCT.unpack(raw_rest)
+        if version == 3:
+            (
+                feature_set,
+                num_features,
+                ft_size,
+                hidden_size,
+                output_buckets,
+                output_perspective,
+                ft_scale,
+                dense_scale,
+                wdl_scale,
+                description_length,
+            ) = HEADER_V3_REST_STRUCT.unpack(raw_rest)
+            l1_scale = dense_scale
+        else:
+            (
+                feature_set,
+                num_features,
+                ft_size,
+                hidden_size,
+                output_buckets,
+                output_perspective,
+                ft_scale,
+                l1_scale,
+                dense_scale,
+                wdl_scale,
+                description_length,
+            ) = HEADER_V4_REST_STRUCT.unpack(raw_rest)
 
         if feature_set.rstrip(b"\x00").decode("ascii") != FEATURE_SET_ID:
             raise ValueError("Unexpected feature-set identifier")
@@ -113,7 +135,13 @@ def load_export(path: str | Path) -> ExportedNetwork:
         ft_weight = np.frombuffer(handle.read(num_features * ft_size * 2), dtype="<i2").copy()
         ft_weight = ft_weight.reshape(num_features, ft_size)
         l1_bias = np.frombuffer(handle.read(hidden_size * 4), dtype="<i4").copy()
-        l1_weight = np.frombuffer(handle.read(ft_size * 2 * hidden_size), dtype=np.int8).copy()
+        if version == 3:
+            l1_weight = np.frombuffer(handle.read(ft_size * 2 * hidden_size), dtype=np.int8).copy()
+        else:
+            l1_weight = np.frombuffer(
+                handle.read(ft_size * 2 * hidden_size * 2),
+                dtype="<i2",
+            ).copy()
         l1_weight = l1_weight.reshape(ft_size * 2, hidden_size)
         out_bias = np.frombuffer(handle.read(output_buckets * 4), dtype="<i4").copy()
         out_weight = np.frombuffer(
@@ -128,6 +156,7 @@ def load_export(path: str | Path) -> ExportedNetwork:
             hidden_size=hidden_size,
             output_buckets=output_buckets,
             ft_scale=ft_scale,
+            l1_scale=l1_scale,
             dense_scale=dense_scale,
             wdl_scale=wdl_scale,
             ft_bias=ft_bias,
@@ -184,6 +213,7 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
         "exported_predictions": exported_predictions,
         "abs_errors": abs_errors,
         "export_ft_scale": float(exported.ft_scale),
+        "export_l1_scale": float(exported.l1_scale),
         "export_dense_scale": float(exported.dense_scale),
         "quantization": _export_quantization_diagnostics(exported),
     }
@@ -193,8 +223,8 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
 def evaluate_export(exported: ExportedNetwork, fens: list[str]) -> list[float]:
     ft_bias = exported.ft_bias.astype(np.float32) / exported.ft_scale
     ft_weight = exported.ft_weight.astype(np.float32) / exported.ft_scale
-    l1_bias = exported.l1_bias.astype(np.float32) / exported.dense_scale
-    l1_weight = exported.l1_weight.astype(np.float32) / exported.dense_scale
+    l1_bias = exported.l1_bias.astype(np.float32) / exported.l1_scale
+    l1_weight = exported.l1_weight.astype(np.float32) / exported.l1_scale
     out_bias = exported.out_bias.astype(np.float32) / exported.dense_scale
     out_weight = exported.out_weight.astype(np.float32) / exported.dense_scale
 
@@ -225,7 +255,8 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
     out_weight = model.output.weight.detach().cpu().numpy().T
     out_bias = model.output.bias.detach().cpu().numpy()
     ft_scale = _fit_quantization_scale([ft_bias, ft_weight], config.export_ft_scale, np.int16)
-    dense_scale = _fit_quantization_scale([l1_weight], config.export_dense_scale, np.int8)
+    l1_scale = _fit_max_quantization_scale([l1_weight], np.int16)
+    dense_scale = _fit_quantization_scale([out_weight], config.export_dense_scale, np.int16)
 
     return ExportedNetwork(
         description=config.export_description,
@@ -235,12 +266,13 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
         hidden_size=config.hidden_size,
         output_buckets=config.output_buckets,
         ft_scale=ft_scale,
+        l1_scale=l1_scale,
         dense_scale=dense_scale,
         wdl_scale=config.wdl_scale,
         ft_bias=_quantize(ft_bias, ft_scale, np.int16),
         ft_weight=_quantize(ft_weight, ft_scale, np.int16),
-        l1_bias=_quantize(l1_bias, dense_scale, np.int32),
-        l1_weight=_quantize(l1_weight, dense_scale, np.int8),
+        l1_bias=_quantize(l1_bias, l1_scale, np.int32),
+        l1_weight=_quantize(l1_weight, l1_scale, np.int16),
         out_bias=_quantize(out_bias, dense_scale, np.int32),
         out_weight=_quantize(out_weight, dense_scale, np.int16),
     )
@@ -261,6 +293,15 @@ def _fit_quantization_scale(values: list[np.ndarray], requested_scale: float, dt
     max_scale_without_limit_hits = max(float(info.max) - 0.5, 1.0) / max_abs
     headroom_scale = float(np.nextafter(max_scale_without_limit_hits, 0.0))
     return float(min(requested_scale, headroom_scale))
+
+
+def _fit_max_quantization_scale(values: list[np.ndarray], dtype) -> float:
+    info = np.iinfo(dtype)
+    max_abs = max((float(np.max(np.abs(value))) for value in values if value.size > 0), default=0.0)
+    max_scale_without_limit_hits = max(float(info.max) - 0.5, 1.0)
+    if max_abs <= 0.0:
+        return max_scale_without_limit_hits
+    return float(np.nextafter(max_scale_without_limit_hits / max_abs, 0.0))
 
 
 def _export_quantization_diagnostics(exported: ExportedNetwork) -> dict[str, dict[str, float]]:
@@ -294,27 +335,50 @@ def _quantized_tensor_stats(values: np.ndarray) -> dict[str, float]:
 def _write_export(handle, exported: ExportedNetwork) -> None:
     feature_set_bytes = FEATURE_SET_ID.encode("ascii").ljust(16, b"\x00")
     description_bytes = exported.description.encode("utf-8")
-    header = HEADER_PREFIX_STRUCT.pack(
-        MAGIC,
-        exported.version,
-    ) + HEADER_REST_STRUCT.pack(
-        feature_set_bytes,
-        exported.num_features,
-        exported.ft_size,
-        exported.hidden_size,
-        exported.output_buckets,
-        OUTPUT_PERSPECTIVE_STM,
-        float(exported.ft_scale),
-        float(exported.dense_scale),
-        float(exported.wdl_scale),
-        len(description_bytes),
-    )
+    if exported.version == 3:
+        header = HEADER_PREFIX_STRUCT.pack(
+            MAGIC,
+            exported.version,
+        ) + HEADER_V3_REST_STRUCT.pack(
+            feature_set_bytes,
+            exported.num_features,
+            exported.ft_size,
+            exported.hidden_size,
+            exported.output_buckets,
+            OUTPUT_PERSPECTIVE_STM,
+            float(exported.ft_scale),
+            float(exported.dense_scale),
+            float(exported.wdl_scale),
+            len(description_bytes),
+        )
+    elif exported.version == VERSION:
+        header = HEADER_PREFIX_STRUCT.pack(
+            MAGIC,
+            exported.version,
+        ) + HEADER_V4_REST_STRUCT.pack(
+            feature_set_bytes,
+            exported.num_features,
+            exported.ft_size,
+            exported.hidden_size,
+            exported.output_buckets,
+            OUTPUT_PERSPECTIVE_STM,
+            float(exported.ft_scale),
+            float(exported.l1_scale),
+            float(exported.dense_scale),
+            float(exported.wdl_scale),
+            len(description_bytes),
+        )
+    else:
+        raise ValueError(f"Unsupported export version for writing: {exported.version}")
     handle.write(header)
     handle.write(description_bytes)
     handle.write(exported.ft_bias.astype("<i2").tobytes())
     handle.write(exported.ft_weight.astype("<i2").tobytes())
     handle.write(exported.l1_bias.astype("<i4").tobytes())
-    handle.write(exported.l1_weight.astype(np.int8).tobytes())
+    if exported.version == 3:
+        handle.write(exported.l1_weight.astype(np.int8).tobytes())
+    else:
+        handle.write(exported.l1_weight.astype("<i2").tobytes())
     handle.write(exported.out_bias.astype("<i4").tobytes())
     handle.write(exported.out_weight.astype("<i2").tobytes())
 
