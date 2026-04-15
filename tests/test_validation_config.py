@@ -26,9 +26,9 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.superbatch_positions, 2_000)
         self.assertEqual(config.validation_interval_positions, 0)
         self.assertEqual(config.validation_positions, 0)
-        self.assertEqual(config.feature_set, "a768")
+        self.assertEqual(config.feature_set, "halfkp")
 
-    def test_score_clip_and_score_scale_are_validated(self) -> None:
+    def test_score_clip_and_cp_loss_beta_are_validated(self) -> None:
         with self.assertRaises(ValueError):
             TrainConfig.from_dict(
                 {
@@ -44,7 +44,7 @@ class ValidationConfigTests(unittest.TestCase):
                     "train_datasets": ["/tmp/train.binpack"],
                     "total_train_positions": 10_000,
                     "superbatch_positions": 1_000,
-                    "score_scale": 0.0,
+                    "cp_loss_beta": 0.0,
                 }
             )
 
@@ -80,23 +80,25 @@ class ValidationConfigTests(unittest.TestCase):
                 }
             )
 
-    def test_feature_set_must_be_a768_and_output_buckets_must_be_positive(self) -> None:
+    def test_feature_set_must_be_halfkp_and_legacy_keys_are_rejected(self) -> None:
         with self.assertRaises(ValueError):
             TrainConfig.from_dict(
                 {
                     "train_datasets": ["/tmp/train.binpack"],
                     "total_train_positions": 10_000,
                     "superbatch_positions": 1_000,
-                    "feature_set": "a768_dual",
+                    "feature_set": "a768",
                 }
             )
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "Unknown config keys"):
             TrainConfig.from_dict(
                 {
                     "train_datasets": ["/tmp/train.binpack"],
                     "total_train_positions": 10_000,
                     "superbatch_positions": 1_000,
-                    "output_buckets": 0,
+                    "score_scale": 1.0,
+                    "output_buckets": 8,
+                    "eval_lambda": 0.7,
                 }
             )
 
@@ -112,17 +114,6 @@ class ValidationConfigTests(unittest.TestCase):
                     "validation_datasets": ["/tmp/shared.binpack"],
                     "total_train_positions": 10_000,
                     "superbatch_positions": 1_000,
-                }
-            )
-
-    def test_legacy_epoch_fields_are_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            TrainConfig.from_dict(
-                {
-                    "train_datasets": ["/tmp/train.binpack"],
-                    "total_train_positions": 10_000,
-                    "superbatch_positions": 1_000,
-                    "steps_per_epoch": 100,
                 }
             )
 
@@ -162,38 +153,20 @@ class ValidationConfigTests(unittest.TestCase):
                 [str((valid_dir / "c.binpack").resolve())],
             )
 
-    def test_removed_v9_fields_are_rejected(self) -> None:
-        with self.assertRaisesRegex(ValueError, "Unknown config keys"):
-            TrainConfig.from_dict(
-                {
-                    "train_datasets": ["/tmp/train.binpack"],
-                    "total_train_positions": 10_000,
-                    "superbatch_positions": 1_000,
-                    "head_type": "dual_value_wdl",
-                    "optimizer": "ranger",
-                    "teacher_lambda_start": 1.0,
-                    "teacher_lambda_end": 0.75,
-                    "warmup_positions": 500,
-                    "filter_min_ply": 16,
-                    "filter_max_abs_score_cp": 1200.0,
-                    "filter_skip_bestmove_captures": True,
-                    "filter_wld_skip": True,
-                }
-            )
-
-    def test_v10_reference_config_loads_with_scalar_256x32_settings(self) -> None:
-        config_path = Path(__file__).resolve().parents[1] / "configs" / "test80_a768_v10.toml"
+    def test_default_reference_config_loads_with_halfkp_settings(self) -> None:
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "default.toml"
         config = TrainConfig.from_toml(config_path)
 
-        self.assertEqual(config.run_name, "test80_a768_v10")
+        self.assertEqual(config.run_name, "halfkp_baseline")
         self.assertEqual(config.batch_size, 32_768)
         self.assertEqual(config.total_train_positions, 2_000_000_000)
         self.assertEqual(config.ft_size, 256)
-        self.assertEqual(config.hidden_size, 32)
-        self.assertEqual(config.output_buckets, 8)
-        self.assertFalse(config.amp)
-        self.assertEqual(config.score_clip, 1200.0)
-        self.assertEqual(config.eval_lambda, 0.7)
+        self.assertEqual(config.l1_size, 32)
+        self.assertEqual(config.l2_size, 32)
+        self.assertEqual(config.num_features, 40_960)
+        self.assertEqual(config.max_active_features, 30)
+        self.assertEqual(config.score_clip, 4000.0)
+        self.assertEqual(config.wdl_lambda, 0.1)
 
 
 if __name__ == "__main__":

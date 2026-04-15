@@ -29,22 +29,23 @@ class TrainConfig:
     output_regularization: float = 0.0
     clip_grad_norm: float = 1.0
     amp: bool = True
-    feature_set: str = "a768"
-    num_features: int = 768
-    max_active_features: int = 32
+    feature_set: str = "halfkp"
+    num_features: int = 40960
+    num_factor_features: int = 640
+    max_active_features: int = 30
     ft_size: int = 256
-    hidden_size: int = 32
-    output_buckets: int = 1
+    l1_size: int = 32
+    l2_size: int = 32
     output_perspective: str = "stm"
-    score_clip: float = 0.0
-    score_scale: float = 1.0
+    score_clip: float = 4000.0
+    cp_loss_beta: float = 128.0
     wdl_scale: float = 410.0
-    eval_lambda: float = 0.7
+    wdl_lambda: float = 0.1
     lr_drop_fractions: list[float] = field(default_factory=lambda: [0.80, 0.95])
     lr_drop_factor: float = 0.1
     export_ft_scale: float = 127.0
     export_dense_scale: float = 64.0
-    export_description: str = "thrawn a768 dual nnue"
+    export_description: str = "thrawn halfkp nnue"
 
     def resolved_output_dir(self, root: Path | None = None) -> Path:
         base = root or Path.cwd()
@@ -77,12 +78,12 @@ class TrainConfig:
 
     def validate(self) -> None:
         self.feature_set = _canonical_feature_set(self.feature_set)
-        if self.num_features != 768:
-            raise ValueError("A-768 requires num_features=768")
-        if self.max_active_features != 32:
-            raise ValueError("Chess A-768 expects max_active_features=32")
-        if self.output_buckets <= 0:
-            raise ValueError("output_buckets must be positive")
+        if self.num_features != 40960:
+            raise ValueError("HalfKP requires num_features=40960")
+        if self.num_factor_features != 640:
+            raise ValueError("HalfKP P factorization requires num_factor_features=640")
+        if self.max_active_features != 30:
+            raise ValueError("Chess HalfKP expects max_active_features=30")
         if self.output_perspective != "stm":
             raise ValueError("Only output_perspective='stm' is supported")
         if self.batch_size <= 0:
@@ -97,10 +98,12 @@ class TrainConfig:
             raise ValueError("validation_positions must be >= 0")
         if self.score_clip < 0.0:
             raise ValueError("score_clip must be >= 0")
-        if self.score_scale <= 0.0:
-            raise ValueError("score_scale must be > 0")
-        if not 0.0 <= self.eval_lambda <= 1.0:
-            raise ValueError("eval_lambda must be in [0, 1]")
+        if self.cp_loss_beta <= 0.0:
+            raise ValueError("cp_loss_beta must be positive")
+        if self.wdl_scale <= 0.0:
+            raise ValueError("wdl_scale must be positive")
+        if self.wdl_lambda < 0.0:
+            raise ValueError("wdl_lambda must be >= 0")
         if self.export_ft_scale <= 0.0 or self.export_dense_scale <= 0.0:
             raise ValueError("export scales must be > 0")
         if self.num_loader_threads <= 0:
@@ -119,7 +122,7 @@ class TrainConfig:
             raise ValueError("output_regularization must be >= 0")
         if self.clip_grad_norm <= 0.0:
             raise ValueError("clip_grad_norm must be positive")
-        if self.ft_size <= 0 or self.hidden_size <= 0:
+        if self.ft_size <= 0 or self.l1_size <= 0 or self.l2_size <= 0:
             raise ValueError("network sizes must be positive")
         if self.device not in {"auto", "cuda", "mps", "cpu"}:
             raise ValueError("device must be one of: auto, cuda, mps, cpu")
@@ -182,9 +185,9 @@ def _looks_like_glob(value: str) -> bool:
 
 
 def _canonical_feature_set(value: str) -> str:
-    if value == "a768":
-        return "a768"
-    raise ValueError("Only feature_set='a768' is supported")
+    if value == "halfkp":
+        return "halfkp"
+    raise ValueError("Only feature_set='halfkp' is supported")
 
 
 def _dataset_overlap(train_datasets: list[str], validation_datasets: list[str]) -> list[str]:

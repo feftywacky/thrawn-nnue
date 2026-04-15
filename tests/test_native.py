@@ -25,11 +25,11 @@ class NativeTests(unittest.TestCase):
                 batch = stream.next_batch(2)
                 self.assertIsNotNone(batch)
                 assert batch is not None
-                self.assertEqual(batch.white_indices.shape, (2, 32))
-                self.assertEqual(batch.black_indices.shape, (2, 32))
+                self.assertEqual(batch.white_indices.shape, (2, 30))
+                self.assertEqual(batch.black_indices.shape, (2, 30))
                 self.assertEqual(batch.stm.shape, (2,))
-                self.assertTrue(((batch.white_indices >= -1) & (batch.white_indices < 768)).all())
-                self.assertTrue(((batch.black_indices >= -1) & (batch.black_indices < 768)).all())
+                self.assertTrue(((batch.white_indices >= -1) & (batch.white_indices < 40960)).all())
+                self.assertTrue(((batch.black_indices >= -1) & (batch.black_indices < 40960)).all())
 
 
 if __name__ == "__main__":

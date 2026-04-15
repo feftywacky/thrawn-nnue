@@ -16,7 +16,7 @@ except ModuleNotFoundError:
 from thrawn_nnue.checkpoint import load_checkpoint, save_checkpoint
 
 if torch is not None:
-    from thrawn_nnue.model import DualPerspectiveA768NNUE
+    from thrawn_nnue.model import HalfKPNNUE
 
 
 class CheckpointLoadBehaviorTests(unittest.TestCase):
@@ -38,7 +38,7 @@ class CheckpointLoadBehaviorTests(unittest.TestCase):
 @unittest.skipUnless(torch is not None, "PyTorch is required for checkpoint metadata tests")
 class CheckpointMetadataTests(unittest.TestCase):
     def test_checkpoint_round_trip_preserves_resume_metadata(self) -> None:
-        model = DualPerspectiveA768NNUE()
+        model = HalfKPNNUE()
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
         scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[5], gamma=0.1)
         scaler = torch.cuda.amp.GradScaler(enabled=False)

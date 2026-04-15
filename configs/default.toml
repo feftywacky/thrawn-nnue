@@ -1,5 +1,5 @@
-run_name = "test80_a768_v10"
-output_dir = "runs/test80_a768_v10"
+run_name = "halfkp_baseline"
+output_dir = "runs/halfkp_baseline"
 
 train_datasets = [
   "/Users/flin/src/thrawn-nnue/data/test80-2024-01-jan-2tb7p.min-v2.v6.binpack",
@@ -11,23 +11,15 @@ train_datasets = [
 validation_datasets = [
   "/Users/flin/src/thrawn-nnue/data/test80-2024-06-jun-2tb7p.min-v2.v6.binpack",
 ]
-# device: auto, cuda, mps, or cpu
-# auto prefers cuda, then mps, then cpu
+
 device = "mps"
 num_loader_threads = 12
 prefetch_batches = 2
 batch_size = 32768
 
-# Primary run budget is positions seen, not epochs.
 total_train_positions = 2000000000
-
-# Superbatch boundaries are reporting and validation checkpoints.
 superbatch_positions = 100000000
-
-# Validate every 100M train positions.
 validation_interval_positions = 100000000
-
-# Use a fixed 20M-position June holdout pass for validation.
 validation_positions = 20000000
 
 checkpoint_every = 2500
@@ -39,21 +31,22 @@ weight_decay = 0.00002
 clip_grad_norm = 1.0
 amp = false
 
-feature_set = "a768"
-num_features = 768
-max_active_features = 32
+feature_set = "halfkp"
+num_features = 40960
+num_factor_features = 640
+max_active_features = 30
 ft_size = 256
-hidden_size = 32
-output_buckets = 8
+l1_size = 32
+l2_size = 32
 output_perspective = "stm"
 
-score_clip = 1200.0
-score_scale = 1.0
+score_clip = 4000.0
+cp_loss_beta = 128.0
 wdl_scale = 410.0
-eval_lambda = 0.7
+wdl_lambda = 0.1
 lr_drop_fractions = [0.5, 0.8, 0.9]
 lr_drop_factor = 0.1
 
 export_ft_scale = 127.0
-export_dense_scale = 96.0
-export_description = "thrawn a768 scalar nnue v10 8bucket"
+export_dense_scale = 64.0
+export_description = "thrawn halfkp nnue v1"

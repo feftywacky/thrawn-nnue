@@ -4,7 +4,6 @@ from argparse import ArgumentParser
 from pathlib import Path
 import json
 
-from .calibration import calibrate_scale
 from .config import load_config
 from .export import export_checkpoint, verify_export
 from .metrics import generate_run_plots, load_metrics_run, render_summary_text, summarize_run
@@ -45,18 +44,6 @@ def main() -> None:
     metrics_parser = subparsers.add_parser("metrics", help="Summarize a training run and generate plots")
     metrics_parser.add_argument("--run-dir", required=True)
     metrics_parser.add_argument("--json", action="store_true")
-
-    calibrate_parser = subparsers.add_parser(
-        "calibrate-scale",
-        help="Fit engine centipawn scale from raw exported NNUE output against validation .binpack targets",
-    )
-    calibrate_parser.add_argument("--nnue", required=True)
-    calibrate_parser.add_argument("--validation-path", required=True)
-    calibrate_parser.add_argument("--max-positions", type=int, default=300000)
-    calibrate_parser.add_argument("--batch-size", type=int, default=1024)
-    calibrate_parser.add_argument("--threads", type=int, default=4)
-    calibrate_parser.add_argument("--fit-window-cp", type=float, default=600.0)
-    calibrate_parser.add_argument("--min-fit-positions", type=int, default=1000)
 
     args = parser.parse_args()
 
@@ -105,19 +92,6 @@ def main() -> None:
             print(json.dumps(output, indent=2, sort_keys=True))
         else:
             print(output["text"])
-        return
-
-    if args.command == "calibrate-scale":
-        result = calibrate_scale(
-            args.nnue,
-            args.validation_path,
-            max_positions=args.max_positions,
-            batch_size=args.batch_size,
-            threads=args.threads,
-            fit_window_cp=args.fit_window_cp,
-            min_fit_positions=args.min_fit_positions,
-        )
-        print(json.dumps(result, indent=2, sort_keys=True))
         return
 
     raise ValueError(f"Unhandled command: {args.command}")

@@ -8,12 +8,12 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from thrawn_nnue.native import (
+    _inspect_recommendation,
+    _wdl_scale_diagnostics,
     discover_binpack_files,
     inspect_binpack,
     inspect_binpack_collection,
     write_fixture_binpack,
-    _inspect_recommendation,
-    _wdl_scale_diagnostics,
 )
 
 
@@ -42,12 +42,10 @@ class InspectAnalysisTests(unittest.TestCase):
         synthetic["wdl_scale_diagnostics"] = _wdl_scale_diagnostics(synthetic)
         recommendation = _inspect_recommendation(synthetic)
         self.assertTrue(recommendation["saturated_at_default_wdl_scale"])
-        self.assertEqual(recommendation["recommended_wdl_scale"], 410.0)
-        self.assertGreater(recommendation["recommended_score_scale"], 1.0)
-        self.assertEqual(recommendation["effective_raw_wdl_scale"], 4100.0)
+        self.assertEqual(recommendation["recommended_wdl_scale"], 4000.0)
+        self.assertEqual(recommendation["effective_raw_wdl_scale"], 4000.0)
         self.assertFalse(recommendation["teacher_target_collapse_risk"])
-        self.assertTrue(recommendation["raw_space_pair_collapse_risk"])
-        self.assertIn("collapse teacher targets", " ".join(recommendation["notes"]))
+        self.assertIn("score clipping", " ".join(recommendation["notes"]))
 
     def test_recommendation_stays_mild_for_small_score_distribution(self) -> None:
         synthetic = {
@@ -59,7 +57,6 @@ class InspectAnalysisTests(unittest.TestCase):
         recommendation = _inspect_recommendation(synthetic)
         self.assertFalse(recommendation["saturated_at_default_wdl_scale"])
         self.assertEqual(recommendation["recommended_score_clip"], 0.0)
-        self.assertEqual(recommendation["recommended_score_scale"], 1.0)
         self.assertEqual(recommendation["recommended_wdl_scale"], 410.0)
         self.assertEqual(recommendation["effective_raw_wdl_scale"], 410.0)
         self.assertFalse(recommendation["teacher_target_collapse_risk"])
@@ -73,7 +70,6 @@ class InspectAnalysisTests(unittest.TestCase):
         synthetic["wdl_scale_diagnostics"] = _wdl_scale_diagnostics(synthetic)
         recommendation = _inspect_recommendation(synthetic)
         self.assertFalse(recommendation["teacher_target_collapse_risk"])
-        self.assertFalse(recommendation["raw_space_pair_collapse_risk"])
         self.assertIn("empty or unreadable", " ".join(recommendation["notes"]))
 
     def test_discover_binpack_files_walks_directories(self) -> None:

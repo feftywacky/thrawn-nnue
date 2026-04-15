@@ -70,9 +70,9 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
     if effective_validation_interval in (None, 0):
         effective_validation_interval = superbatch_positions
     score_clip = _as_float(_config_value(run, "score_clip"))
-    score_scale = _as_float(_config_value(run, "score_scale"))
+    cp_loss_beta = _as_float(_config_value(run, "cp_loss_beta"))
     wdl_scale = _as_float(_config_value(run, "wdl_scale"))
-    eval_lambda = _as_float(_config_value(run, "eval_lambda"))
+    wdl_lambda = _as_float(_config_value(run, "wdl_lambda"))
     output_regularization = _as_float(_config_value(run, "output_regularization"))
 
     latest_train_step = _record_step(latest_train)
@@ -112,27 +112,14 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         _metric_value(latest_train_at_validation, "loss"),
         _metric_value(latest_validation, "validation_loss"),
     )
-    teacher_gap = _gap(
-        _metric_value(latest_train_at_validation, "teacher_loss"),
-        _metric_value(latest_validation, "validation_teacher_loss"),
+    cp_gap = _gap(
+        _metric_value(latest_train_at_validation, "cp_loss"),
+        _metric_value(latest_validation, "validation_cp_loss"),
     )
-    result_gap = _gap(
-        _metric_value(latest_train_at_validation, "result_loss"),
-        _metric_value(latest_validation, "validation_result_loss"),
+    wdl_gap = _gap(
+        _metric_value(latest_train_at_validation, "wdl_loss"),
+        _metric_value(latest_validation, "validation_wdl_loss"),
     )
-
-    train_teacher_to_result_ratio = _ratio(
-        _metric_value(latest_train, "teacher_loss"),
-        _metric_value(latest_train, "result_loss"),
-    )
-    validation_teacher_to_result_ratio = _ratio(
-        _metric_value(latest_validation, "validation_teacher_loss"),
-        _metric_value(latest_validation, "validation_result_loss"),
-    )
-    teacher_signal_collapsed = False
-    ratios = [value for value in (train_teacher_to_result_ratio, validation_teacher_to_result_ratio) if value is not None]
-    if ratios and min(ratios) < 0.02:
-        teacher_signal_collapsed = True
 
     latest_position_fraction = None
     if total_train_positions is not None and total_train_positions > 0 and latest_train_positions is not None:
@@ -156,6 +143,7 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         best_validation_positions=run.best_validation_positions,
     )
 
+    material_sanity = None if latest_validation is None else latest_validation.get("material_sanity")
     summary = {
         "run_dir": str(run.run_dir),
         "status": status,
@@ -164,22 +152,27 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "latest_train_step": latest_train_step,
         "positions_seen": latest_train_positions,
         "latest_train_loss": _metric_value(latest_train, "loss"),
-        "latest_train_teacher_loss": _metric_value(latest_train, "teacher_loss"),
-        "latest_train_result_loss": _metric_value(latest_train, "result_loss"),
+        "latest_train_cp_loss": _metric_value(latest_train, "cp_loss"),
+        "latest_train_wdl_loss": _metric_value(latest_train, "wdl_loss"),
         "latest_train_output_reg_loss": _metric_value(latest_train, "output_reg_loss"),
         "latest_lr": latest_lr,
         "latest_validation_step": latest_validation_step,
         "latest_validation_positions": latest_validation_positions,
         "latest_validation_loss": _metric_value(latest_validation, "validation_loss"),
-        "latest_validation_teacher_loss": _metric_value(latest_validation, "validation_teacher_loss"),
-        "latest_validation_result_loss": _metric_value(latest_validation, "validation_result_loss"),
+        "latest_validation_cp_loss": _metric_value(latest_validation, "validation_cp_loss"),
+        "latest_validation_wdl_loss": _metric_value(latest_validation, "validation_wdl_loss"),
         "latest_validation_output_reg_loss": _metric_value(latest_validation, "validation_output_reg_loss"),
+        "latest_validation_cp_mae": _metric_value(latest_validation, "cp_mae"),
+        "latest_validation_cp_rmse": _metric_value(latest_validation, "cp_rmse"),
+        "latest_validation_cp_corr": _metric_value(latest_validation, "cp_corr"),
         "latest_validation_wdl_accuracy": _metric_value(latest_validation, "wdl_accuracy"),
         "latest_validation_teacher_result_disagreement_rate": _metric_value(
             latest_validation,
             "teacher_result_disagreement_rate",
         ),
         "latest_validation_evaluated_positions": _metric_value(latest_validation, "validation_positions"),
+        "latest_material_sanity": material_sanity,
+        "latest_material_ordering_ok": None if latest_validation is None else bool(latest_validation.get("material_ordering_ok", False)),
         "best_validation_loss": run.best_validation_loss,
         "best_validation_positions": run.best_validation_positions,
         "best_checkpoint_exists": run.best_checkpoint_exists,
@@ -197,18 +190,15 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "best_is_latest_validation": best_is_latest_validation,
         "resume_recommendation": resume_recommendation,
         "train_validation_gap": train_validation_gap,
-        "teacher_gap": teacher_gap,
-        "result_gap": result_gap,
-        "train_teacher_to_result_ratio": train_teacher_to_result_ratio,
-        "validation_teacher_to_result_ratio": validation_teacher_to_result_ratio,
-        "teacher_signal_collapsed": teacher_signal_collapsed,
+        "cp_gap": cp_gap,
+        "wdl_gap": wdl_gap,
         "latest_lr_fraction_of_initial": latest_lr_fraction_of_initial,
         "lr_near_zero": lr_near_zero,
         "scheduler_exhausted": scheduler_exhausted,
         "score_clip": score_clip,
-        "score_scale": score_scale,
+        "cp_loss_beta": cp_loss_beta,
         "wdl_scale": wdl_scale,
-        "eval_lambda": eval_lambda,
+        "wdl_lambda": wdl_lambda,
         "output_regularization": output_regularization,
     }
     summary["suggestions"] = _build_suggestions(summary)
@@ -228,8 +218,8 @@ def render_summary_text(summary: dict[str, object]) -> str:
                 f"latest_train_step: {summary['latest_train_step']}",
                 f"positions_seen: {_format_optional_int(summary['positions_seen'])}",
                 f"latest_train_loss: {_format_optional_float(summary['latest_train_loss'])}",
-                f"latest_train_teacher_loss: {_format_optional_float(summary['latest_train_teacher_loss'])}",
-                f"latest_train_result_loss: {_format_optional_float(summary['latest_train_result_loss'])}",
+                f"latest_train_cp_loss: {_format_optional_float(summary['latest_train_cp_loss'])}",
+                f"latest_train_wdl_loss: {_format_optional_float(summary['latest_train_wdl_loss'])}",
                 f"latest_train_output_reg_loss: {_format_optional_float(summary['latest_train_output_reg_loss'])}",
                 f"latest_lr: {_format_optional_float(summary['latest_lr'], precision=8)}",
             ]
@@ -240,18 +230,22 @@ def render_summary_text(summary: dict[str, object]) -> str:
                 f"latest_validation_step: {summary['latest_validation_step']}",
                 f"latest_validation_positions: {_format_optional_int(summary['latest_validation_positions'])}",
                 f"latest_validation_loss: {_format_optional_float(summary['latest_validation_loss'])}",
-                f"latest_validation_teacher_loss: {_format_optional_float(summary['latest_validation_teacher_loss'])}",
-                f"latest_validation_result_loss: {_format_optional_float(summary['latest_validation_result_loss'])}",
+                f"latest_validation_cp_loss: {_format_optional_float(summary['latest_validation_cp_loss'])}",
+                f"latest_validation_wdl_loss: {_format_optional_float(summary['latest_validation_wdl_loss'])}",
                 (
                     "latest_validation_output_reg_loss: "
                     f"{_format_optional_float(summary['latest_validation_output_reg_loss'])}"
                 ),
+                f"latest_validation_cp_mae: {_format_optional_float(summary['latest_validation_cp_mae'])}",
+                f"latest_validation_cp_rmse: {_format_optional_float(summary['latest_validation_cp_rmse'])}",
+                f"latest_validation_cp_corr: {_format_optional_float(summary['latest_validation_cp_corr'])}",
                 f"latest_validation_wdl_accuracy: {_format_optional_float(summary['latest_validation_wdl_accuracy'])}",
                 (
                     "latest_validation_teacher_result_disagreement_rate: "
                     f"{_format_optional_float(summary['latest_validation_teacher_result_disagreement_rate'])}"
                 ),
                 f"latest_validation_evaluated_positions: {_format_optional_int(summary['latest_validation_evaluated_positions'])}",
+                f"latest_material_ordering_ok: {summary['latest_material_ordering_ok']}",
             ]
         )
     else:
@@ -283,6 +277,7 @@ def render_summary_text(summary: dict[str, object]) -> str:
     lines.append(f"latest_lr_fraction_of_initial: {_format_optional_float(summary['latest_lr_fraction_of_initial'])}")
     lines.append(f"lr_near_zero: {summary['lr_near_zero']}")
     lines.append(f"scheduler_exhausted: {summary['scheduler_exhausted']}")
+    lines.append(f"wdl_lambda: {_format_optional_float(summary['wdl_lambda'])}")
     lines.append(f"output_regularization: {_format_optional_float(summary['output_regularization'])}")
     lines.append("")
     lines.append("Generalization")
@@ -291,13 +286,8 @@ def render_summary_text(summary: dict[str, object]) -> str:
     lines.append(f"best_is_latest_validation: {summary['best_is_latest_validation']}")
     lines.append(f"resume_recommendation: {summary['resume_recommendation']}")
     lines.append(f"train_validation_gap: {_format_optional_float(summary['train_validation_gap'])}")
-    lines.append(f"teacher_gap: {_format_optional_float(summary['teacher_gap'])}")
-    lines.append(f"result_gap: {_format_optional_float(summary['result_gap'])}")
-    lines.append(f"train_teacher_to_result_ratio: {_format_optional_float(summary['train_teacher_to_result_ratio'])}")
-    lines.append(
-        f"validation_teacher_to_result_ratio: {_format_optional_float(summary['validation_teacher_to_result_ratio'])}"
-    )
-    lines.append(f"teacher_signal_collapsed: {summary['teacher_signal_collapsed']}")
+    lines.append(f"cp_gap: {_format_optional_float(summary['cp_gap'])}")
+    lines.append(f"wdl_gap: {_format_optional_float(summary['wdl_gap'])}")
     lines.append("")
     lines.append("Suggestions")
     for suggestion in summary["suggestions"]:
@@ -362,31 +352,31 @@ def _plot_train_loss(plt, output_path: Path, run: MetricsRun, *, batch_size: int
     figure, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True, height_ratios=[3, 2])
     positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.train_records]
     blended = [_required_metric(record, ("loss",)) for record in run.train_records]
-    teacher = [_required_metric(record, ("teacher_loss",)) for record in run.train_records]
-    result = [_required_metric(record, ("result_loss",)) for record in run.train_records]
+    cp_loss = [_required_metric(record, ("cp_loss",)) for record in run.train_records]
+    wdl_loss = [_required_metric(record, ("wdl_loss",)) for record in run.train_records]
     smoothed = _moving_average(blended, window=_smoothing_window(len(blended)))
 
     top_axis, bottom_axis = axes
-    top_axis.plot(positions, blended, label="blended loss (raw)", alpha=0.14, linewidth=0.9, color="C0")
-    top_axis.plot(positions, smoothed, label="blended loss (smoothed)", linewidth=2.2, color="C1")
+    top_axis.plot(positions, blended, label="total loss (raw)", alpha=0.14, linewidth=0.9, color="C0")
+    top_axis.plot(positions, smoothed, label="total loss (smoothed)", linewidth=2.2, color="C1")
     top_axis.set_title("Train Loss")
-    top_axis.set_ylabel("Blended Loss")
+    top_axis.set_ylabel("Total Loss")
     top_axis.grid(True, alpha=0.3)
     top_axis.legend(loc="upper right")
     _set_focus_ylim(top_axis, smoothed)
 
-    bottom_axis.plot(positions, teacher, label="teacher target", linewidth=1.8, color="C2")
-    bottom_axis.plot(positions, result, label="game result", linewidth=1.8, color="C3")
+    bottom_axis.plot(positions, cp_loss, label="cp loss", linewidth=1.8, color="C2")
+    bottom_axis.plot(positions, wdl_loss, label="wdl loss", linewidth=1.8, color="C3")
     bottom_axis.set_ylabel("Component Loss")
     bottom_axis.grid(True, alpha=0.3)
     bottom_axis.legend(loc="upper right")
-    _set_focus_ylim(bottom_axis, teacher, result)
+    _set_focus_ylim(bottom_axis, cp_loss, wdl_loss)
     _style_positions_axis(bottom_axis)
     bottom_axis.set_xlabel("Positions Seen (B)")
     bottom_axis.text(
         0.01,
         0.04,
-        "blended = weighted teacher-target + game-result loss",
+        "total = cp Huber loss + wdl_lambda * auxiliary WDL loss",
         transform=bottom_axis.transAxes,
         fontsize=9,
         alpha=0.75,
@@ -403,45 +393,45 @@ def _plot_validation_loss(plt, output_path: Path, run: MetricsRun, *, batch_size
     figure, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True, height_ratios=[3, 2])
     positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.validation_records]
     blended = [_required_metric(record, ("validation_loss",)) for record in run.validation_records]
-    teacher = [_required_metric(record, ("validation_teacher_loss",)) for record in run.validation_records]
-    result = [_required_metric(record, ("validation_result_loss",)) for record in run.validation_records]
+    cp_loss = [_required_metric(record, ("validation_cp_loss",)) for record in run.validation_records]
+    wdl_loss = [_required_metric(record, ("validation_wdl_loss",)) for record in run.validation_records]
 
     top_axis, bottom_axis = axes
-    top_axis.plot(positions, blended, marker="o", markersize=4.0, linewidth=2.0, color="C0", label="blended loss")
+    top_axis.plot(positions, blended, marker="o", markersize=4.0, linewidth=2.0, color="C0", label="total loss")
     top_axis.set_title("Validation Loss")
-    top_axis.set_ylabel("Blended Loss")
+    top_axis.set_ylabel("Total Loss")
     top_axis.grid(True, alpha=0.3)
     top_axis.legend(loc="upper right")
     _set_focus_ylim(top_axis, blended)
 
     bottom_axis.plot(
         positions,
-        teacher,
+        cp_loss,
         marker="o",
         markersize=4.0,
         linewidth=1.8,
         color="C2",
-        label="teacher target",
+        label="cp loss",
     )
     bottom_axis.plot(
         positions,
-        result,
+        wdl_loss,
         marker="o",
         markersize=4.0,
         linewidth=1.8,
         color="C3",
-        label="game result",
+        label="wdl loss",
     )
     bottom_axis.set_ylabel("Component Loss")
     bottom_axis.grid(True, alpha=0.3)
     bottom_axis.legend(loc="upper right")
-    _set_focus_ylim(bottom_axis, teacher, result)
+    _set_focus_ylim(bottom_axis, cp_loss, wdl_loss)
     _style_positions_axis(bottom_axis)
     bottom_axis.set_xlabel("Positions Seen (B)")
     bottom_axis.text(
         0.01,
         0.04,
-        "blended = weighted teacher-target + game-result loss",
+        "validation also tracks cp_mae/cp_rmse/cp_corr in metrics.jsonl",
         transform=bottom_axis.transAxes,
         fontsize=9,
         alpha=0.75,
@@ -499,14 +489,14 @@ def _plot_overview(plt, formatter_factory, locator_factory, output_path: Path, r
     axis.plot(
         train_positions,
         smoothed_train,
-        label="train blended (smoothed)",
+        label="train total (smoothed)",
         linewidth=2.2,
         color="C1",
     )
     axis.plot(
         validation_positions,
         validation_loss,
-        label="validation blended",
+        label="validation total",
         marker="o",
         markersize=4.0,
         linewidth=2.0,
@@ -642,7 +632,6 @@ def _checkpoint_diagnostics(run_dir: Path) -> dict[str, object]:
         }
 
     config = payload.get("config")
-    batch_size = _as_int(None if config is None else config.get("batch_size"))
     best_validation_positions = payload.get("best_validation_positions")
     positions_seen = payload.get("positions_seen")
 
@@ -770,15 +759,6 @@ def _required_metric(record: dict[str, object], keys: tuple[str, ...]) -> float:
     return value
 
 
-def _ratio(numerator: object | None, denominator: object | None) -> float | None:
-    if numerator is None or denominator is None:
-        return None
-    denominator_value = float(denominator)
-    if denominator_value == 0.0:
-        return None
-    return float(numerator) / denominator_value
-
-
 def _gap(train_value: object | None, validation_value: object | None) -> float | None:
     if train_value is None or validation_value is None:
         return None
@@ -816,12 +796,16 @@ def _build_suggestions(summary: dict[str, object]) -> list[str]:
     else:
         suggestions.append("There are too few validation points to judge continuation confidently yet.")
 
-    if summary["teacher_signal_collapsed"]:
-        suggestions.append("Teacher loss is tiny relative to result loss; revisit score normalization or eval_lambda.")
+    cp_corr = summary["latest_validation_cp_corr"]
+    if cp_corr is not None and cp_corr < 0.4:
+        suggestions.append("CP correlation is still weak; raw outputs likely are not yet stable enough for pruning thresholds.")
+    material_ok = summary["latest_material_ordering_ok"]
+    if material_ok is False:
+        suggestions.append("Material ladder sanity is out of order; revisit score clipping, data exposure, or loss weighting before shipping.")
     if summary["scheduler_exhausted"]:
         suggestions.append("Learning rate is effectively exhausted; if validation is still improving, continue by increasing the position budget.")
     if summary["positions_seen"] is not None and summary["positions_seen"] < 500_000_000:
-        suggestions.append("The position budget is still modest for very large binpack corpora; the run may simply need more data exposure.")
+        suggestions.append("The position budget is still modest for a sparse HalfKP feature transformer; the run may simply need more data exposure.")
     if not suggestions:
         suggestions.append("No obvious red flags; compare this run against engine testing and nearby hyperparameter variants.")
     return suggestions

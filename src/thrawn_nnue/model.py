@@ -15,46 +15,58 @@ def _require_torch():
 
 if torch is not None:
 
-    class DualPerspectiveA768NNUE(nn.Module):
+    class HalfKPNNUE(nn.Module):
         def __init__(
             self,
-            num_features: int = 768,
+            *,
+            num_features: int = 40960,
+            num_factor_features: int = 640,
             ft_size: int = 256,
-            hidden_size: int = 32,
-            output_buckets: int = 1,
+            l1_size: int = 32,
+            l2_size: int = 32,
         ):
             super().__init__()
             self.num_features = num_features
+            self.num_factor_features = num_factor_features
             self.ft_size = ft_size
-            self.hidden_size = hidden_size
-            self.output_buckets = output_buckets
+            self.l1_size = l1_size
+            self.l2_size = l2_size
+
             self.ft = nn.Embedding(num_features, ft_size)
+            self.ft_factor = nn.Embedding(num_factor_features, ft_size)
             self.ft_bias = nn.Parameter(torch.zeros(ft_size, dtype=torch.float32))
-            self.l1 = nn.Linear(ft_size * 2, hidden_size)
-            self.output = nn.Linear(hidden_size, output_buckets)
+            self.l1 = nn.Linear(ft_size * 2, l1_size)
+            self.l2 = nn.Linear(l1_size, l2_size)
+            self.output = nn.Linear(l2_size, 1)
             self.reset_parameters()
 
         def reset_parameters(self) -> None:
-            nn.init.uniform_(self.ft.weight, -0.05, 0.05)
+            nn.init.uniform_(self.ft.weight, -0.01, 0.01)
+            nn.init.uniform_(self.ft_factor.weight, -0.01, 0.01)
             nn.init.zeros_(self.ft_bias)
             nn.init.xavier_uniform_(self.l1.weight)
             nn.init.zeros_(self.l1.bias)
+            nn.init.xavier_uniform_(self.l2.weight)
+            nn.init.zeros_(self.l2.bias)
             nn.init.xavier_uniform_(self.output.weight)
             nn.init.zeros_(self.output.bias)
 
         def _accumulate(self, indices: torch.Tensor) -> torch.Tensor:
             mask = indices.ge(0)
             clamped = indices.clamp_min(0)
-            embeddings = self.ft(clamped)
-            embeddings = embeddings * mask.unsqueeze(-1).to(dtype=embeddings.dtype)
-            return embeddings.sum(dim=1) + self.ft_bias
+            factor_indices = torch.remainder(clamped, self.num_factor_features)
+
+            real_embeddings = self.ft(clamped)
+            factor_embeddings = self.ft_factor(factor_indices)
+            combined_embeddings = real_embeddings + factor_embeddings
+            combined_embeddings = combined_embeddings * mask.unsqueeze(-1).to(dtype=combined_embeddings.dtype)
+            return combined_embeddings.sum(dim=1) + self.ft_bias
 
         def forward(
             self,
             white_indices: torch.Tensor,
             black_indices: torch.Tensor,
             stm: torch.Tensor,
-            output_bucket_indices: torch.Tensor | None = None,
         ) -> torch.Tensor:
             white_acc = self._accumulate(white_indices)
             black_acc = self._accumulate(black_indices)
@@ -64,22 +76,18 @@ if torch is not None:
                 torch.cat([white_acc, black_acc], dim=1),
                 torch.cat([black_acc, white_acc], dim=1),
             )
-            # Use SCReLU on the concatenated accumulators to avoid saturating
-            # the first dense layer from sparse surviving activations.
-            hidden = torch.square(torch.clamp(combined, 0.0, 1.0))
-            hidden = torch.clamp(self.l1(hidden), 0.0, 1.0)
-            outputs = self.output(hidden)
-            if self.output_buckets == 1:
-                return outputs
-            if output_bucket_indices is None:
-                raise ValueError("output_bucket_indices are required when output_buckets > 1")
+            hidden0 = torch.clamp(combined, 0.0, 1.0)
+            hidden1 = torch.clamp(self.l1(hidden0), 0.0, 1.0)
+            hidden2 = torch.clamp(self.l2(hidden1), 0.0, 1.0)
+            return self.output(hidden2)
 
-            bucket_indices = output_bucket_indices.reshape(-1).to(device=outputs.device, dtype=torch.long)
-            bucket_indices = bucket_indices.clamp_(0, self.output_buckets - 1)
-            return outputs.gather(1, bucket_indices.unsqueeze(1))
+        def coalesced_feature_transform(self) -> tuple[torch.Tensor, torch.Tensor]:
+            repeats = self.num_features // self.num_factor_features
+            factor_rows = self.ft_factor.weight.repeat(repeats, 1)
+            return self.ft.weight + factor_rows, self.ft_bias
 
 else:
 
-    class DualPerspectiveA768NNUE:  # pragma: no cover - exercised only when torch is missing
+    class HalfKPNNUE:  # pragma: no cover - exercised only when torch is missing
         def __init__(self, *args, **kwargs):
             _require_torch()

@@ -12,6 +12,7 @@ import time
 from .checkpoint import load_checkpoint, restore_rng_state, save_checkpoint
 from .console import ConsoleContext, create_console_reporter
 from .config import TrainConfig
+from .export import MATERIAL_SANITY_POSITIONS
 from .native import BinpackStream
 
 
@@ -52,7 +53,6 @@ class _ProducerException:
 
 
 _PREFETCH_EOF = object()
-_L1_WEIGHT_CLIP_LIMIT = (127.0 - 0.5) / 96.0
 
 
 def train_from_config(config: TrainConfig, *, console_mode: str | None = None) -> Path:
@@ -97,7 +97,7 @@ def resume_training(checkpoint_path: str | Path, *, console_mode: str | None = N
 
 def _create_state(config: TrainConfig) -> TrainState:
     torch = _require_torch()
-    from .model import DualPerspectiveA768NNUE
+    from .model import HalfKPNNUE
 
     _resolve_runtime_config(config)
     device = _select_device(config.device, torch)
@@ -106,11 +106,12 @@ def _create_state(config: TrainConfig) -> TrainState:
     (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     metrics_path = run_dir / "metrics.jsonl"
 
-    model = DualPerspectiveA768NNUE(
+    model = HalfKPNNUE(
         num_features=config.num_features,
+        num_factor_features=config.num_factor_features,
         ft_size=config.ft_size,
-        hidden_size=config.hidden_size,
-        output_buckets=config.output_buckets,
+        l1_size=config.l1_size,
+        l2_size=config.l2_size,
     ).to(device)
     optimizer = _create_optimizer(config, model, torch)
     scheduler = _create_scheduler(config, optimizer, torch)
@@ -314,10 +315,10 @@ def _run_training_loop(state: TrainState) -> None:
                                 "superbatch_index": state.superbatch_index,
                                 "batch_positions": batch_positions,
                                 "loss": current_loss,
-                                "teacher_loss": float(losses["teacher_loss"].detach().cpu().item()),
-                                "result_loss": float(losses["result_loss"].detach().cpu().item()),
+                                "cp_loss": float(losses["cp_loss"].detach().cpu().item()),
+                                "wdl_loss": float(losses["wdl_loss"].detach().cpu().item()),
                                 "output_reg_loss": float(losses["output_reg_loss"].detach().cpu().item()),
-                                "eval_lambda": state.config.eval_lambda,
+                                "wdl_lambda": state.config.wdl_lambda,
                                 "lr": current_lr,
                                 "step_seconds": step_seconds,
                                 "train_positions_per_second": train_positions_per_second,
@@ -398,7 +399,6 @@ def _run_train_step(state: TrainState, tensors, torch, *, autocast_enabled: bool
         tensors["stm"],
         torch,
     )
-    bucket_indices = _output_bucket_indices(tensors["white_counts"], state.config.output_buckets, torch)
     state.model.train()
     state.optimizer.zero_grad(set_to_none=True)
     with _autocast_context(torch, state.device, autocast_enabled):
@@ -407,14 +407,14 @@ def _run_train_step(state: TrainState, tensors, torch, *, autocast_enabled: bool
             tensors["white_indices"],
             tensors["black_indices"],
             tensors["stm"],
-            bucket_indices,
         )
         losses = _scalar_head_loss(
             prediction_cp,
             normalized_scores,
             result_wdl_stm,
             state.config.wdl_scale,
-            state.config.eval_lambda,
+            state.config.cp_loss_beta,
+            state.config.wdl_lambda,
             state.config.output_regularization,
             torch,
         )
@@ -447,24 +447,24 @@ def _scalar_head_loss(
     target_cp,
     result_wdl,
     wdl_scale: float,
-    teacher_lambda: float,
+    cp_loss_beta: float,
+    wdl_lambda: float,
     output_regularization: float,
     torch,
 ):
-    pred_wdl = _wdl_from_cp(prediction_cp, wdl_scale, torch)
-    target_wdl = _wdl_from_cp(target_cp, wdl_scale, torch)
-    teacher_loss = torch.mean((pred_wdl - target_wdl) ** 2)
-    result_loss = torch.mean((pred_wdl - result_wdl) ** 2)
-    output_reg_loss = torch.mean(prediction_cp.square())
-    loss = (
-        teacher_lambda * teacher_loss
-        + (1.0 - teacher_lambda) * result_loss
-        + output_regularization * output_reg_loss
+    cp_loss = torch.nn.functional.smooth_l1_loss(
+        prediction_cp,
+        target_cp,
+        beta=cp_loss_beta,
     )
+    pred_wdl = _wdl_from_cp(prediction_cp, wdl_scale, torch)
+    wdl_loss = torch.mean((pred_wdl - result_wdl) ** 2)
+    output_reg_loss = torch.mean(prediction_cp.square())
+    loss = cp_loss + wdl_lambda * wdl_loss + output_regularization * output_reg_loss
     return {
         "loss": loss,
-        "teacher_loss": teacher_loss,
-        "result_loss": result_loss,
+        "cp_loss": cp_loss,
+        "wdl_loss": wdl_loss,
         "output_reg_loss": output_reg_loss,
         "predicted_cp": prediction_cp,
         "predicted_wdl": pred_wdl,
@@ -472,29 +472,24 @@ def _scalar_head_loss(
 
 
 def _clip_model_weights(model, config: TrainConfig) -> None:
-    dense_limit = _L1_WEIGHT_CLIP_LIMIT
-    output_limit = (32767.0 - 0.5) / max(config.export_dense_scale, 1.0)
+    dense_limit = (127.0 - 0.5) / max(config.export_dense_scale, 1.0)
     torch = _require_torch()
     with torch.no_grad():
         model.l1.weight.clamp_(-dense_limit, dense_limit)
-        model.output.weight.clamp_(-output_limit, output_limit)
+        model.l2.weight.clamp_(-dense_limit, dense_limit)
+        model.output.weight.clamp_(-dense_limit, dense_limit)
 
 
 def _normalize_teacher_scores(scores, config: TrainConfig, torch):
     normalized = scores
     if config.score_clip > 0.0:
         normalized = torch.clamp(normalized, -config.score_clip, config.score_clip)
-    if config.score_scale != 1.0:
-        normalized = normalized / config.score_scale
     return normalized
 
 
 def _stm_oriented_targets(score_cp, result_wdl, stm, torch):
-    # Binpack teacher scores are already side-to-move oriented.
-    score_cp_stm = score_cp
-    # Packed binpack results are also side-to-move oriented.
-    result_wdl_stm = result_wdl
-    return score_cp_stm, result_wdl_stm
+    # Binpack teacher scores and results are already side-to-move oriented.
+    return score_cp, result_wdl
 
 
 def _run_validation(state: TrainState) -> dict[str, object]:
@@ -503,12 +498,19 @@ def _run_validation(state: TrainState) -> dict[str, object]:
     started_at = time.monotonic()
 
     total_loss = 0.0
-    total_teacher_loss = 0.0
-    total_result_loss = 0.0
+    total_cp_loss = 0.0
+    total_wdl_loss = 0.0
     total_output_reg_loss = 0.0
     total_positions = 0
     total_correct = 0
     total_teacher_result_disagreement = 0
+    total_abs_error = 0.0
+    total_sq_error = 0.0
+    corr_sum_x = 0.0
+    corr_sum_y = 0.0
+    corr_sum_x2 = 0.0
+    corr_sum_y2 = 0.0
+    corr_sum_xy = 0.0
     batches = 0
 
     was_training = state.model.training
@@ -536,25 +538,20 @@ def _run_validation(state: TrainState) -> dict[str, object]:
                         tensors["stm"],
                         torch,
                     )
-                    bucket_indices = _output_bucket_indices(
-                        tensors["white_counts"],
-                        state.config.output_buckets,
-                        torch,
-                    )
                     with _autocast_context(torch, state.device, autocast_enabled):
                         normalized_scores = _normalize_teacher_scores(score_cp_stm, state.config, torch)
                         prediction_cp = state.model(
                             tensors["white_indices"],
                             tensors["black_indices"],
                             tensors["stm"],
-                            bucket_indices,
                         )
                         losses = _scalar_head_loss(
                             prediction_cp,
                             normalized_scores,
                             result_wdl_stm,
                             state.config.wdl_scale,
-                            state.config.eval_lambda,
+                            state.config.cp_loss_beta,
+                            state.config.wdl_lambda,
                             state.config.output_regularization,
                             torch,
                         )
@@ -565,14 +562,25 @@ def _run_validation(state: TrainState) -> dict[str, object]:
                     pred_bucket = _wdl_bucket(pred_wdl)
                     target_bucket = _wdl_bucket(target_wdl)
 
+                    pred_cpu = prediction_cp.detach().cpu().reshape(-1).to(dtype=torch.float64)
+                    target_cpu = normalized_scores.detach().cpu().reshape(-1).to(dtype=torch.float64)
+                    delta = pred_cpu - target_cpu
+
                     total_loss += float(losses["loss"].detach().cpu().item()) * batch_positions
-                    total_teacher_loss += float(losses["teacher_loss"].detach().cpu().item()) * batch_positions
-                    total_result_loss += float(losses["result_loss"].detach().cpu().item()) * batch_positions
+                    total_cp_loss += float(losses["cp_loss"].detach().cpu().item()) * batch_positions
+                    total_wdl_loss += float(losses["wdl_loss"].detach().cpu().item()) * batch_positions
                     total_output_reg_loss += float(losses["output_reg_loss"].detach().cpu().item()) * batch_positions
                     total_correct += int((pred_bucket == result_bucket).sum().detach().cpu().item())
                     total_teacher_result_disagreement += int(
                         (target_bucket != result_bucket).sum().detach().cpu().item()
                     )
+                    total_abs_error += float(delta.abs().sum().item())
+                    total_sq_error += float(delta.square().sum().item())
+                    corr_sum_x += float(pred_cpu.sum().item())
+                    corr_sum_y += float(target_cpu.sum().item())
+                    corr_sum_x2 += float(pred_cpu.square().sum().item())
+                    corr_sum_y2 += float(target_cpu.square().sum().item())
+                    corr_sum_xy += float((pred_cpu * target_cpu).sum().item())
                     total_positions += batch_positions
                     batches += 1
 
@@ -581,8 +589,8 @@ def _run_validation(state: TrainState) -> dict[str, object]:
 
     validation_seconds = max(0.0, time.monotonic() - started_at)
     average_loss = math.inf if total_positions == 0 else total_loss / total_positions
-    average_teacher_loss = math.inf if total_positions == 0 else total_teacher_loss / total_positions
-    average_result_loss = math.inf if total_positions == 0 else total_result_loss / total_positions
+    average_cp_loss = math.inf if total_positions == 0 else total_cp_loss / total_positions
+    average_wdl_loss = math.inf if total_positions == 0 else total_wdl_loss / total_positions
     average_output_reg_loss = math.inf if total_positions == 0 else total_output_reg_loss / total_positions
     wdl_accuracy = 0.0 if total_positions == 0 else total_correct / total_positions
     teacher_result_disagreement_rate = (
@@ -591,23 +599,96 @@ def _run_validation(state: TrainState) -> dict[str, object]:
     validation_positions_per_second = (
         0.0 if total_positions == 0 or validation_seconds <= 0.0 else float(total_positions) / validation_seconds
     )
+    cp_mae = 0.0 if total_positions == 0 else total_abs_error / total_positions
+    cp_rmse = 0.0 if total_positions == 0 else math.sqrt(total_sq_error / total_positions)
+    cp_corr = _pearson_correlation(
+        total_positions,
+        corr_sum_x,
+        corr_sum_y,
+        corr_sum_x2,
+        corr_sum_y2,
+        corr_sum_xy,
+    )
+    material_sanity = _material_sanity_snapshot(state)
 
     return {
         "event": "validation",
         "global_step": state.global_step,
         "positions_seen": state.positions_seen,
         "validation_loss": average_loss,
-        "validation_teacher_loss": average_teacher_loss,
-        "validation_result_loss": average_result_loss,
+        "validation_cp_loss": average_cp_loss,
+        "validation_wdl_loss": average_wdl_loss,
         "validation_output_reg_loss": average_output_reg_loss,
+        "cp_mae": cp_mae,
+        "cp_rmse": cp_rmse,
+        "cp_corr": cp_corr,
         "wdl_accuracy": wdl_accuracy,
         "teacher_result_disagreement_rate": teacher_result_disagreement_rate,
         "validation_positions": total_positions,
         "validation_batches": batches,
         "validation_seconds": validation_seconds,
         "validation_positions_per_second": validation_positions_per_second,
-        "eval_lambda": state.config.eval_lambda,
+        "material_sanity": material_sanity,
+        "material_ordering_ok": bool(material_sanity["ordering_ok"]),
+        "wdl_lambda": state.config.wdl_lambda,
     }
+
+
+def _material_sanity_snapshot(state: TrainState) -> dict[str, object]:
+    torch = _require_torch()
+    from .board import BoardState
+    from .features import active_feature_indices
+
+    white_indices: list[list[int]] = []
+    black_indices: list[list[int]] = []
+    stm: list[float] = []
+    for _, fen in MATERIAL_SANITY_POSITIONS:
+        board = BoardState.from_fen(fen)
+        white = active_feature_indices(board, "white")
+        black = active_feature_indices(board, "black")
+        white_indices.append(white + [-1] * (state.config.max_active_features - len(white)))
+        black_indices.append(black + [-1] * (state.config.max_active_features - len(black)))
+        stm.append(1.0 if board.side_to_move == "w" else 0.0)
+
+    white_tensor = torch.tensor(white_indices, dtype=torch.long, device=state.device)
+    black_tensor = torch.tensor(black_indices, dtype=torch.long, device=state.device)
+    stm_tensor = torch.tensor(stm, dtype=torch.float32, device=state.device).unsqueeze(1)
+    predictions = state.model(white_tensor, black_tensor, stm_tensor)
+    values = [float(value) for value in predictions.detach().cpu().reshape(-1).tolist()]
+    named = {
+        name: value
+        for (name, _), value in zip(MATERIAL_SANITY_POSITIONS, values, strict=True)
+    }
+    named["ordering_ok"] = (
+        named["starting_position"]
+        < named["white_up_pawn"]
+        < named["white_up_knight"]
+        < named["white_up_rook"]
+        < named["white_up_queen"]
+    )
+    named["starting_position_near_zero"] = abs(named["starting_position"]) <= 50.0
+    return named
+
+
+def _pearson_correlation(
+    count: int,
+    sum_x: float,
+    sum_y: float,
+    sum_x2: float,
+    sum_y2: float,
+    sum_xy: float,
+) -> float:
+    if count < 2:
+        return 0.0
+    numerator = count * sum_xy - sum_x * sum_y
+    denom_x = count * sum_x2 - sum_x * sum_x
+    denom_y = count * sum_y2 - sum_y * sum_y
+    if denom_x <= 1e-12 or denom_y <= 1e-12:
+        return 0.0
+    value = numerator / math.sqrt(denom_x * denom_y)
+    if not math.isfinite(value):
+        return 0.0
+    return float(value)
 
 
 def _maybe_update_best_checkpoint(state: TrainState, validation_loss: float) -> bool:
@@ -751,14 +832,6 @@ def _create_grad_scaler(torch, config: TrainConfig, device: str):
     if device == "cuda" and hasattr(getattr(torch, "cuda", None), "amp"):
         return torch.cuda.amp.GradScaler(enabled=enabled)
     return _NullGradScaler()
-
-
-def _output_bucket_indices(piece_counts, output_buckets: int, torch):
-    if output_buckets <= 1:
-        return None
-    clamped_counts = piece_counts.clamp(min=2, max=32).to(dtype=torch.long)
-    phase_progress = 32 - clamped_counts
-    return torch.clamp((phase_progress * output_buckets) // 31, max=output_buckets - 1)
 
 
 def _total_optimizer_steps(config: TrainConfig) -> int:

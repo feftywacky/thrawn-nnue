@@ -1,27 +1,40 @@
 # thrawn-nnue
 
-`thrawn-nnue` is a CLI framework for training a dual-perspective chess NNUE using a simple A-768 feature set for [thrawn](https://github.com/feftywacky/thrawn).
+`thrawn-nnue` is a trainer/export pipeline for a fixed HalfKP chess NNUE aimed at direct centipawn outputs for engine pruning.
+
+## Architecture
+
+The repo now targets one production shape only:
+
+- feature set: `halfkp`
+- feature transform: `40960 -> 256`
+- dense path: `512 -> 32 -> 32 -> 1`
+- output perspective: side to move
+- raw exported output: direct centipawns
+
+Training uses classic HalfKP with training-time `P` factorization. Exported `.nnue` files contain only coalesced real HalfKP weights.
 
 ## Installation
 
-Install Python 3.11 and then install the package in editable mode:
+Install Python 3.11 and the repo in editable mode:
 
 ```bash
 python3.11 -m pip install -e .
 ```
 
-This repo expects `numpy` and `torch`. The native `.binpack` bridge is built automatically on first use.
+The native `.binpack` bridge builds automatically on first use.
 
 ## Quick Start
 
-1. Edit [default.toml](/Users/feiyulin/Code/thrawn-nnue/configs/default.toml) and point `train_datasets` at one or more `.binpack` files, a dataset directory, or a glob such as `"/data/train/**/*.binpack"`.
+1. Edit [default.toml](/Users/feiyulin/Code/thrawn-nnue/configs/default.toml) and point `train_datasets` / `validation_datasets` at your Jan-May / June `.binpack` files.
+
 2. Inspect a dataset:
 
 ```bash
 thrawn-nnue inspect-binpack --path /absolute/path/to/train.binpack
 ```
 
-`inspect-binpack` reports score percentiles, absolute-score tail counts, WDL saturation diagnostics for common `wdl_scale` values, and a recommended starting normalization setup.
+`inspect-binpack` reports score percentiles, WDL saturation diagnostics, and a starting recommendation for `score_clip` / `wdl_scale`.
 
 3. Train:
 
@@ -29,73 +42,39 @@ thrawn-nnue inspect-binpack --path /absolute/path/to/train.binpack
 thrawn-nnue train --config configs/default.toml
 ```
 
-Training now defaults to a live single-line progress bar. It shows positions seen out of the configured budget, optimizer step, superbatch index, latest train loss, latest validation loss, and checkpoint notices. If you prefer plain summaries instead, set `console_mode = "text"` in [default.toml](/Users/feiyulin/Code/thrawn-nnue/configs/default.toml) or run:
+4. Resume if needed:
 
 ```bash
-thrawn-nnue train --config configs/default.toml --console-mode text
+thrawn-nnue resume --checkpoint runs/halfkp_baseline/checkpoints/step_00001000.pt
 ```
 
-4. Validation runs automatically when `validation_datasets` is configured. Use `validation_interval_positions` for explicit position-based validation, or set `validation_interval_positions = 0` to validate at each `superbatch_positions` boundary. The best validation checkpoint is written to `runs/.../checkpoints/best.pt`.
-
-5. Resume later if needed:
+5. Export the best checkpoint:
 
 ```bash
-thrawn-nnue resume --checkpoint runs/default/checkpoints/step_00001000.pt
+thrawn-nnue export --checkpoint runs/halfkp_baseline/checkpoints/best.pt --out runs/halfkp_baseline/model.nnue
 ```
 
-6. Export the best checkpoint:
+6. Verify checkpoint/export parity and sanity scores:
 
 ```bash
-thrawn-nnue export --checkpoint runs/default/checkpoints/best.pt --out runs/default/model.nnue
+thrawn-nnue verify-export --checkpoint runs/halfkp_baseline/checkpoints/best.pt --nnue runs/halfkp_baseline/model.nnue
 ```
 
-7. Verify:
+7. Summarize the run and generate plots:
 
 ```bash
-thrawn-nnue verify-export --checkpoint runs/default/checkpoints/step_00010000.pt --nnue runs/default/model.nnue
+thrawn-nnue metrics --run-dir runs/halfkp_baseline
 ```
 
-8. Calibrate engine centipawn scaling from validation data:
+## Training Notes
 
-```bash
-thrawn-nnue calibrate-scale --nnue runs/default/model.nnue --validation-path /absolute/path/to/valid.binpack
-```
+- `feature_set = "halfkp"` is the only supported feature set.
+- `score_clip` clips teacher centipawns directly; there is no `score_scale`.
+- The training loss is `Huber(cp) + wdl_lambda * auxiliary_wdl`.
+- `verify-export` includes a fixed material sanity ladder so you can quickly check `pawn < knight < rook < queen`.
+- The engine-side contract is documented in [nnue_spec.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_spec.md).
 
-This prints JSON containing `cp_per_raw` and `raw_per_cp`, plus fit quality metrics and a small hardcoded-position sanity block.
-Scalar v10 runs should calibrate on the raw June T80 holdout without enabling extra repo-side filtering.
+## Scope
 
-9. Summarize the run and generate plots:
-
-```bash
-thrawn-nnue metrics --run-dir runs/default
-```
-
-## Operating The Trainer
-
-- Treat `total_train_positions` as the real run budget. The trainer is no longer organized around epochs.
-- Multiple `train_datasets` are interleaved through the native chunk reader, so a Jan-May list is sampled across all shards instead of being consumed one file at a time.
-- Use `superbatch_positions` as a reporting boundary and as the default validation boundary when `validation_interval_positions = 0`.
-- Use `validation_positions = 0` for a full held-out pass, or set it to a smaller fixed position budget for faster iteration.
-- Run `inspect-binpack` on a representative shard before long training runs to choose `wdl_scale`, `score_clip`, and `score_scale`.
-- Watch validation metrics, especially blended loss, `wdl_accuracy`, and `teacher_result_disagreement_rate`, rather than train loss alone.
-- `feature_set = "a768"` is the only supported feature-set spelling.
-- Set `output_buckets = 8` for production-style runs so the final layer can separate opening and endgame behavior while keeping the same dual-accumulator update path.
-- Use [test80_a768_v10.toml](/Users/feiyulin/Code/thrawn-nnue/configs/test80_a768_v10.toml) as the scalar scratch-training reference for the v10 mainline run.
-- The v10 baseline uses raw T80 shards, `score_clip = 1200.0`, and scalar version-3 export.
-- Export `checkpoints/best.pt` by default, then verify parity and engine strength in the engine repo.
-- The NNUE contract and engine-usage notes live in [nnue_spec.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_spec.md).
-
-## Notes
-
-- This repository is trainer-only.
-- The engine-side loader and inference code belongs in your engine repo.
-- Training metrics are logged to `metrics.jsonl`, and `thrawn-nnue metrics --run-dir ...` generates summary output plus PNG plots in `plots/`.
-- Multiple `train_datasets` are opened as one combined cyclic training stream, not processed one file at a time.
-- Dataset lists can contain individual files, directories, or glob patterns. Directories are expanded recursively to `.binpack` files.
-- `total_train_positions` is the primary run budget.
-- `superbatch_positions` is a reporting and default-validation boundary, not an epoch.
-- `validation_interval_positions = 0` means validate at each superbatch boundary.
-- `validation_positions = 0` means one full validation-corpus pass.
-- `validation_positions > 0` is now respected exactly, including the last partial batch.
-- Dataset inspection is intended to drive `wdl_scale`, `score_clip`, and `score_scale` choices before a long training run.
-- Train and validation shard lists must not overlap; same-game dedup remains a data-prep responsibility outside the trainer.
+- This repository is trainer/export/spec only.
+- Engine loader and search integration stay in your engine repo.

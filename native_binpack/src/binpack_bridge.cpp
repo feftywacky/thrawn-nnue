@@ -83,8 +83,9 @@ namespace {
 
 thread_local std::string g_last_error;
 
-constexpr std::int32_t kNumFeatures = 768;
-constexpr std::int32_t kMaxActiveFeatures = 32;
+constexpr std::int32_t kFactorFeatures = 640;
+constexpr std::int32_t kNumFeatures = 40960;
+constexpr std::int32_t kMaxActiveFeatures = 30;
 
 struct ReaderHandle {
     explicit ReaderHandle(
@@ -116,11 +117,21 @@ struct ReaderHandle {
     return static_cast<std::int32_t>(chess::Square(file, rank));
 }
 
-[[nodiscard]] std::int32_t feature_index(chess::Color perspective, chess::Square sq, chess::Piece piece) {
+[[nodiscard]] std::int32_t factor_feature_index(chess::Color perspective, chess::Square sq, chess::Piece piece) {
     const auto piece_bucket =
         static_cast<std::int32_t>(piece.type()) * 2 +
         static_cast<std::int32_t>(piece.color() != perspective);
     return piece_bucket * 64 + orient_square(perspective, sq);
+}
+
+[[nodiscard]] std::int32_t feature_index(
+    chess::Color perspective,
+    chess::Square king_sq,
+    chess::Square sq,
+    chess::Piece piece
+) {
+    const auto oriented_king = orient_square(perspective, king_sq);
+    return oriented_king * kFactorFeatures + factor_feature_index(perspective, sq, piece);
 }
 
 [[nodiscard]] std::int32_t fill_feature_list(
@@ -128,16 +139,20 @@ struct ReaderHandle {
     chess::Color perspective,
     std::int32_t* out_features
 ) {
+    const auto king_sq = pos.kingSquare(perspective);
     std::int32_t count = 0;
     for (chess::Square sq : pos.piecesBB()) {
         const auto piece = pos.pieceAt(sq);
         if (piece == chess::Piece::none()) {
             continue;
         }
+        if (piece.type() == chess::PieceType::King) {
+            continue;
+        }
         if (count >= kMaxActiveFeatures) {
             break;
         }
-        out_features[count++] = feature_index(perspective, sq, piece);
+        out_features[count++] = feature_index(perspective, king_sq, sq, piece);
     }
     return count;
 }
@@ -150,15 +165,6 @@ struct ReaderHandle {
         return 0.0f;
     }
     return 0.5f;
-}
-
-[[nodiscard]] std::int32_t output_bucket_index(std::int32_t piece_count, std::int32_t output_buckets) {
-    if (output_buckets <= 1) {
-        return 0;
-    }
-    const auto clamped_piece_count = std::clamp(piece_count, 2, 32);
-    const auto phase_progress = 32 - clamped_piece_count;
-    return std::min(output_buckets - 1, (phase_progress * output_buckets) / 31);
 }
 
 template <std::size_t N>

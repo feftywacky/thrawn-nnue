@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Iterable
 
 from .board import BoardState
-from .features import active_feature_indices
+from .features import active_feature_indices, king_square
 
 
 def refresh_accumulator(
@@ -35,6 +35,10 @@ def apply_updates(
         for i, value in enumerate(row):
             acc[i] += value
     return acc
+
+
+def requires_refresh(before: BoardState, after: BoardState, perspective: str) -> bool:
+    return king_square(before, perspective) != king_square(after, perspective)
 
 
 def feature_deltas(before: BoardState, after: BoardState, perspective: str) -> tuple[list[int], list[int]]:
