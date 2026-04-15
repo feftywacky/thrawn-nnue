@@ -181,7 +181,7 @@ class VerifyExportTests(unittest.TestCase):
 
         model = HalfKPNNUE()
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[5], gamma=0.1)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.992)
         scaler = torch.cuda.amp.GradScaler(enabled=False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -198,11 +198,11 @@ class VerifyExportTests(unittest.TestCase):
                     "run_name": "test",
                     "train_datasets": ["/tmp/train.binpack"],
                     "total_train_positions": 1000,
-                    "superbatch_positions": 100,
+                    "epoch_positions": 100,
                 },
                 global_step=1,
                 positions_seen=128,
-                superbatch_index=1,
+                epoch_index=1,
             )
             export_checkpoint(checkpoint_path, nnue_path)
             report = verify_export(checkpoint_path, nnue_path)

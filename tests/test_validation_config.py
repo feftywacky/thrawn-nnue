@@ -17,13 +17,13 @@ class ValidationConfigTests(unittest.TestCase):
                 "train_datasets": ["/tmp/train.binpack"],
                 "validation_datasets": ["/tmp/valid.binpack"],
                 "total_train_positions": 10_000,
-                "superbatch_positions": 2_000,
+                "epoch_positions": 2_000,
                 "validation_interval_positions": 0,
                 "validation_positions": 0,
             }
         )
         self.assertEqual(config.total_train_positions, 10_000)
-        self.assertEqual(config.superbatch_positions, 2_000)
+        self.assertEqual(config.epoch_positions, 2_000)
         self.assertEqual(config.validation_interval_positions, 0)
         self.assertEqual(config.validation_positions, 0)
         self.assertEqual(config.feature_set, "halfkp")
@@ -34,7 +34,7 @@ class ValidationConfigTests(unittest.TestCase):
                 {
                     "train_datasets": ["/tmp/train.binpack"],
                     "total_train_positions": 10_000,
-                    "superbatch_positions": 1_000,
+                    "epoch_positions": 1_000,
                     "score_clip": -1.0,
                 }
             )
@@ -43,7 +43,7 @@ class ValidationConfigTests(unittest.TestCase):
                 {
                     "train_datasets": ["/tmp/train.binpack"],
                     "total_train_positions": 10_000,
-                    "superbatch_positions": 1_000,
+                    "epoch_positions": 1_000,
                     "cp_loss_beta": 0.0,
                 }
             )
@@ -53,7 +53,7 @@ class ValidationConfigTests(unittest.TestCase):
             {
                 "train_datasets": ["/tmp/train.binpack"],
                 "total_train_positions": 10_000,
-                "superbatch_positions": 1_000,
+                "epoch_positions": 1_000,
                 "prefetch_batches": 0,
             }
         )
@@ -64,7 +64,7 @@ class ValidationConfigTests(unittest.TestCase):
                 {
                     "train_datasets": ["/tmp/train.binpack"],
                     "total_train_positions": 10_000,
-                    "superbatch_positions": 1_000,
+                    "epoch_positions": 1_000,
                     "prefetch_batches": -1,
                 }
             )
@@ -75,7 +75,7 @@ class ValidationConfigTests(unittest.TestCase):
                 {
                     "train_datasets": ["/tmp/train.binpack"],
                     "total_train_positions": 10_000,
-                    "superbatch_positions": 1_000,
+                    "epoch_positions": 1_000,
                     "console_mode": "json",
                 }
             )
@@ -86,7 +86,7 @@ class ValidationConfigTests(unittest.TestCase):
                 {
                     "train_datasets": ["/tmp/train.binpack"],
                     "total_train_positions": 10_000,
-                    "superbatch_positions": 1_000,
+                    "epoch_positions": 1_000,
                     "feature_set": "a768",
                 }
             )
@@ -95,12 +95,29 @@ class ValidationConfigTests(unittest.TestCase):
                 {
                     "train_datasets": ["/tmp/train.binpack"],
                     "total_train_positions": 10_000,
-                    "superbatch_positions": 1_000,
+                    "epoch_positions": 1_000,
                     "score_scale": 1.0,
                     "output_buckets": 8,
                     "eval_lambda": 0.7,
                 }
             )
+
+    def test_removed_scheduler_and_superbatch_keys_are_rejected(self) -> None:
+        for key, value in (
+            ("superbatch_positions", 1_000),
+            ("lr_schedule", "exponential"),
+            ("lr_drop_fractions", [0.8, 0.95]),
+            ("lr_drop_factor", 0.1),
+        ):
+            with self.assertRaisesRegex(ValueError, "Unknown config keys"):
+                TrainConfig.from_dict(
+                    {
+                        "train_datasets": ["/tmp/train.binpack"],
+                        "total_train_positions": 10_000,
+                        "epoch_positions": 1_000,
+                        key: value,
+                    }
+                )
 
     def test_position_budget_fields_are_required(self) -> None:
         with self.assertRaises(ValueError):
@@ -113,7 +130,7 @@ class ValidationConfigTests(unittest.TestCase):
                     "train_datasets": ["/tmp/shared.binpack"],
                     "validation_datasets": ["/tmp/shared.binpack"],
                     "total_train_positions": 10_000,
-                    "superbatch_positions": 1_000,
+                    "epoch_positions": 1_000,
                 }
             )
 
@@ -136,7 +153,7 @@ class ValidationConfigTests(unittest.TestCase):
                     "train_datasets": ["train"],
                     "validation_datasets": ["valid/*.binpack"],
                     "total_train_positions": 10_000,
-                    "superbatch_positions": 1_000,
+                    "epoch_positions": 1_000,
                 },
                 base_dir=root,
             )
@@ -154,12 +171,13 @@ class ValidationConfigTests(unittest.TestCase):
             )
 
     def test_default_reference_config_loads_with_halfkp_settings(self) -> None:
-        config_path = Path(__file__).resolve().parents[1] / "configs" / "default.toml"
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "v1.toml"
         config = TrainConfig.from_toml(config_path)
 
-        self.assertEqual(config.run_name, "halfkp_baseline")
+        self.assertEqual(config.run_name, "v1")
         self.assertEqual(config.batch_size, 32_768)
-        self.assertEqual(config.total_train_positions, 2_000_000_000)
+        self.assertEqual(config.total_train_positions, 5_000_000_000)
+        self.assertEqual(config.epoch_positions, 100_000_000)
         self.assertEqual(config.ft_size, 256)
         self.assertEqual(config.l1_size, 32)
         self.assertEqual(config.l2_size, 32)
@@ -167,6 +185,18 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.max_active_features, 30)
         self.assertEqual(config.score_clip, 4000.0)
         self.assertEqual(config.wdl_lambda, 0.1)
+        self.assertEqual(config.lr_gamma, 0.992)
+
+    def test_lr_gamma_is_validated(self) -> None:
+        with self.assertRaises(ValueError):
+            TrainConfig.from_dict(
+                {
+                    "train_datasets": ["/tmp/train.binpack"],
+                    "total_train_positions": 10_000,
+                    "epoch_positions": 1_000,
+                    "lr_gamma": 0.0,
+                }
+            )
 
 
 if __name__ == "__main__":

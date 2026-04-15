@@ -45,7 +45,7 @@ def save_checkpoint(
     config: dict[str, object],
     global_step: int,
     positions_seen: int,
-    superbatch_index: int,
+    epoch_index: int,
     best_validation_loss: float | None = None,
     best_validation_positions: int | None = None,
 ) -> Path:
@@ -56,7 +56,7 @@ def save_checkpoint(
         "config": config,
         "global_step": global_step,
         "positions_seen": positions_seen,
-        "superbatch_index": superbatch_index,
+        "epoch_index": epoch_index,
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
         "scheduler_state": scheduler.state_dict() if scheduler is not None else None,

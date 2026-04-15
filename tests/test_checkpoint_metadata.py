@@ -40,7 +40,7 @@ class CheckpointMetadataTests(unittest.TestCase):
     def test_checkpoint_round_trip_preserves_resume_metadata(self) -> None:
         model = HalfKPNNUE()
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[5], gamma=0.1)
+        scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.992)
         scaler = torch.cuda.amp.GradScaler(enabled=False)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -54,12 +54,12 @@ class CheckpointMetadataTests(unittest.TestCase):
                 config={"run_name": "test"},
                 global_step=3017,
                 positions_seen=12_345_678,
-                superbatch_index=12,
+                epoch_index=12,
             )
             payload = load_checkpoint(checkpoint_path)
             self.assertEqual(payload["global_step"], 3017)
             self.assertEqual(payload["positions_seen"], 12_345_678)
-            self.assertEqual(payload["superbatch_index"], 12)
+            self.assertEqual(payload["epoch_index"], 12)
             self.assertIn("rng_state", payload)
 
 

@@ -26,7 +26,7 @@ The native `.binpack` bridge builds automatically on first use.
 
 ## Quick Start
 
-1. Edit [default.toml](/Users/feiyulin/Code/thrawn-nnue/configs/default.toml) and point `train_datasets` / `validation_datasets` at your Jan-May / June `.binpack` files.
+1. Edit [v1.toml](/Users/feiyulin/Code/thrawn-nnue/configs/v1.toml) and point `train_datasets` / `validation_datasets` at your Jan-May / June `.binpack` files.
 
 2. Inspect a dataset:
 
@@ -39,31 +39,31 @@ thrawn-nnue inspect-binpack --path /absolute/path/to/train.binpack
 3. Train:
 
 ```bash
-thrawn-nnue train --config configs/default.toml
+thrawn-nnue train --config configs/v1.toml
 ```
 
 4. Resume if needed:
 
 ```bash
-thrawn-nnue resume --checkpoint runs/halfkp_baseline/checkpoints/step_00001000.pt
+thrawn-nnue resume --checkpoint runs/v1/checkpoints/step_00001000.pt
 ```
 
 5. Export the best checkpoint:
 
 ```bash
-thrawn-nnue export --checkpoint runs/halfkp_baseline/checkpoints/best.pt --out runs/halfkp_baseline/model.nnue
+thrawn-nnue export --checkpoint runs/v1/checkpoints/best.pt --out runs/v1/model.nnue
 ```
 
 6. Verify checkpoint/export parity and sanity scores:
 
 ```bash
-thrawn-nnue verify-export --checkpoint runs/halfkp_baseline/checkpoints/best.pt --nnue runs/halfkp_baseline/model.nnue
+thrawn-nnue verify-export --checkpoint runs/v1/checkpoints/best.pt --nnue runs/v1/model.nnue
 ```
 
 7. Summarize the run and generate plots:
 
 ```bash
-thrawn-nnue metrics --run-dir runs/halfkp_baseline
+thrawn-nnue metrics --run-dir runs/v1
 ```
 
 ## Training Notes
@@ -71,6 +71,7 @@ thrawn-nnue metrics --run-dir runs/halfkp_baseline
 - `feature_set = "halfkp"` is the only supported feature set.
 - `score_clip` clips teacher centipawns directly; there is no `score_scale`.
 - The training loss is `Huber(cp) + wdl_lambda * auxiliary_wdl`.
+- LR decay is epoch-based: `epoch_positions` defines the fixed position budget per epoch, and `lr_gamma` is applied once per completed epoch.
 - `verify-export` includes a fixed material sanity ladder so you can quickly check `pawn < knight < rook < queen`.
 - The engine-side contract is documented in [nnue_spec.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_spec.md).
 

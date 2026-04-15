@@ -64,11 +64,11 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
 
     batch_size = _as_int(_config_value(run, "batch_size"))
     total_train_positions = _as_int(_config_value(run, "total_train_positions"))
-    superbatch_positions = _as_int(_config_value(run, "superbatch_positions"))
+    epoch_positions = _as_int(_config_value(run, "epoch_positions"))
     configured_validation_interval = _as_int(_config_value(run, "validation_interval_positions"))
     effective_validation_interval = configured_validation_interval
     if effective_validation_interval in (None, 0):
-        effective_validation_interval = superbatch_positions
+        effective_validation_interval = epoch_positions
     score_clip = _as_float(_config_value(run, "score_clip"))
     cp_loss_beta = _as_float(_config_value(run, "cp_loss_beta"))
     wdl_scale = _as_float(_config_value(run, "wdl_scale"))
@@ -77,13 +77,9 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
 
     latest_train_step = _record_step(latest_train)
     latest_train_positions = _record_positions(latest_train, batch_size)
+    latest_epoch_index = None if latest_train is None else _as_int(latest_train.get("epoch_index"))
     latest_validation_step = _record_step(latest_validation)
     latest_validation_positions = _record_positions(latest_validation, batch_size)
-    total_optimizer_steps = (
-        None
-        if total_train_positions is None or batch_size in (None, 0)
-        else math.ceil(total_train_positions / batch_size)
-    )
     latest_lr = _metric_value(latest_train, "lr")
     initial_lr = _metric_value(run.train_records[0] if run.train_records else None, "lr")
 
@@ -151,6 +147,7 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "validation_records": len(run.validation_records),
         "latest_train_step": latest_train_step,
         "positions_seen": latest_train_positions,
+        "latest_epoch_index": latest_epoch_index,
         "latest_train_loss": _metric_value(latest_train, "loss"),
         "latest_train_cp_loss": _metric_value(latest_train, "cp_loss"),
         "latest_train_wdl_loss": _metric_value(latest_train, "wdl_loss"),
@@ -177,10 +174,9 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "best_validation_positions": run.best_validation_positions,
         "best_checkpoint_exists": run.best_checkpoint_exists,
         "configured_total_positions": total_train_positions,
-        "configured_total_steps": total_optimizer_steps,
         "latest_position_fraction": latest_position_fraction,
         "batch_size": batch_size,
-        "superbatch_positions": superbatch_positions,
+        "epoch_positions": epoch_positions,
         "configured_validation_interval_positions": configured_validation_interval,
         "effective_validation_interval_positions": effective_validation_interval,
         "train_log_interval_steps": train_log_interval_steps,
@@ -217,6 +213,7 @@ def render_summary_text(summary: dict[str, object]) -> str:
             [
                 f"latest_train_step: {summary['latest_train_step']}",
                 f"positions_seen: {_format_optional_int(summary['positions_seen'])}",
+                f"latest_epoch_index: {_format_optional_int(summary['latest_epoch_index'])}",
                 f"latest_train_loss: {_format_optional_float(summary['latest_train_loss'])}",
                 f"latest_train_cp_loss: {_format_optional_float(summary['latest_train_cp_loss'])}",
                 f"latest_train_wdl_loss: {_format_optional_float(summary['latest_train_wdl_loss'])}",
@@ -265,10 +262,9 @@ def render_summary_text(summary: dict[str, object]) -> str:
     lines.append("")
     lines.append("Run Budget")
     lines.append(f"configured_total_positions: {_format_optional_int(summary['configured_total_positions'])}")
-    lines.append(f"configured_total_steps: {_format_optional_int(summary['configured_total_steps'])}")
     lines.append(f"latest_position_fraction: {_format_optional_fraction(summary['latest_position_fraction'])}")
     lines.append(f"batch_size: {_format_optional_int(summary['batch_size'])}")
-    lines.append(f"superbatch_positions: {_format_optional_int(summary['superbatch_positions'])}")
+    lines.append(f"epoch_positions: {_format_optional_int(summary['epoch_positions'])}")
     lines.append(
         f"effective_validation_interval_positions: {_format_optional_int(summary['effective_validation_interval_positions'])}"
     )
@@ -658,7 +654,7 @@ def _effective_validation_interval(run: MetricsRun) -> int | None:
     configured = _as_int(_config_value(run, "validation_interval_positions"))
     if configured not in (None, 0):
         return configured
-    return _as_int(_config_value(run, "superbatch_positions"))
+    return _as_int(_config_value(run, "epoch_positions"))
 
 
 def _best_validation_index(run: MetricsRun, *, batch_size: int | None) -> int | None:

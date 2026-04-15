@@ -38,7 +38,7 @@ class TrainState:
     best_validation_positions: int | None = None
     global_step: int = 0
     positions_seen: int = 0
-    superbatch_index: int = 0
+    epoch_index: int = 0
 
 
 @dataclass(slots=True)
@@ -87,7 +87,7 @@ def resume_training(checkpoint_path: str | Path, *, console_mode: str | None = N
     state.best_validation_positions = _payload_best_validation_positions(payload)
     state.global_step = int(payload["global_step"])
     state.positions_seen = _payload_positions_seen(payload)
-    state.superbatch_index = _payload_superbatch_index(payload)
+    state.epoch_index = _payload_epoch_index(payload)
     state.model.to(state.device)
     _run_training_loop(state)
     final_checkpoint = state.run_dir / "checkpoints" / f"step_{state.global_step:08d}.pt"
@@ -248,7 +248,7 @@ def _run_training_loop(state: TrainState) -> None:
             total_train_positions=state.config.total_train_positions,
             initial_positions_seen=state.positions_seen,
             batch_size=state.config.batch_size,
-            superbatch_positions=state.config.superbatch_positions,
+            epoch_positions=state.config.epoch_positions,
             validation_interval_positions=validation_interval_positions,
             log_every=state.config.log_every,
             prefetch_batches=state.config.prefetch_batches,
@@ -277,18 +277,21 @@ def _run_training_loop(state: TrainState) -> None:
                         raise RuntimeError("Cyclic training stream unexpectedly returned EOF") from None
 
                     batch_positions = prepared_batch.batch_positions
+                    positions_before_step = state.positions_seen
                     losses = _run_train_step(
                         state,
                         prepared_batch.tensors,
                         torch,
                         autocast_enabled=autocast_enabled,
                     )
-                    if state.scheduler is not None:
-                        state.scheduler.step()
-
                     state.global_step += 1
                     state.positions_seen += batch_positions
-                    state.superbatch_index = _superbatch_index(state.positions_seen, state.config.superbatch_positions)
+                    state.epoch_index = _epoch_index(state.positions_seen, state.config.epoch_positions)
+                    _advance_scheduler_for_epoch_boundaries(
+                        state,
+                        positions_before_step=positions_before_step,
+                        positions_after_step=state.positions_seen,
+                    )
                     current_loss = float(losses["loss"].detach().cpu().item())
                     current_lr = float(state.optimizer.param_groups[0]["lr"])
                     step_seconds = max(0.0, time.monotonic() - step_started_at)
@@ -298,7 +301,7 @@ def _run_training_loop(state: TrainState) -> None:
                     reporter.update_train(
                         global_step=state.global_step,
                         positions_seen=state.positions_seen,
-                        superbatch_index=state.superbatch_index,
+                        epoch_index=state.epoch_index,
                         loss=current_loss,
                         lr=current_lr,
                         step_seconds=step_seconds,
@@ -312,7 +315,7 @@ def _run_training_loop(state: TrainState) -> None:
                                 "event": "train",
                                 "global_step": state.global_step,
                                 "positions_seen": state.positions_seen,
-                                "superbatch_index": state.superbatch_index,
+                                "epoch_index": state.epoch_index,
                                 "batch_positions": batch_positions,
                                 "loss": current_loss,
                                 "cp_loss": float(losses["cp_loss"].detach().cpu().item()),
@@ -354,7 +357,7 @@ def _save_training_checkpoint(state: TrainState, checkpoint_path: Path) -> None:
         config=state.config.to_dict(),
         global_step=state.global_step,
         positions_seen=state.positions_seen,
-        superbatch_index=state.superbatch_index,
+        epoch_index=state.epoch_index,
         best_validation_loss=state.best_validation_loss,
         best_validation_positions=state.best_validation_positions,
     )
@@ -365,21 +368,9 @@ def _resolve_runtime_config(config: TrainConfig) -> None:
 
 
 def _create_scheduler(config: TrainConfig, optimizer, torch):
-    total_steps = _total_optimizer_steps(config)
-    milestones = sorted(
-        {
-            milestone
-            for milestone in (
-                int(math.floor(total_steps * float(fraction)))
-                for fraction in config.lr_drop_fractions
-            )
-            if 0 < milestone < total_steps
-        }
-    )
-    return torch.optim.lr_scheduler.MultiStepLR(
+    return torch.optim.lr_scheduler.ExponentialLR(
         optimizer,
-        milestones=milestones,
-        gamma=config.lr_drop_factor,
+        gamma=config.lr_gamma,
     )
 
 
@@ -834,22 +825,33 @@ def _create_grad_scaler(torch, config: TrainConfig, device: str):
     return _NullGradScaler()
 
 
-def _total_optimizer_steps(config: TrainConfig) -> int:
-    return max(1, math.ceil(config.total_train_positions / config.batch_size))
-
-
 def _effective_validation_interval_positions(config: TrainConfig) -> int:
     if config.validation_interval_positions > 0:
         return config.validation_interval_positions
-    return config.superbatch_positions
+    return config.epoch_positions
 
 
 def _next_validation_positions(current_positions: int, interval_positions: int) -> int:
     return ((current_positions // interval_positions) + 1) * interval_positions
 
 
-def _superbatch_index(positions_seen: int, superbatch_positions: int) -> int:
-    return positions_seen // superbatch_positions
+def _epoch_index(positions_seen: int, epoch_positions: int) -> int:
+    return positions_seen // epoch_positions
+
+
+def _advance_scheduler_for_epoch_boundaries(
+    state: TrainState,
+    *,
+    positions_before_step: int,
+    positions_after_step: int,
+) -> None:
+    if state.scheduler is None:
+        return
+    previous_epoch_index = _epoch_index(positions_before_step, state.config.epoch_positions)
+    new_epoch_index = _epoch_index(positions_after_step, state.config.epoch_positions)
+    completed_epochs = max(0, new_epoch_index - previous_epoch_index)
+    for _ in range(completed_epochs):
+        state.scheduler.step()
 
 
 def _requested_batch_size(batch_size: int, remaining_positions: int | None) -> int | None:
@@ -903,8 +905,8 @@ def _payload_positions_seen(payload: dict[str, object]) -> int:
     return int(payload["positions_seen"])
 
 
-def _payload_superbatch_index(payload: dict[str, object]) -> int:
-    return int(payload["superbatch_index"])
+def _payload_epoch_index(payload: dict[str, object]) -> int:
+    return int(payload["epoch_index"])
 
 
 def _payload_best_validation_positions(payload: dict[str, object]) -> int | None:

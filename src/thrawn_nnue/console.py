@@ -14,7 +14,7 @@ class ConsoleContext:
     total_train_positions: int
     initial_positions_seen: int
     batch_size: int
-    superbatch_positions: int
+    epoch_positions: int
     validation_interval_positions: int
     log_every: int
     prefetch_batches: int = 0
@@ -29,7 +29,7 @@ class _BaseReporter:
         *,
         global_step: int,
         positions_seen: int,
-        superbatch_index: int,
+        epoch_index: int,
         loss: float,
         lr: float,
         step_seconds: float,
@@ -73,7 +73,7 @@ class TextReporter(_BaseReporter):
         print(
             "training stream:"
             " combined cyclic stream across all train_datasets;"
-            f" superbatch_positions={_format_count(context.superbatch_positions)};"
+            f" epoch_positions={_format_count(context.epoch_positions)};"
             f" validation_interval_positions={_format_count(context.validation_interval_positions)};"
             f" validation uses non-cyclic passes across {context.validation_shards} validation shard(s)"
         )
@@ -84,7 +84,7 @@ class TextReporter(_BaseReporter):
         *,
         global_step: int,
         positions_seen: int,
-        superbatch_index: int,
+        epoch_index: int,
         loss: float,
         lr: float,
         step_seconds: float,
@@ -96,7 +96,7 @@ class TextReporter(_BaseReporter):
         pieces = [
             f"step={global_step}",
             f"positions={_format_progress(positions_seen, self._total_train_positions)}",
-            f"superbatch={superbatch_index}",
+            f"epoch={epoch_index}",
             f"loss={loss:.6f}",
             f"lr={lr:.8f}",
             f"step_time_s={step_seconds:.3f}",
@@ -171,7 +171,7 @@ class ProgressReporter(_BaseReporter):
         self._bar.write(
             "training stream:"
             " combined cyclic stream across all train_datasets;"
-            f" superbatch_positions={_format_count(context.superbatch_positions)};"
+            f" epoch_positions={_format_count(context.epoch_positions)};"
             f" validation_interval_positions={_format_count(context.validation_interval_positions)};"
             f" validation uses non-cyclic passes across {context.validation_shards} validation shard(s)"
         )
@@ -182,7 +182,7 @@ class ProgressReporter(_BaseReporter):
         *,
         global_step: int,
         positions_seen: int,
-        superbatch_index: int,
+        epoch_index: int,
         loss: float,
         lr: float,
         step_seconds: float,
@@ -194,7 +194,7 @@ class ProgressReporter(_BaseReporter):
             self._bar.update(positions_seen - self._bar.n)
         postfix = {
             "step": global_step,
-            "sb": superbatch_index,
+            "ep": epoch_index,
             "loss": f"{loss:.4f}",
             "lr": f"{lr:.2e}",
             "step_time_s": f"{step_seconds:.3f}",

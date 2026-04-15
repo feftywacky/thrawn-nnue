@@ -18,7 +18,7 @@ class TrainConfig:
     prefetch_batches: int = 0
     batch_size: int = 256
     total_train_positions: int = 0
-    superbatch_positions: int = 0
+    epoch_positions: int = 0
     validation_interval_positions: int = 0
     validation_positions: int = 0
     checkpoint_every: int = 250
@@ -29,6 +29,7 @@ class TrainConfig:
     output_regularization: float = 0.0
     clip_grad_norm: float = 1.0
     amp: bool = True
+    lr_gamma: float = 0.992
     feature_set: str = "halfkp"
     num_features: int = 40960
     num_factor_features: int = 640
@@ -41,8 +42,6 @@ class TrainConfig:
     cp_loss_beta: float = 128.0
     wdl_scale: float = 410.0
     wdl_lambda: float = 0.1
-    lr_drop_fractions: list[float] = field(default_factory=lambda: [0.80, 0.95])
-    lr_drop_factor: float = 0.1
     export_ft_scale: float = 127.0
     export_dense_scale: float = 64.0
     export_description: str = "thrawn halfkp nnue"
@@ -90,8 +89,8 @@ class TrainConfig:
             raise ValueError("batch_size must be positive")
         if self.total_train_positions <= 0:
             raise ValueError("total_train_positions must be positive")
-        if self.superbatch_positions <= 0:
-            raise ValueError("superbatch_positions must be positive")
+        if self.epoch_positions <= 0:
+            raise ValueError("epoch_positions must be positive")
         if self.validation_interval_positions < 0:
             raise ValueError("validation_interval_positions must be >= 0")
         if self.validation_positions < 0:
@@ -128,15 +127,8 @@ class TrainConfig:
             raise ValueError("device must be one of: auto, cuda, mps, cpu")
         if self.console_mode not in {"progress", "text"}:
             raise ValueError("console_mode must be one of: progress, text")
-        if self.lr_drop_factor <= 0.0 or self.lr_drop_factor > 1.0:
-            raise ValueError("lr_drop_factor must be in (0, 1]")
-        previous_fraction = None
-        for fraction in self.lr_drop_fractions:
-            if not 0.0 < float(fraction) < 1.0:
-                raise ValueError("lr_drop_fractions entries must be in (0, 1)")
-            if previous_fraction is not None and float(fraction) <= previous_fraction:
-                raise ValueError("lr_drop_fractions must be strictly increasing")
-            previous_fraction = float(fraction)
+        if self.lr_gamma <= 0.0 or self.lr_gamma > 1.0:
+            raise ValueError("lr_gamma must be in (0, 1]")
 
         overlap = _dataset_overlap(self.train_datasets, self.validation_datasets)
         if overlap:

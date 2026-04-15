@@ -60,6 +60,7 @@ class MetricsSummaryTests(unittest.TestCase):
                         "event": "train",
                         "global_step": 1,
                         "positions_seen": 2048,
+                        "epoch_index": 0,
                         "loss": 0.9,
                         "cp_loss": 0.8,
                         "wdl_loss": 1.0,
@@ -69,6 +70,7 @@ class MetricsSummaryTests(unittest.TestCase):
                         "event": "train",
                         "global_step": 2,
                         "positions_seen": 4096,
+                        "epoch_index": 0,
                         "loss": 0.7,
                         "cp_loss": 0.6,
                         "wdl_loss": 0.8,
@@ -84,7 +86,7 @@ class MetricsSummaryTests(unittest.TestCase):
                     "config": {
                         "batch_size": 2048,
                         "total_train_positions": 10_000,
-                        "superbatch_positions": 5_000,
+                        "epoch_positions": 5_000,
                         "validation_interval_positions": 2_500,
                         "score_clip": 4000.0,
                         "cp_loss_beta": 128.0,
@@ -101,6 +103,8 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertEqual(summary["train_records"], 2)
             self.assertEqual(summary["validation_records"], 0)
             self.assertEqual(summary["positions_seen"], 4096)
+            self.assertEqual(summary["epoch_positions"], 5_000)
+            self.assertEqual(summary["latest_epoch_index"], 0)
             self.assertIsNone(summary["latest_validation_positions"])
             self.assertEqual(summary["resume_recommendation"], "insufficient-validation")
             self.assertIn("configured_total_positions", render_summary_text(summary))
@@ -115,6 +119,7 @@ class MetricsSummaryTests(unittest.TestCase):
                         "event": "train",
                         "global_step": 1,
                         "positions_seen": 1024,
+                        "epoch_index": 0,
                         "loss": 0.9,
                         "cp_loss": 0.8,
                         "wdl_loss": 1.0,
@@ -124,6 +129,7 @@ class MetricsSummaryTests(unittest.TestCase):
                         "event": "train",
                         "global_step": 4,
                         "positions_seen": 4096,
+                        "epoch_index": 1,
                         "loss": 0.4,
                         "cp_loss": 0.2,
                         "wdl_loss": 0.5,
@@ -171,7 +177,7 @@ class MetricsSummaryTests(unittest.TestCase):
                     "config": {
                         "batch_size": 1024,
                         "total_train_positions": 8192,
-                        "superbatch_positions": 4096,
+                        "epoch_positions": 4096,
                         "validation_interval_positions": 2048,
                         "score_clip": 4000.0,
                         "cp_loss_beta": 128.0,
@@ -189,12 +195,14 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertAlmostEqual(summary["best_validation_loss"], 0.3)
             self.assertEqual(summary["resume_recommendation"], "continue-latest")
             self.assertTrue(summary["best_is_latest_validation"])
-            self.assertEqual(summary["configured_total_steps"], 8)
+            self.assertEqual(summary["epoch_positions"], 4096)
+            self.assertEqual(summary["latest_epoch_index"], 1)
             self.assertAlmostEqual(summary["train_validation_gap"], -0.1)
             self.assertAlmostEqual(summary["latest_validation_wdl_accuracy"], 0.62)
             self.assertTrue(summary["latest_material_ordering_ok"])
             text = render_summary_text(summary)
             self.assertIn("best_validation_positions: 4096", text)
+            self.assertIn("epoch_positions: 4096", text)
             self.assertIn("Suggestions", text)
 
 
@@ -210,6 +218,7 @@ class MetricsPlotTests(unittest.TestCase):
                         "event": "train",
                         "global_step": 1,
                         "positions_seen": 1024,
+                        "epoch_index": 0,
                         "loss": 0.9,
                         "cp_loss": 0.8,
                         "wdl_loss": 1.0,
@@ -219,6 +228,7 @@ class MetricsPlotTests(unittest.TestCase):
                         "event": "train",
                         "global_step": 2,
                         "positions_seen": 2048,
+                        "epoch_index": 1,
                         "loss": 0.7,
                         "cp_loss": 0.6,
                         "wdl_loss": 0.8,
@@ -250,7 +260,7 @@ class MetricsPlotTests(unittest.TestCase):
                     "config": {
                         "batch_size": 1024,
                         "total_train_positions": 4096,
-                        "superbatch_positions": 2048,
+                        "epoch_positions": 2048,
                         "validation_interval_positions": 2048,
                     },
                     "global_step": 2,
