@@ -291,8 +291,9 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
     l1_bias = model.l1.bias.detach().cpu().numpy()
     l2_weight = model.l2.weight.detach().cpu().numpy().T
     l2_bias = model.l2.bias.detach().cpu().numpy()
-    out_weight = model.output.weight.detach().cpu().numpy().reshape(-1)
-    out_bias = model.output.bias.detach().cpu().numpy()
+    final_eval_scale = float(getattr(model, "final_eval_scale", 1.0))
+    out_weight = model.output.weight.detach().cpu().numpy().reshape(-1) * final_eval_scale
+    out_bias = model.output.bias.detach().cpu().numpy() * final_eval_scale
 
     ft_scale = _fit_quantization_scale([ft_bias, ft_weight], config.export_ft_scale, np.int16)
     l1_scale = _fit_quantization_scale([l1_weight], config.export_dense_scale, np.int8)

@@ -39,8 +39,8 @@ struct ThrawnInspectStats {
     std::uint64_t wins;
     std::uint64_t draws;
     std::uint64_t losses;
-    std::int16_t min_score;
-    std::int16_t max_score;
+    double min_score;
+    double max_score;
     std::uint16_t min_ply;
     std::uint16_t max_ply;
     double mean_score;
@@ -86,6 +86,7 @@ thread_local std::string g_last_error;
 constexpr std::int32_t kFactorFeatures = 640;
 constexpr std::int32_t kNumFeatures = 40960;
 constexpr std::int32_t kMaxActiveFeatures = 30;
+constexpr double kStockfishInternalToCp = 100.0 / 208.0;
 
 struct ReaderHandle {
     explicit ReaderHandle(
@@ -165,6 +166,10 @@ struct ReaderHandle {
         return 0.0f;
     }
     return 0.5f;
+}
+
+[[nodiscard]] double score_to_cp(double score) {
+    return score * kStockfishInternalToCp;
 }
 
 template <std::size_t N>
@@ -312,7 +317,7 @@ extern "C" ThrawnBatchView* thrawn_binpack_next_batch(void* handle, std::int32_t
                 batch->black_indices + base
             );
             batch->stm[i] = entry.pos.sideToMove() == chess::Color::White ? 1.0f : 0.0f;
-            batch->score_cp[i] = static_cast<float>(entry.score);
+            batch->score_cp[i] = static_cast<float>(score_to_cp(static_cast<double>(entry.score)));
             batch->result_wdl[i] = result_to_wdl(entry.result);
         }
 
@@ -351,8 +356,8 @@ extern "C" std::int32_t thrawn_inspect_binpack(const char* path, ThrawnInspectSt
         CompressedTrainingDataEntryReader reader(path, std::ios_base::binary);
 
         ThrawnInspectStats stats{};
-        stats.min_score = std::numeric_limits<std::int16_t>::max();
-        stats.max_score = std::numeric_limits<std::int16_t>::min();
+        std::int16_t min_score_raw = std::numeric_limits<std::int16_t>::max();
+        std::int16_t max_score_raw = std::numeric_limits<std::int16_t>::min();
         stats.min_ply = std::numeric_limits<std::uint16_t>::max();
         stats.max_ply = std::numeric_limits<std::uint16_t>::min();
 
@@ -380,23 +385,25 @@ extern "C" std::int32_t thrawn_inspect_binpack(const char* path, ThrawnInspectSt
                 ++stats.draws;
             }
 
-            stats.min_score = std::min(stats.min_score, entry.score);
-            stats.max_score = std::max(stats.max_score, entry.score);
+            min_score_raw = std::min(min_score_raw, entry.score);
+            max_score_raw = std::max(max_score_raw, entry.score);
             stats.min_ply = std::min(stats.min_ply, entry.ply);
             stats.max_ply = std::max(stats.max_ply, entry.ply);
 
             const auto abs_score = static_cast<int>(std::abs(static_cast<int>(entry.score)));
-            total_score += static_cast<double>(entry.score);
-            total_abs_score += std::abs(static_cast<double>(entry.score));
+            const double score_cp = score_to_cp(static_cast<double>(entry.score));
+            const double abs_score_cp = score_to_cp(static_cast<double>(abs_score));
+            total_score += score_cp;
+            total_abs_score += abs_score_cp;
             total_piece_count += static_cast<double>(entry.pos.piecesBB().count());
             score_histogram[static_cast<std::uint16_t>(static_cast<int>(entry.score) + 32768)] += 1;
             abs_score_histogram[std::min(abs_score, 32768)] += 1;
             ply_histogram[entry.ply] += 1;
-            stats.abs_score_ge_1000 += abs_score >= 1000;
-            stats.abs_score_ge_2000 += abs_score >= 2000;
-            stats.abs_score_ge_4000 += abs_score >= 4000;
-            stats.abs_score_ge_8000 += abs_score >= 8000;
-            stats.abs_score_ge_16000 += abs_score >= 16000;
+            stats.abs_score_ge_1000 += abs_score_cp >= 1000.0;
+            stats.abs_score_ge_2000 += abs_score_cp >= 2000.0;
+            stats.abs_score_ge_4000 += abs_score_cp >= 4000.0;
+            stats.abs_score_ge_8000 += abs_score_cp >= 8000.0;
+            stats.abs_score_ge_16000 += abs_score_cp >= 16000.0;
         }
 
         if (stats.entries_read == 0) {
@@ -405,18 +412,20 @@ extern "C" std::int32_t thrawn_inspect_binpack(const char* path, ThrawnInspectSt
             stats.min_ply = 0;
             stats.max_ply = 0;
         } else {
+            stats.min_score = score_to_cp(static_cast<double>(min_score_raw));
+            stats.max_score = score_to_cp(static_cast<double>(max_score_raw));
             stats.mean_score = total_score / static_cast<double>(stats.entries_read);
             stats.mean_abs_score = total_abs_score / static_cast<double>(stats.entries_read);
             stats.mean_piece_count = total_piece_count / static_cast<double>(stats.entries_read);
-            stats.score_p01 = percentile_from_histogram(score_histogram, stats.entries_read, 0.01, -32768);
-            stats.score_p05 = percentile_from_histogram(score_histogram, stats.entries_read, 0.05, -32768);
-            stats.score_p50 = percentile_from_histogram(score_histogram, stats.entries_read, 0.50, -32768);
-            stats.score_p95 = percentile_from_histogram(score_histogram, stats.entries_read, 0.95, -32768);
-            stats.score_p99 = percentile_from_histogram(score_histogram, stats.entries_read, 0.99, -32768);
-            stats.abs_score_p50 = percentile_from_histogram(abs_score_histogram, stats.entries_read, 0.50, 0);
-            stats.abs_score_p90 = percentile_from_histogram(abs_score_histogram, stats.entries_read, 0.90, 0);
-            stats.abs_score_p95 = percentile_from_histogram(abs_score_histogram, stats.entries_read, 0.95, 0);
-            stats.abs_score_p99 = percentile_from_histogram(abs_score_histogram, stats.entries_read, 0.99, 0);
+            stats.score_p01 = score_to_cp(percentile_from_histogram(score_histogram, stats.entries_read, 0.01, -32768));
+            stats.score_p05 = score_to_cp(percentile_from_histogram(score_histogram, stats.entries_read, 0.05, -32768));
+            stats.score_p50 = score_to_cp(percentile_from_histogram(score_histogram, stats.entries_read, 0.50, -32768));
+            stats.score_p95 = score_to_cp(percentile_from_histogram(score_histogram, stats.entries_read, 0.95, -32768));
+            stats.score_p99 = score_to_cp(percentile_from_histogram(score_histogram, stats.entries_read, 0.99, -32768));
+            stats.abs_score_p50 = score_to_cp(percentile_from_histogram(abs_score_histogram, stats.entries_read, 0.50, 0));
+            stats.abs_score_p90 = score_to_cp(percentile_from_histogram(abs_score_histogram, stats.entries_read, 0.90, 0));
+            stats.abs_score_p95 = score_to_cp(percentile_from_histogram(abs_score_histogram, stats.entries_read, 0.95, 0));
+            stats.abs_score_p99 = score_to_cp(percentile_from_histogram(abs_score_histogram, stats.entries_read, 0.99, 0));
             stats.ply_p50 = percentile_from_histogram(ply_histogram, stats.entries_read, 0.50, 0);
             stats.ply_p95 = percentile_from_histogram(ply_histogram, stats.entries_read, 0.95, 0);
         }

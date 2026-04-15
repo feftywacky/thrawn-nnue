@@ -135,6 +135,54 @@ class ExportFormatTests(unittest.TestCase):
         diagnostics = _export_quantization_diagnostics(exported)
         self.assertEqual(diagnostics["ft_weight"]["positive_limit_hits"], 0.0)
 
+    def test_export_folds_final_eval_scale_into_output_layer(self) -> None:
+        class FakeTensor:
+            def __init__(self, values):
+                self._values = np.asarray(values, dtype=np.float32)
+
+            def detach(self):
+                return self
+
+            def cpu(self):
+                return self
+
+            def numpy(self):
+                return self._values
+
+        model = SimpleNamespace(
+            ft=SimpleNamespace(weight=FakeTensor(np.zeros((640, 1), dtype=np.float32))),
+            ft_bias=FakeTensor([0.0]),
+            l1=SimpleNamespace(
+                weight=FakeTensor(np.zeros((2, 1), dtype=np.float32)),
+                bias=FakeTensor([0.0]),
+            ),
+            l2=SimpleNamespace(
+                weight=FakeTensor(np.zeros((1, 1), dtype=np.float32)),
+                bias=FakeTensor([0.0]),
+            ),
+            output=SimpleNamespace(
+                weight=FakeTensor(np.array([[0.25]], dtype=np.float32)),
+                bias=FakeTensor([0.5]),
+            ),
+            final_eval_scale=16.0,
+        )
+        config = SimpleNamespace(
+            export_description="fixture",
+            num_features=640,
+            ft_size=1,
+            l1_size=1,
+            l2_size=1,
+            export_ft_scale=100.0,
+            export_dense_scale=64.0,
+            wdl_scale=410.0,
+        )
+
+        exported = _exported_network_from_model(model, config)
+        dequantized_weight = exported.out_weight.astype(np.float32) / exported.out_scale
+        dequantized_bias = exported.out_bias.astype(np.float32) / exported.out_scale
+        self.assertAlmostEqual(float(dequantized_weight[0]), 4.0, delta=0.02)
+        self.assertAlmostEqual(float(dequantized_bias[0]), 8.0, places=5)
+
     def test_evaluate_export_uses_direct_scalar_output(self) -> None:
         exported = ExportedNetwork(
             description="fixture",

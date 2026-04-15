@@ -69,6 +69,7 @@ thrawn-nnue metrics --run-dir runs/v1
 ## Training Notes
 
 - `feature_set = "halfkp"` is the only supported feature set.
+- Binpack scores are converted from Stockfish internal units to true centipawns before inspection and training.
 - `score_clip` clips teacher centipawns directly; there is no `score_scale`.
 - The training loss is `Huber(cp) + wdl_lambda * auxiliary_wdl`.
 - LR decay is epoch-based: `epoch_positions` defines the fixed position budget per epoch, and `lr_gamma` is applied once per completed epoch.
