@@ -1,5 +1,5 @@
-run_name = "halfkp_baseline"
-output_dir = "runs/halfkp_baseline"
+run_name = "v1"
+output_dir = "runs/v1"
 
 train_datasets = [
   "/Users/flin/src/thrawn-nnue/data/test80-2024-01-jan-2tb7p.min-v2.v6.binpack",
@@ -17,16 +17,16 @@ num_loader_threads = 12
 prefetch_batches = 2
 batch_size = 32768
 
-total_train_positions = 2000000000
-superbatch_positions = 100000000
-validation_interval_positions = 100000000
-validation_positions = 20000000
+total_train_positions = 10000000000
+superbatch_positions = 250000000
+validation_interval_positions = 250000000
+validation_positions = 50000000
 
-checkpoint_every = 2500
-log_every = 25
+checkpoint_every = 5000
+log_every = 50
 console_mode = "progress"
 
-learning_rate = 0.001
+learning_rate = 0.00075
 weight_decay = 0.00002
 clip_grad_norm = 1.0
 amp = false
@@ -44,9 +44,9 @@ score_clip = 4000.0
 cp_loss_beta = 128.0
 wdl_scale = 410.0
 wdl_lambda = 0.1
-lr_drop_fractions = [0.5, 0.8, 0.9]
+lr_drop_fractions = [0.6, 0.85, 0.95]
 lr_drop_factor = 0.1
 
 export_ft_scale = 127.0
 export_dense_scale = 64.0
-export_description = "thrawn halfkp nnue v1"
+export_description = "thrawn halfkp nnue v1 production 10b"
