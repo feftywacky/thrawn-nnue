@@ -71,7 +71,8 @@ thrawn-nnue metrics --run-dir runs/v1
 - `feature_set = "halfkp"` is the only supported feature set.
 - Binpack scores are converted from Stockfish internal units to true centipawns before inspection and training.
 - `score_clip` clips teacher centipawns directly; there is no `score_scale`.
-- The training loss is `Huber(cp) + wdl_lambda * auxiliary_wdl`.
+- The training loss is sigmoid-space MSE on a blended target:
+  `cp_loss = MSE(sigmoid(pred_cp / wdl_scale), (1 - wdl_lambda) * sigmoid(target_cp / wdl_scale) + wdl_lambda * result_wdl)`.
 - LR decay is epoch-based: `epoch_positions` defines the fixed position budget per epoch, and `lr_gamma` is applied once per completed epoch.
 - `verify-export` includes a fixed material sanity ladder so you can quickly check `pawn < knight < rook < queen`.
 - The engine-side contract is documented in [nnue_spec.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_spec.md).

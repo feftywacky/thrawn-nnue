@@ -184,7 +184,7 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.num_features, 40_960)
         self.assertEqual(config.max_active_features, 30)
         self.assertEqual(config.score_clip, 4000.0)
-        self.assertEqual(config.wdl_lambda, 0.1)
+        self.assertEqual(config.wdl_lambda, 0.5)
         self.assertEqual(config.lr_gamma, 0.992)
 
     def test_lr_gamma_is_validated(self) -> None:

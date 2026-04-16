@@ -443,15 +443,15 @@ def _scalar_head_loss(
     output_regularization: float,
     torch,
 ):
-    cp_loss = torch.nn.functional.smooth_l1_loss(
-        prediction_cp,
-        target_cp,
-        beta=cp_loss_beta,
-    )
     pred_wdl = _wdl_from_cp(prediction_cp, wdl_scale, torch)
+    target_wdl = _wdl_from_cp(target_cp, wdl_scale, torch)
+    blended_target = (1.0 - wdl_lambda) * target_wdl + wdl_lambda * result_wdl
+    cp_loss = torch.mean((pred_wdl - blended_target) ** 2)
     wdl_loss = torch.mean((pred_wdl - result_wdl) ** 2)
     output_reg_loss = torch.mean(prediction_cp.square())
-    loss = cp_loss + wdl_lambda * wdl_loss + output_regularization * output_reg_loss
+    # Keep cp_loss_beta in the config for backward compatibility with old checkpoints/configs.
+    _ = cp_loss_beta
+    loss = cp_loss + output_regularization * output_reg_loss
     return {
         "loss": loss,
         "cp_loss": cp_loss,

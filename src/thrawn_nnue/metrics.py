@@ -372,7 +372,7 @@ def _plot_train_loss(plt, output_path: Path, run: MetricsRun, *, batch_size: int
     bottom_axis.text(
         0.01,
         0.04,
-        "total = cp Huber loss + wdl_lambda * auxiliary WDL loss",
+        "total = cp sigmoid-MSE + output regularization",
         transform=bottom_axis.transAxes,
         fontsize=9,
         alpha=0.75,

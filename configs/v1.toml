@@ -43,8 +43,8 @@ output_perspective = "stm"
 
 score_clip = 4000.0
 cp_loss_beta = 128.0
-wdl_scale = 410.0
-wdl_lambda = 0.1
+wdl_scale = 197.0
+wdl_lambda = 0.5
 
 export_ft_scale = 127.0
 export_dense_scale = 64.0
