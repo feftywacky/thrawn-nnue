@@ -368,9 +368,11 @@ def _resolve_runtime_config(config: TrainConfig) -> None:
 
 
 def _create_scheduler(config: TrainConfig, optimizer, torch):
-    return torch.optim.lr_scheduler.ExponentialLR(
+    total_epochs = max(1, config.total_train_positions // config.epoch_positions)
+    return torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
-        gamma=config.lr_gamma,
+        T_max=total_epochs,
+        eta_min=config.learning_rate * 0.01,
     )
 
 
@@ -468,7 +470,6 @@ def _clip_model_weights(model, config: TrainConfig) -> None:
     with torch.no_grad():
         model.l1.weight.clamp_(-dense_limit, dense_limit)
         model.l2.weight.clamp_(-dense_limit, dense_limit)
-        model.output.weight.clamp_(-dense_limit, dense_limit)
 
 
 def _normalize_teacher_scores(scores, config: TrainConfig, torch):

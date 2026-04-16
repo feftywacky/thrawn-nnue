@@ -108,6 +108,7 @@ class ValidationConfigTests(unittest.TestCase):
             ("lr_schedule", "exponential"),
             ("lr_drop_fractions", [0.8, 0.95]),
             ("lr_drop_factor", 0.1),
+            ("lr_gamma", 0.992),
         ):
             with self.assertRaisesRegex(ValueError, "Unknown config keys"):
                 TrainConfig.from_dict(
@@ -185,18 +186,6 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.max_active_features, 30)
         self.assertEqual(config.score_clip, 4000.0)
         self.assertEqual(config.wdl_lambda, 0.5)
-        self.assertEqual(config.lr_gamma, 0.992)
-
-    def test_lr_gamma_is_validated(self) -> None:
-        with self.assertRaises(ValueError):
-            TrainConfig.from_dict(
-                {
-                    "train_datasets": ["/tmp/train.binpack"],
-                    "total_train_positions": 10_000,
-                    "epoch_positions": 1_000,
-                    "lr_gamma": 0.0,
-                }
-            )
 
 
 if __name__ == "__main__":

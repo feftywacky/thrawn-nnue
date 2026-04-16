@@ -29,7 +29,6 @@ class TrainConfig:
     output_regularization: float = 0.0
     clip_grad_norm: float = 1.0
     amp: bool = True
-    lr_gamma: float = 0.992
     feature_set: str = "halfkp"
     num_features: int = 40960
     num_factor_features: int = 640
@@ -127,8 +126,6 @@ class TrainConfig:
             raise ValueError("device must be one of: auto, cuda, mps, cpu")
         if self.console_mode not in {"progress", "text"}:
             raise ValueError("console_mode must be one of: progress, text")
-        if self.lr_gamma <= 0.0 or self.lr_gamma > 1.0:
-            raise ValueError("lr_gamma must be in (0, 1]")
 
         overlap = _dataset_overlap(self.train_datasets, self.validation_datasets)
         if overlap:

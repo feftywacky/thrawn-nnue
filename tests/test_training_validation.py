@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 from pathlib import Path
 import tempfile
@@ -65,6 +66,10 @@ class _DummyStream:
 
 @unittest.skipUnless(torch is not None, "PyTorch is required for validation training tests")
 class ValidationTrainingTests(unittest.TestCase):
+    @staticmethod
+    def _cosine_epoch_lr(base_lr: float, eta_min: float, epoch_step: int, t_max: int) -> float:
+        return eta_min + (base_lr - eta_min) * (1.0 + math.cos(math.pi * epoch_step / t_max)) / 2.0
+
     def test_score_normalization_only_clips(self) -> None:
         values = torch.tensor([[-5000.0], [2000.0], [9000.0]], dtype=torch.float32)
         config = TrainConfig.from_dict(
@@ -125,24 +130,27 @@ class ValidationTrainingTests(unittest.TestCase):
         expected_limit = torch.tensor((127.0 - 0.5) / 64.0, dtype=torch.float32)
         self.assertLessEqual(float(model.l1.weight.abs().max()), float(expected_limit))
         self.assertLessEqual(float(model.l2.weight.abs().max()), float(expected_limit))
-        self.assertLessEqual(float(model.output.weight.abs().max()), float(expected_limit))
+        self.assertGreater(float(model.output.weight.abs().max()), float(expected_limit))
 
-    def test_create_scheduler_supports_exponential_decay(self) -> None:
+    def test_create_scheduler_supports_cosine_annealing(self) -> None:
+        learning_rate = 0.000875
         optimizer = torch.optim.AdamW(
             [torch.nn.Parameter(torch.tensor([1.0], dtype=torch.float32))],
-            lr=0.000875,
+            lr=learning_rate,
         )
         config = TrainConfig.from_dict(
             {
                 "train_datasets": ["/tmp/train.binpack"],
                 "total_train_positions": 10_000,
                 "epoch_positions": 1_000,
-                "lr_gamma": 0.992,
+                "learning_rate": learning_rate,
             }
         )
 
         scheduler = _create_scheduler(config, optimizer, torch)
-        self.assertEqual(scheduler.__class__.__name__, "ExponentialLR")
+        self.assertEqual(scheduler.__class__.__name__, "CosineAnnealingLR")
+        self.assertEqual(scheduler.T_max, 10)
+        self.assertAlmostEqual(scheduler.eta_min, learning_rate * 0.01)
 
     def test_epoch_scheduler_does_not_step_within_epoch(self) -> None:
         optimizer = torch.optim.AdamW(
@@ -154,7 +162,7 @@ class ValidationTrainingTests(unittest.TestCase):
                 "train_datasets": ["/tmp/train.binpack"],
                 "total_train_positions": 10_000,
                 "epoch_positions": 1_000,
-                "lr_gamma": 0.992,
+                "learning_rate": 0.000875,
             }
         )
         scheduler = _create_scheduler(config, optimizer, torch)
@@ -170,16 +178,17 @@ class ValidationTrainingTests(unittest.TestCase):
         self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 0.000875)
 
     def test_epoch_scheduler_steps_once_on_single_boundary(self) -> None:
+        learning_rate = 0.000875
         optimizer = torch.optim.AdamW(
             [torch.nn.Parameter(torch.tensor([1.0], dtype=torch.float32))],
-            lr=0.000875,
+            lr=learning_rate,
         )
         config = TrainConfig.from_dict(
             {
                 "train_datasets": ["/tmp/train.binpack"],
                 "total_train_positions": 10_000,
                 "epoch_positions": 1_000,
-                "lr_gamma": 0.992,
+                "learning_rate": learning_rate,
             }
         )
         scheduler = _create_scheduler(config, optimizer, torch)
@@ -192,19 +201,21 @@ class ValidationTrainingTests(unittest.TestCase):
             positions_after_step=1_100,
         )
 
-        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 0.000875 * 0.992)
+        expected = self._cosine_epoch_lr(learning_rate, learning_rate * 0.01, epoch_step=1, t_max=10)
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], expected)
 
     def test_epoch_scheduler_steps_multiple_times_when_batch_crosses_multiple_epochs(self) -> None:
+        learning_rate = 0.000875
         optimizer = torch.optim.AdamW(
             [torch.nn.Parameter(torch.tensor([1.0], dtype=torch.float32))],
-            lr=0.000875,
+            lr=learning_rate,
         )
         config = TrainConfig.from_dict(
             {
                 "train_datasets": ["/tmp/train.binpack"],
                 "total_train_positions": 10_000,
                 "epoch_positions": 1_000,
-                "lr_gamma": 0.992,
+                "learning_rate": learning_rate,
             }
         )
         scheduler = _create_scheduler(config, optimizer, torch)
@@ -217,7 +228,8 @@ class ValidationTrainingTests(unittest.TestCase):
             positions_after_step=3_100,
         )
 
-        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 0.000875 * (0.992**3))
+        expected = self._cosine_epoch_lr(learning_rate, learning_rate * 0.01, epoch_step=3, t_max=10)
+        self.assertAlmostEqual(optimizer.param_groups[0]["lr"], expected)
 
     def test_prefetched_batches_match_synchronous_order(self) -> None:
         expected_batches = [_make_native_batch([1.0, 2.0]), _make_native_batch([3.0]), _make_native_batch([4.0, 5.0])]
