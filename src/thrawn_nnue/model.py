@@ -13,9 +13,6 @@ def _require_torch():
         raise RuntimeError("PyTorch is required for model and training commands")
 
 
-FINAL_EVAL_SCALE = 16.0
-
-
 if torch is not None:
 
     class HalfKPNNUE(nn.Module):
@@ -24,9 +21,9 @@ if torch is not None:
             *,
             num_features: int = 40960,
             num_factor_features: int = 640,
-            ft_size: int = 256,
-            l1_size: int = 32,
-            l2_size: int = 32,
+            ft_size: int = 1024,
+            l1_size: int = 256,
+            l2_size: int = 64,
         ):
             super().__init__()
             self.num_features = num_features
@@ -41,7 +38,6 @@ if torch is not None:
             self.l1 = nn.Linear(ft_size * 2, l1_size)
             self.l2 = nn.Linear(l1_size, l2_size)
             self.output = nn.Linear(l2_size, 1)
-            self.final_eval_scale = FINAL_EVAL_SCALE
             self.reset_parameters()
 
         def reset_parameters(self) -> None:
@@ -83,7 +79,7 @@ if torch is not None:
             hidden0 = torch.clamp(combined, 0.0, 1.0)
             hidden1 = torch.clamp(self.l1(hidden0), 0.0, 1.0)
             hidden2 = torch.clamp(self.l2(hidden1), 0.0, 1.0)
-            return self.output(hidden2) * self.final_eval_scale
+            return self.output(hidden2)
 
         def coalesced_feature_transform(self) -> tuple[torch.Tensor, torch.Tensor]:
             repeats = self.num_features // self.num_factor_features

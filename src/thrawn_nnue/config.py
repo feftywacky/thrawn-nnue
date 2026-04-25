@@ -27,20 +27,30 @@ class TrainConfig:
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
     output_regularization: float = 0.0
+    sanity_anchor_weight: float = 0.0
     clip_grad_norm: float = 1.0
     amp: bool = True
     feature_set: str = "halfkp"
     num_features: int = 40960
     num_factor_features: int = 640
     max_active_features: int = 30
-    ft_size: int = 256
-    l1_size: int = 32
-    l2_size: int = 32
+    ft_size: int = 1024
+    l1_size: int = 256
+    l2_size: int = 64
     output_perspective: str = "stm"
     score_clip: float = 4000.0
-    cp_loss_beta: float = 128.0
-    wdl_scale: float = 410.0
-    wdl_lambda: float = 0.1
+    wdl_lambda: float = 1.0
+    wdl_in_offset: float = 270.0
+    wdl_out_offset: float = 270.0
+    wdl_in_scaling: float = 340.0
+    wdl_out_scaling: float = 380.0
+    wdl_loss_power: float = 2.5
+    skip_capture_positions: bool = True
+    skip_decisive_score_mismatch: bool = True
+    decisive_score_mismatch_margin: float = 1000.0
+    skip_draw_score_mismatch: bool = True
+    draw_score_mismatch_margin: float = 1000.0
+    max_abs_score: float = 0.0
     export_ft_scale: float = 127.0
     export_dense_scale: float = 64.0
     export_description: str = "thrawn halfkp nnue"
@@ -96,12 +106,18 @@ class TrainConfig:
             raise ValueError("validation_positions must be >= 0")
         if self.score_clip < 0.0:
             raise ValueError("score_clip must be >= 0")
-        if self.cp_loss_beta <= 0.0:
-            raise ValueError("cp_loss_beta must be positive")
-        if self.wdl_scale <= 0.0:
-            raise ValueError("wdl_scale must be positive")
-        if self.wdl_lambda < 0.0:
-            raise ValueError("wdl_lambda must be >= 0")
+        if self.wdl_lambda < 0.0 or self.wdl_lambda > 1.0:
+            raise ValueError("wdl_lambda must be between 0 and 1")
+        if self.wdl_in_scaling <= 0.0 or self.wdl_out_scaling <= 0.0:
+            raise ValueError("wdl scaling values must be positive")
+        if self.wdl_loss_power <= 0.0:
+            raise ValueError("wdl_loss_power must be positive")
+        if self.decisive_score_mismatch_margin < 0.0:
+            raise ValueError("decisive_score_mismatch_margin must be >= 0")
+        if self.draw_score_mismatch_margin < 0.0:
+            raise ValueError("draw_score_mismatch_margin must be >= 0")
+        if self.max_abs_score < 0.0:
+            raise ValueError("max_abs_score must be >= 0")
         if self.export_ft_scale <= 0.0 or self.export_dense_scale <= 0.0:
             raise ValueError("export scales must be > 0")
         if self.num_loader_threads <= 0:
@@ -118,6 +134,8 @@ class TrainConfig:
             raise ValueError("weight_decay must be >= 0")
         if self.output_regularization < 0.0:
             raise ValueError("output_regularization must be >= 0")
+        if self.sanity_anchor_weight < 0.0:
+            raise ValueError("sanity_anchor_weight must be >= 0")
         if self.clip_grad_norm <= 0.0:
             raise ValueError("clip_grad_norm must be positive")
         if self.ft_size <= 0 or self.l1_size <= 0 or self.l2_size <= 0:

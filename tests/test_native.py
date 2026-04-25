@@ -35,6 +35,13 @@ class NativeTests(unittest.TestCase):
                 self.assertAlmostEqual(float(batch.score_cp[0]), 24.0 * 100.0 / 208.0, places=5)
                 self.assertAlmostEqual(float(batch.score_cp[1]), 31.0 * 100.0 / 208.0, places=5)
 
+            with BinpackStream([path], num_threads=1, cyclic=False, max_abs_score=10.0) as stream:
+                batch = stream.next_batch(3)
+                self.assertIsNotNone(batch)
+                assert batch is not None
+                self.assertEqual(batch.score_cp.shape, (1,))
+                self.assertAlmostEqual(float(batch.score_cp[0]), -12.0 * 100.0 / 208.0, places=5)
+
 
 if __name__ == "__main__":
     unittest.main()

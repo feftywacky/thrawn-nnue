@@ -19,6 +19,7 @@ except ModuleNotFoundError:
 from thrawn_nnue.native import NativeBatch, write_fixture_binpack
 from thrawn_nnue.config import TrainConfig
 from thrawn_nnue.training import (
+    _add_sanity_anchor_loss,
     _advance_scheduler_for_epoch_boundaries,
     _PreparedBatchSource,
     _clip_model_weights,
@@ -26,6 +27,7 @@ from thrawn_nnue.training import (
     _create_state,
     _normalize_teacher_scores,
     _run_validation,
+    _sanity_anchor_loss,
     _scalar_head_loss,
     train_from_config,
 )
@@ -36,8 +38,6 @@ def _make_native_batch(values: list[float]) -> NativeBatch:
     return NativeBatch(
         white_indices=np.zeros((size, 30), dtype=np.int32),
         black_indices=np.zeros((size, 30), dtype=np.int32),
-        white_counts=np.full((size,), 15, dtype=np.int32),
-        black_counts=np.full((size,), 15, dtype=np.int32),
         stm=np.ones((size,), dtype=np.float32),
         score_cp=np.asarray(values, dtype=np.float32),
         result_wdl=np.full((size,), 0.5, dtype=np.float32),
@@ -93,9 +93,12 @@ class ValidationTrainingTests(unittest.TestCase):
             prediction,
             target,
             result,
-            wdl_scale=410.0,
-            cp_loss_beta=128.0,
-            wdl_lambda=0.1,
+            wdl_eval_weight=0.9,
+            wdl_in_offset=270.0,
+            wdl_out_offset=270.0,
+            wdl_in_scaling=4000.0,
+            wdl_out_scaling=4000.0,
+            wdl_loss_power=2.5,
             output_regularization=0.0,
             torch=torch,
         )
@@ -103,6 +106,71 @@ class ValidationTrainingTests(unittest.TestCase):
         self.assertIn("cp_loss", losses)
         self.assertIn("wdl_loss", losses)
         self.assertGreater(float(losses["loss"].item()), 0.0)
+
+    def test_sanity_anchor_loss_pulls_neutral_positions_toward_zero_cp(self) -> None:
+        class _ConstantModel(torch.nn.Module):
+            def __init__(self, value: float) -> None:
+                super().__init__()
+                self.value = value
+
+            def forward(self, white_indices, black_indices, stm):
+                return torch.full((white_indices.shape[0], 1), self.value, dtype=torch.float32)
+
+        config = TrainConfig.from_dict(
+            {
+                "train_datasets": ["/tmp/train.binpack"],
+                "total_train_positions": 10_000,
+                "epoch_positions": 1_000,
+                "wdl_out_scaling": 4000.0,
+            }
+        )
+
+        zero_loss = _sanity_anchor_loss(_ConstantModel(0.0), config, torch, "cpu")
+        drift_loss = _sanity_anchor_loss(_ConstantModel(1000.0), config, torch, "cpu")
+
+        self.assertAlmostEqual(float(zero_loss.item()), 0.0)
+        self.assertAlmostEqual(float(drift_loss.item()), (1000.0 / 4000.0) ** 2)
+
+    def test_sanity_anchor_loss_is_additive_and_does_not_change_wdl_formula(self) -> None:
+        class _ConstantModel(torch.nn.Module):
+            def forward(self, white_indices, black_indices, stm):
+                return torch.full((white_indices.shape[0], 1), 1000.0, dtype=torch.float32)
+
+        prediction = torch.tensor([[150.0], [-50.0]], dtype=torch.float32)
+        target = torch.tensor([[100.0], [-100.0]], dtype=torch.float32)
+        result = torch.tensor([[1.0], [0.0]], dtype=torch.float32)
+        config = TrainConfig.from_dict(
+            {
+                "train_datasets": ["/tmp/train.binpack"],
+                "total_train_positions": 10_000,
+                "epoch_positions": 1_000,
+                "wdl_out_scaling": 4000.0,
+                "sanity_anchor_weight": 0.01,
+            }
+        )
+        losses = _scalar_head_loss(
+            prediction,
+            target,
+            result,
+            wdl_eval_weight=0.9,
+            wdl_in_offset=270.0,
+            wdl_out_offset=270.0,
+            wdl_in_scaling=4000.0,
+            wdl_out_scaling=4000.0,
+            wdl_loss_power=2.5,
+            output_regularization=0.0,
+            torch=torch,
+        )
+
+        updated = _add_sanity_anchor_loss(losses, _ConstantModel(), config, torch, "cpu")
+
+        expected_anchor = (1000.0 / 4000.0) ** 2
+        self.assertAlmostEqual(float(updated["sanity_anchor_loss"].item()), expected_anchor)
+        self.assertTrue(torch.equal(updated["cp_loss"], losses["cp_loss"]))
+        self.assertAlmostEqual(
+            float(updated["loss"].item()),
+            float(losses["loss"].item()) + config.sanity_anchor_weight * expected_anchor,
+        )
 
     def test_clip_model_weights_respects_dense_export_scale(self) -> None:
         class _Layer:

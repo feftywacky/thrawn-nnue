@@ -28,7 +28,7 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.validation_positions, 0)
         self.assertEqual(config.feature_set, "halfkp")
 
-    def test_score_clip_and_cp_loss_beta_are_validated(self) -> None:
+    def test_score_clip_is_validated(self) -> None:
         with self.assertRaises(ValueError):
             TrainConfig.from_dict(
                 {
@@ -38,15 +38,25 @@ class ValidationConfigTests(unittest.TestCase):
                     "score_clip": -1.0,
                 }
             )
-        with self.assertRaises(ValueError):
-            TrainConfig.from_dict(
-                {
-                    "train_datasets": ["/tmp/train.binpack"],
-                    "total_train_positions": 10_000,
-                    "epoch_positions": 1_000,
-                    "cp_loss_beta": 0.0,
-                }
-            )
+
+    def test_stockfish_wdl_and_filter_fields_are_validated(self) -> None:
+        valid = {
+            "train_datasets": ["/tmp/train.binpack"],
+            "total_train_positions": 10_000,
+            "epoch_positions": 1_000,
+        }
+        for key, value in (
+            ("wdl_lambda", 1.1),
+            ("wdl_in_scaling", 0.0),
+            ("wdl_out_scaling", 0.0),
+            ("wdl_loss_power", 0.0),
+            ("decisive_score_mismatch_margin", -1.0),
+            ("draw_score_mismatch_margin", -1.0),
+            ("max_abs_score", -1.0),
+            ("sanity_anchor_weight", -1.0),
+        ):
+            with self.assertRaises(ValueError):
+                TrainConfig.from_dict({**valid, key: value})
 
     def test_prefetch_batches_accepts_zero_and_rejects_negative_values(self) -> None:
         config = TrainConfig.from_dict(
@@ -109,6 +119,7 @@ class ValidationConfigTests(unittest.TestCase):
             ("lr_drop_fractions", [0.8, 0.95]),
             ("lr_drop_factor", 0.1),
             ("lr_gamma", 0.992),
+            ("cp_loss_beta", 128.0),
         ):
             with self.assertRaisesRegex(ValueError, "Unknown config keys"):
                 TrainConfig.from_dict(
@@ -171,21 +182,34 @@ class ValidationConfigTests(unittest.TestCase):
                 [str((valid_dir / "c.binpack").resolve())],
             )
 
-    def test_default_reference_config_loads_with_halfkp_settings(self) -> None:
-        config_path = Path(__file__).resolve().parents[1] / "configs" / "v1.toml"
-        config = TrainConfig.from_toml(config_path)
+    def test_default_config_uses_current_large_halfkp_shape(self) -> None:
+        config = TrainConfig(
+            train_datasets=["/tmp/train.binpack"],
+            total_train_positions=1,
+            epoch_positions=1,
+        )
+        config.validate()
 
-        self.assertEqual(config.run_name, "v1")
-        self.assertEqual(config.batch_size, 32_768)
-        self.assertEqual(config.total_train_positions, 5_000_000_000)
-        self.assertEqual(config.epoch_positions, 100_000_000)
-        self.assertEqual(config.ft_size, 256)
-        self.assertEqual(config.l1_size, 32)
-        self.assertEqual(config.l2_size, 32)
+        self.assertEqual(config.ft_size, 1024)
+        self.assertEqual(config.l1_size, 256)
+        self.assertEqual(config.l2_size, 64)
         self.assertEqual(config.num_features, 40_960)
         self.assertEqual(config.max_active_features, 30)
-        self.assertEqual(config.score_clip, 4000.0)
-        self.assertEqual(config.wdl_lambda, 0.5)
+
+    def test_v2_reference_config_loads_with_larger_halfkp_shape(self) -> None:
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "v2.toml"
+        config = TrainConfig.from_toml(config_path)
+
+        self.assertEqual(config.run_name, "v2")
+        self.assertEqual(config.ft_size, 1024)
+        self.assertEqual(config.l1_size, 256)
+        self.assertEqual(config.l2_size, 64)
+        self.assertEqual(config.num_features, 40_960)
+        self.assertEqual(config.score_clip, 8000.0)
+        self.assertEqual(config.wdl_lambda, 0.9)
+        self.assertEqual(config.wdl_in_scaling, 4000.0)
+        self.assertEqual(config.wdl_out_scaling, 4000.0)
+        self.assertEqual(config.sanity_anchor_weight, 0.01)
 
 
 if __name__ == "__main__":

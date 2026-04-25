@@ -12,11 +12,13 @@ from .features import active_feature_indices
 
 
 MAGIC = b"THNNUE\x00\x01"
-VERSION = 5
+VERSION = 6
 FEATURE_SET_ID = "halfkp_v1"
 OUTPUT_PERSPECTIVE_STM = 1
+EXPECTED_NUM_FEATURES = 40960
+MAX_DESCRIPTION_BYTES = 1_000_000
 HEADER_PREFIX_STRUCT = struct.Struct("<8sI")
-HEADER_REST_STRUCT = struct.Struct("<16sIIIIIfffffI")
+HEADER_REST_STRUCT = struct.Struct("<16sIIIIIffffI")
 DEFAULT_VERIFICATION_FENS = [
     "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b - - 0 1",
     "r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/2P5/PP3PPP/RNBQKBNR b - - 0 3",
@@ -42,7 +44,6 @@ class ExportedNetwork:
     l1_scale: float
     l2_scale: float
     out_scale: float
-    wdl_scale: float
     ft_bias: np.ndarray
     ft_weight: np.ndarray
     l1_bias: np.ndarray
@@ -89,9 +90,7 @@ def export_checkpoint(checkpoint_path: str | Path, output_path: str | Path) -> P
 
 def load_export(path: str | Path) -> ExportedNetwork:
     with Path(path).open("rb") as handle:
-        raw_prefix = handle.read(HEADER_PREFIX_STRUCT.size)
-        if len(raw_prefix) != HEADER_PREFIX_STRUCT.size:
-            raise ValueError("File too small to contain a Thrawn NNUE header")
+        raw_prefix = _read_exact(handle, HEADER_PREFIX_STRUCT.size, "header prefix")
         magic, version = HEADER_PREFIX_STRUCT.unpack(raw_prefix)
 
         if magic != MAGIC:
@@ -99,9 +98,7 @@ def load_export(path: str | Path) -> ExportedNetwork:
         if version != VERSION:
             raise ValueError(f"Unsupported .nnue version: {version}")
 
-        raw_rest = handle.read(HEADER_REST_STRUCT.size)
-        if len(raw_rest) != HEADER_REST_STRUCT.size:
-            raise ValueError("File too small to contain a Thrawn NNUE header")
+        raw_rest = _read_exact(handle, HEADER_REST_STRUCT.size, "header body")
         (
             feature_set,
             num_features,
@@ -113,25 +110,45 @@ def load_export(path: str | Path) -> ExportedNetwork:
             l1_scale,
             l2_scale,
             out_scale,
-            wdl_scale,
             description_length,
         ) = HEADER_REST_STRUCT.unpack(raw_rest)
 
         if feature_set.rstrip(b"\x00").decode("ascii") != FEATURE_SET_ID:
             raise ValueError("Unexpected feature-set identifier")
-        if output_perspective != OUTPUT_PERSPECTIVE_STM:
-            raise ValueError("Only side-to-move exports are supported")
+        _validate_export_header(
+            num_features=num_features,
+            ft_size=ft_size,
+            l1_size=l1_size,
+            l2_size=l2_size,
+            output_perspective=output_perspective,
+            ft_scale=ft_scale,
+            l1_scale=l1_scale,
+            l2_scale=l2_scale,
+            out_scale=out_scale,
+            description_length=description_length,
+        )
 
-        description = handle.read(description_length).decode("utf-8")
-        ft_bias = np.frombuffer(handle.read(ft_size * 2), dtype="<i2").copy()
-        ft_weight = np.frombuffer(handle.read(num_features * ft_size * 2), dtype="<i2").copy()
+        description = _read_exact(handle, description_length, "description").decode("utf-8")
+        ft_bias = np.frombuffer(_read_exact(handle, ft_size * 2, "ft_bias"), dtype="<i2").copy()
+        ft_weight = np.frombuffer(
+            _read_exact(handle, num_features * ft_size * 2, "ft_weight"),
+            dtype="<i2",
+        ).copy()
         ft_weight = ft_weight.reshape(num_features, ft_size)
-        l1_bias = np.frombuffer(handle.read(l1_size * 4), dtype="<i4").copy()
-        l1_weight = np.frombuffer(handle.read(ft_size * 2 * l1_size), dtype=np.int8).copy().reshape(ft_size * 2, l1_size)
-        l2_bias = np.frombuffer(handle.read(l2_size * 4), dtype="<i4").copy()
-        l2_weight = np.frombuffer(handle.read(l1_size * l2_size), dtype=np.int8).copy().reshape(l1_size, l2_size)
-        out_bias = np.frombuffer(handle.read(4), dtype="<i4").copy()
-        out_weight = np.frombuffer(handle.read(l2_size), dtype=np.int8).copy()
+        l1_bias = np.frombuffer(_read_exact(handle, l1_size * 4, "l1_bias"), dtype="<i4").copy()
+        l1_weight = np.frombuffer(
+            _read_exact(handle, ft_size * 2 * l1_size, "l1_weight"),
+            dtype=np.int8,
+        ).copy().reshape(ft_size * 2, l1_size)
+        l2_bias = np.frombuffer(_read_exact(handle, l2_size * 4, "l2_bias"), dtype="<i4").copy()
+        l2_weight = np.frombuffer(
+            _read_exact(handle, l1_size * l2_size, "l2_weight"),
+            dtype=np.int8,
+        ).copy().reshape(l1_size, l2_size)
+        out_bias = np.frombuffer(_read_exact(handle, 4, "out_bias"), dtype="<i4").copy()
+        out_weight = np.frombuffer(_read_exact(handle, l2_size, "out_weight"), dtype=np.int8).copy()
+        if handle.read(1):
+            raise ValueError("Unexpected trailing data in .nnue export")
         return ExportedNetwork(
             description=description,
             version=version,
@@ -143,7 +160,6 @@ def load_export(path: str | Path) -> ExportedNetwork:
             l1_scale=l1_scale,
             l2_scale=l2_scale,
             out_scale=out_scale,
-            wdl_scale=wdl_scale,
             ft_bias=ft_bias,
             ft_weight=ft_weight,
             l1_bias=l1_bias,
@@ -153,6 +169,45 @@ def load_export(path: str | Path) -> ExportedNetwork:
             out_bias=out_bias,
             out_weight=out_weight,
         )
+
+
+def _read_exact(handle, size: int, label: str) -> bytes:
+    data = handle.read(size)
+    if len(data) != size:
+        raise ValueError(f"File ended while reading {label}: expected {size} bytes, got {len(data)}")
+    return data
+
+
+def _validate_export_header(
+    *,
+    num_features: int,
+    ft_size: int,
+    l1_size: int,
+    l2_size: int,
+    output_perspective: int,
+    ft_scale: float,
+    l1_scale: float,
+    l2_scale: float,
+    out_scale: float,
+    description_length: int,
+) -> None:
+    if num_features != EXPECTED_NUM_FEATURES:
+        raise ValueError(f"Unexpected num_features: {num_features}")
+    for name, size in (("ft_size", ft_size), ("l1_size", l1_size), ("l2_size", l2_size)):
+        if size <= 0:
+            raise ValueError(f"{name} must be positive")
+    if output_perspective != OUTPUT_PERSPECTIVE_STM:
+        raise ValueError("Only side-to-move exports are supported")
+    for name, scale in (
+        ("ft_scale", ft_scale),
+        ("l1_scale", l1_scale),
+        ("l2_scale", l2_scale),
+        ("out_scale", out_scale),
+    ):
+        if not np.isfinite(scale) or scale <= 0.0:
+            raise ValueError(f"{name} must be finite and positive")
+    if description_length > MAX_DESCRIPTION_BYTES:
+        raise ValueError(f"description_length is too large: {description_length}")
 
 
 def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list[str] | None = None) -> dict[str, Any]:
@@ -184,6 +239,13 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
         predictions = [float(value) for value in predictions.reshape(-1).cpu().tolist()]
 
     exported = load_export(nnue_path)
+    if (
+        exported.num_features != config.num_features
+        or exported.ft_size != config.ft_size
+        or exported.l1_size != config.l1_size
+        or exported.l2_size != config.l2_size
+    ):
+        raise ValueError("Export dimensions do not match checkpoint config")
     exported_predictions = evaluate_export(exported, fens)
     abs_errors = [abs(a - b) for a, b in zip(predictions, exported_predictions, strict=True)]
 
@@ -291,9 +353,8 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
     l1_bias = model.l1.bias.detach().cpu().numpy()
     l2_weight = model.l2.weight.detach().cpu().numpy().T
     l2_bias = model.l2.bias.detach().cpu().numpy()
-    final_eval_scale = float(getattr(model, "final_eval_scale", 1.0))
-    out_weight = model.output.weight.detach().cpu().numpy().reshape(-1) * final_eval_scale
-    out_bias = model.output.bias.detach().cpu().numpy() * final_eval_scale
+    out_weight = model.output.weight.detach().cpu().numpy().reshape(-1)
+    out_bias = model.output.bias.detach().cpu().numpy()
 
     ft_scale = _fit_quantization_scale([ft_bias, ft_weight], config.export_ft_scale, np.int16)
     l1_scale = _fit_quantization_scale([l1_weight], config.export_dense_scale, np.int8)
@@ -311,7 +372,6 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
         l1_scale=l1_scale,
         l2_scale=l2_scale,
         out_scale=out_scale,
-        wdl_scale=config.wdl_scale,
         ft_bias=_quantize(ft_bias, ft_scale, np.int16),
         ft_weight=_quantize(ft_weight, ft_scale, np.int16),
         l1_bias=_quantize(l1_bias, l1_scale, np.int32),
@@ -387,7 +447,6 @@ def _write_export(handle, exported: ExportedNetwork) -> None:
         float(exported.l1_scale),
         float(exported.l2_scale),
         float(exported.out_scale),
-        float(exported.wdl_scale),
         len(description_bytes),
     )
     handle.write(header)

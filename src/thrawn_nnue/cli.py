@@ -11,6 +11,13 @@ from .native import discover_binpack_files, inspect_binpack, inspect_binpack_col
 from .training import resume_training, train_from_config
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise ValueError("must be >= 1")
+    return parsed
+
+
 def main() -> None:
     parser = ArgumentParser(prog="thrawn-nnue")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -40,6 +47,12 @@ def main() -> None:
         help="Inspect all .binpack files under a directory and aggregate the results",
     )
     inspect_all_parser.add_argument("--path", required=True)
+    inspect_all_parser.add_argument(
+        "--jobs",
+        type=_positive_int,
+        default=None,
+        help="Number of .binpack files to inspect concurrently; defaults to available CPUs capped by file count",
+    )
 
     metrics_parser = subparsers.add_parser("metrics", help="Summarize a training run and generate plots")
     metrics_parser.add_argument("--run-dir", required=True)
@@ -70,13 +83,13 @@ def main() -> None:
 
     if args.command == "inspect-binpack":
         stats = inspect_binpack(args.path)
-        print(json.dumps(stats, indent=2, sort_keys=True))
+        print(json.dumps(stats, indent=2))
         return
 
     if args.command == "inspect-binpack-dir":
         paths = discover_binpack_files(args.path)
-        stats = inspect_binpack_collection(paths)
-        print(json.dumps(stats, indent=2, sort_keys=True))
+        stats = inspect_binpack_collection(paths, jobs=args.jobs)
+        print(json.dumps(stats, indent=2))
         return
 
     if args.command == "metrics":

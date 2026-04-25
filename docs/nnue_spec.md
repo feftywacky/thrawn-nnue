@@ -1,217 +1,97 @@
-# NNUE Specification
+# Thrawn NNUE Engine Integration Guide
 
-This document describes the production HalfKP NNUE contract for this repository and how to integrate it into a C++ engine.
+This document is the engine-side integration contract for Thrawn's exported HalfKP NNUE files. It is written for a C or C++ chess engine with efficiently updatable accumulators and SIMD inference paths for AVX2 and NEON.
 
-## 1. Recommended Network
+The exported network is a scalar evaluator. It returns a centipawn-like score from the side-to-move perspective. WDL is used only during training loss computation and is not part of runtime inference.
 
-The production network is a fixed scalar HalfKP NNUE:
+## 1. Runtime Contract
 
-- feature space: `40960`
-- factor space: `640` training-only `P` factors
-- per-perspective accumulator size: `256`
-- dense path: `512 -> 32 -> 32 -> 1`
-- output perspective: side to move
-- raw output: direct centipawns
+The exported architecture is described by the header dimensions. The current production shape is:
 
-The architecture is:
+| Config | Feature Transformer | Dense Path |
+|---|---:|---:|
+| v2 | `40960 -> 1024` | `2048 -> 256 -> 64 -> 1` |
+
+This keeps classic HalfKP features and spends most of the extra capacity in the feature transformer, which is the part that stores king-piece feature knowledge. The dense path is deliberately wider than older HalfKP nets, but keeps a tapering shape so the first dense layer can mix the larger concatenated accumulators before the compact scalar head.
+
+For the current v2 config, the runtime graph is:
 
 ```text
-HalfKP FT: 40960 -> 256
-two accumulators: white, black
-combine by side to move: [us_acc | them_acc] -> 512
-Clipped ReLU
-Linear(512, 32)
-Clipped ReLU
-Linear(32, 32)
-Clipped ReLU
-Linear(32, 1)
+HalfKP feature transformer: 40960 -> 1024
+two perspective accumulators: white_acc[1024], black_acc[1024]
+side-to-move concat: [us_acc | them_acc] -> 2048
+clipped ReLU
+dense: 2048 -> 256
+clipped ReLU
+dense: 256 -> 64
+clipped ReLU
+output: 64 -> 1
 ```
 
-The trainer uses classic HalfKP with training-time `P` factorization. Exported nets contain only coalesced real HalfKP weights, never the factor table.
+Example current v2 constants:
 
-## 2. Feature Indexing Contract
-
-Each perspective uses its own king square and excludes both kings from the active piece list.
-
-### 2.1 Piece Buckets
-
-Per non-king piece:
-
-```text
-piece_type_index:
-P=0 N=1 B=2 R=3 Q=4
+```cpp
+static constexpr int NumFeatures = 40960;
+static constexpr int NumFactorFeatures = 640;
+static constexpr int MaxActiveFeatures = 30;
+static constexpr int FtSize = 1024;
+static constexpr int L1Size = 256;
+static constexpr int L2Size = 64;
 ```
 
-Relative color bit:
+The trainer uses a virtual `P` factor table. Exported `.nnue` files contain only coalesced real HalfKP rows; the engine does not load or apply the factor table.
 
-- `0` = friendly piece from that perspective
-- `1` = enemy piece from that perspective
-
-Bucket formula:
+The runtime output is direct cp:
 
 ```text
-piece_bucket = piece_type_index * 2 + relative_color_bit
+eval(position) -> score_cp_from_side_to_move
 ```
 
-This gives `10` buckets total.
+Do not invert a sigmoid or WDL transform. The search should consume the scalar output directly, then apply the engine's usual value clamping, contempt, draw scaling, mate bounds, or tempo policy.
 
-### 2.2 Orientation
-
-For the white perspective:
-
-- white king is `our king`
-- white pieces are friendly
-- black pieces are enemy
-- squares are not flipped
-
-For the black perspective:
-
-- black king is `our king`
-- black pieces are friendly
-- white pieces are enemy
-- squares are flipped vertically
-
-Vertical flip:
+Training binpack scores are converted from Stockfish internal units before loss computation:
 
 ```text
-oriented_square = (7 - rank) * 8 + file
+score_cp = raw_score * 100 / 208
 ```
 
-### 2.3 HalfKP Index
-
-Let:
-
-- `ksq` = our king square for the perspective
-- `sq` = the non-king piece square
-- `bucket` = piece bucket from above
-- `oriented_ksq` = oriented king square
-- `oriented_sq` = oriented piece square
-
-Then:
+The WDL teacher target is an expected score derived from Stockfish's win/draw/loss transform, not a plain sigmoid over cp:
 
 ```text
-p_index      = bucket * 64 + oriented_sq
-halfkp_index = oriented_ksq * 640 + p_index
+win = sigmoid((cp - offset) / scale)
+loss = sigmoid((-cp - offset) / scale)
+draw = 1 - win - loss
+expectation = win + 0.5 * draw
 ```
 
-Because:
+With `wdl_lambda = 0.9`, training uses 90% teacher expectation and 10% game-result expectation.
+
+## 2. File Format
+
+All multi-byte values are little-endian. Export version is `6`.
+
+Header:
 
 ```text
-64 king squares * 10 buckets * 64 piece squares = 40960 features
-```
-
-The factor-space `P` index is exactly `p_index`.
-
-### 2.4 Active Features
-
-Active features are:
-
-- all non-king pieces for the white perspective, indexed with the white king square
-- all non-king pieces for the black perspective, indexed with the black king square
-
-At most `30` features are active per perspective.
-
-## 3. Accumulator Rules
-
-Per perspective:
-
-```text
-acc = ft_bias + sum(ft_weight[halfkp_features])
-```
-
-Side to move affects only concatenation order:
-
-```text
-if stm == white:
-    combined = [white_acc | black_acc]
-else:
-    combined = [black_acc | white_acc]
-```
-
-Forward pass:
-
-```text
-hidden0 = clamp(combined, 0, 1)
-hidden1 = clamp(hidden0 @ l1_weight + l1_bias, 0, 1)
-hidden2 = clamp(hidden1 @ l2_weight + l2_bias, 0, 1)
-output  = hidden2 @ out_weight + out_bias
-```
-
-The output is already a centipawn value from the side-to-move perspective. The engine should not apply any additional calibration, normalization constant, or start-position bias subtraction.
-
-### 3.1 Incremental Update Semantics
-
-Non-king moves:
-
-- update the perspective whose non-king feature changed with add/remove row operations
-- if the moved/captured/promoted piece is not a king, the opposing accumulator usually changes only where that piece appears as friendly/enemy
-
-King moves:
-
-- refresh the moving side's perspective accumulator from scratch because every HalfKP feature depends on `our king square`
-- the opposite perspective does not require a king-square refresh because enemy kings are excluded from the feature list
-
-In practice:
-
-- white king move: refresh white accumulator, patch black accumulator only if another non-king piece changed
-- black king move: refresh black accumulator, patch white accumulator only if another non-king piece changed
-
-## 4. Training-Time Factorization
-
-Training uses a virtual `P` factor table:
-
-```text
-P: 640 -> 256
-```
-
-During training, each active feature contributes:
-
-```text
-effective_row = ft_weight[halfkp_index] + p_weight[p_index]
-```
-
-So:
-
-```text
-acc = ft_bias + sum(ft_weight[halfkp_index] + p_weight[p_index])
-```
-
-At export time the factor table is coalesced:
-
-```text
-coalesced_ft_weight[halfkp_index] =
-    ft_weight[halfkp_index] + p_weight[halfkp_index % 640]
-```
-
-Only `coalesced_ft_weight` is written to the `.nnue` file.
-
-## 5. Export Contract
-
-The format is export version `5`.
-
-Header (all little-endian):
-
-```text
-magic[8]                = "THNNUE\0\1"
-uint32 version          = 5
-char feature_set[16]    = "halfkp_v1"
-uint32 num_features
-uint32 ft_size
-uint32 l1_size
-uint32 l2_size
-uint32 output_perspective
+char   magic[8]             = "THNNUE\0\1"
+uint32 version              = 6
+char   feature_set[16]      = "halfkp_v1\0..."  // feature-family id, not the net size
+uint32 num_features         = 40960
+uint32 ft_size              // 1024
+uint32 l1_size              // 256
+uint32 l2_size              // 64
+uint32 output_perspective   = 1
 float  ft_scale
 float  l1_scale
 float  l2_scale
 float  out_scale
-float  wdl_scale
 uint32 description_length
 ```
 
-Payload:
+Payload follows immediately:
 
 ```text
-description bytes
+uint8  description[description_length]
 int16  ft_bias[ft_size]
 int16  ft_weight[num_features][ft_size]
 int32  l1_bias[l1_size]
@@ -222,212 +102,533 @@ int32  out_bias[1]
 int8   out_weight[l2_size]
 ```
 
-Quantization:
+`output_perspective = 1` means side-to-move output. Reject any other value.
 
-| Parameter | Scale | Stored Type |
-|---|---|---|
-| `ft_bias` | `ft_scale` | int16 |
-| `ft_weight` | `ft_scale` | int16 |
-| `l1_bias` | `l1_scale` | int32 |
-| `l1_weight` | `l1_scale` | int8 |
-| `l2_bias` | `l2_scale` | int32 |
-| `l2_weight` | `l2_scale` | int8 |
-| `out_bias` | `out_scale` | int32 |
-| `out_weight` | `out_scale` | int8 |
+Recommended loader checks:
 
-Dequantization:
+- `magic == "THNNUE\0\1"`
+- `version == 6`
+- `feature_set == "halfkp_v1"` (the classic HalfKP feature-family id)
+- dimensions match the engine-supported production shape above
+- `output_perspective == 1`
+- file has no trailing short reads
+- all tensors are aligned or copied into aligned engine-owned storage
 
-```text
-float_value = quantized / scale
-```
+## 3. Quantization Model
 
-## 6. Scalar Reference Inference
-
-This is the reference engine-side float logic:
-
-```cpp
-float evaluate_float(const Net& net,
-                     const int16_t white_acc[256],
-                     const int16_t black_acc[256],
-                     bool white_to_move) {
-    float combined[512];
-    const int16_t* us   = white_to_move ? white_acc : black_acc;
-    const int16_t* them = white_to_move ? black_acc : white_acc;
-
-    for (int i = 0; i < 256; ++i) {
-        combined[i]       = std::clamp(float(us[i])   / net.ft_scale, 0.0f, 1.0f);
-        combined[256 + i] = std::clamp(float(them[i]) / net.ft_scale, 0.0f, 1.0f);
-    }
-
-    float h1[32];
-    for (int j = 0; j < 32; ++j) {
-        float sum = float(net.l1_bias[j]) / net.l1_scale;
-        for (int i = 0; i < 512; ++i)
-            sum += combined[i] * (float(net.l1_weight[i][j]) / net.l1_scale);
-        h1[j] = std::clamp(sum, 0.0f, 1.0f);
-    }
-
-    float h2[32];
-    for (int j = 0; j < 32; ++j) {
-        float sum = float(net.l2_bias[j]) / net.l2_scale;
-        for (int i = 0; i < 32; ++i)
-            sum += h1[i] * (float(net.l2_weight[i][j]) / net.l2_scale);
-        h2[j] = std::clamp(sum, 0.0f, 1.0f);
-    }
-
-    float out = float(net.out_bias[0]) / net.out_scale;
-    for (int i = 0; i < 32; ++i)
-        out += h2[i] * (float(net.out_weight[i]) / net.out_scale);
-    return out; // direct centipawns from STM
-}
-```
-
-## 7. Quantized Integer Inference
-
-Define:
+Stored weights are quantized by simple symmetric scaling:
 
 ```text
-QA = ft_scale
-Q1 = l1_scale
-Q2 = l2_scale
-QO = out_scale
+float_value = integer_value / scale
+integer_value = round(float_value * scale)
 ```
 
-### 7.1 Accumulator Refresh
+Scales are stored in the header:
 
 ```cpp
-void refresh(int16_t acc[256], const int16_t ft_bias[256],
-             const int16_t ft_weight[][256], const int* features, int count)
-{
-    memcpy(acc, ft_bias, 256 * sizeof(int16_t));
-    for (int f = 0; f < count; ++f)
-        for (int i = 0; i < 256; ++i)
-            acc[i] += ft_weight[features[f]][i];
+float ft_scale;
+float l1_scale;
+float l2_scale;
+float out_scale;
+```
+
+Tensor scales:
+
+| Tensor | Stored Type | Scale |
+|---|---:|---:|
+| `ft_bias` | `int16` | `ft_scale` |
+| `ft_weight` | `int16` | `ft_scale` |
+| `l1_bias` | `int32` | `l1_scale` |
+| `l1_weight` | `int8` | `l1_scale` |
+| `l2_bias` | `int32` | `l2_scale` |
+| `l2_weight` | `int8` | `l2_scale` |
+| `out_bias` | `int32` | `out_scale` |
+| `out_weight` | `int8` | `out_scale` |
+
+The simplest correct integer inference keeps activations in the scale of the previous layer:
+
+```text
+accumulator scale: ft_scale
+clipped0 range: [0, ft_scale]
+h1 range: [0, l1_scale]
+h2 range: [0, l2_scale]
+output raw scale: out_scale
+final cp = round(raw_output / out_scale)
+```
+
+The fast integer formulas below assume the exported scales are integral or very close to integral. The default export settings are intended to produce integral scales such as `127` and `64`. If a scale is backed off to a non-integral value to avoid quantization clipping, either use the float reference path, use fixed-point scale reciprocals, or re-export/retrain with enough headroom for integral runtime scales.
+
+## 4. Feature Indexing
+
+Square indexing is `a1 = 0`, `b1 = 1`, ..., `h8 = 63`.
+
+```cpp
+int file_of(int sq) { return sq & 7; }
+int rank_of(int sq) { return sq >> 3; }
+int flip_vertical(int sq) { return (7 - rank_of(sq)) * 8 + file_of(sq); }
+```
+
+HalfKP is computed separately for the white and black perspectives. Kings are never active pieces.
+
+Piece type index:
+
+```text
+P = 0
+N = 1
+B = 2
+R = 3
+Q = 4
+```
+
+Relative color bit:
+
+```text
+0 = friendly piece from this perspective
+1 = enemy piece from this perspective
+```
+
+Piece bucket:
+
+```cpp
+bucket = piece_type_index * 2 + relative_color_bit; // 0..9
+```
+
+Perspective orientation:
+
+```text
+white perspective: no square flip, white pieces friendly
+black perspective: vertical square flip, black pieces friendly
+```
+
+Index formulas:
+
+```cpp
+int oriented_king = perspective == White ? king_sq : flip_vertical(king_sq);
+int oriented_piece = perspective == White ? piece_sq : flip_vertical(piece_sq);
+int p_index = bucket * 64 + oriented_piece;        // 0..639
+int halfkp_index = oriented_king * 640 + p_index;  // 0..40959
+```
+
+At most 30 non-king pieces are active per perspective.
+
+## 5. Accumulator Model
+
+Each search stack entry should carry two accumulators:
+
+```cpp
+struct alignas(64) Accumulator {
+    int16_t white[FtSize];
+    int16_t black[FtSize];
+    bool white_valid;
+    bool black_valid;
+};
+```
+
+Refresh:
+
+```cpp
+void refresh_perspective(
+    int16_t acc[FtSize],
+    const int16_t ft_bias[FtSize],
+    const int16_t (*ft_weight)[FtSize],
+    const int* features,
+    int count
+) {
+    memcpy(acc, ft_bias, FtSize * sizeof(int16_t));
+    for (int n = 0; n < count; ++n) {
+        const int16_t* row = ft_weight[features[n]];
+        for (int i = 0; i < FtSize; ++i)
+            acc[i] += row[i];
+    }
 }
 ```
 
-### 7.2 Incremental Update
+Patch:
 
 ```cpp
-void update(int16_t acc[256], const int16_t ft_weight[][256],
-            const int* removed, int n_removed,
-            const int* added, int n_added)
-{
-    for (int f = 0; f < n_removed; ++f)
-        for (int i = 0; i < 256; ++i)
-            acc[i] -= ft_weight[removed[f]][i];
-    for (int f = 0; f < n_added; ++f)
-        for (int i = 0; i < 256; ++i)
-            acc[i] += ft_weight[added[f]][i];
+void patch_perspective(
+    int16_t acc[FtSize],
+    const int16_t (*ft_weight)[FtSize],
+    const int* removed,
+    int removed_count,
+    const int* added,
+    int added_count
+) {
+    for (int n = 0; n < removed_count; ++n) {
+        const int16_t* row = ft_weight[removed[n]];
+        for (int i = 0; i < FtSize; ++i)
+            acc[i] -= row[i];
+    }
+    for (int n = 0; n < added_count; ++n) {
+        const int16_t* row = ft_weight[added[n]];
+        for (int i = 0; i < FtSize; ++i)
+            acc[i] += row[i];
+    }
 }
 ```
 
-If the moving side king square changes, do a full refresh for that perspective instead of trying to patch all king-conditioned rows.
+## 6. Efficiently Updatable Evaluation
 
-### 7.3 Dense Forward Pass
+UE is the point of NNUE: do not rebuild both accumulators at every node.
+
+For every move, compute feature diffs for both perspectives:
+
+```text
+removed_white[], added_white[]
+removed_black[], added_black[]
+```
+
+For non-king moves, captures, en passant, castling rook movement, and promotions, update the relevant piece features incrementally:
+
+```text
+remove old piece feature
+remove captured piece feature, if any
+add new piece feature
+add promoted piece feature instead of pawn, if promotion
+move rook feature for castling
+remove ep-captured pawn from its real square
+```
+
+King moves are special because every feature for that king's perspective depends on the king square.
+
+Rules:
+
+- White king move: refresh `white` accumulator from scratch.
+- Black king move: refresh `black` accumulator from scratch.
+- The opposite perspective does not refresh just because the enemy king moved, because kings are excluded from the active piece list.
+- If castling, also patch the rook feature in both perspectives.
+
+Practical lazy-valid strategy:
 
 ```cpp
-int evaluate_int(const Net& net,
-                 const int16_t white_acc[256],
-                 const int16_t black_acc[256],
-                 bool white_to_move)
-{
-    const int16_t* us   = white_to_move ? white_acc : black_acc;
+struct Dirty {
+    bool white_refresh;
+    bool black_refresh;
+    SmallList white_removed, white_added;
+    SmallList black_removed, black_added;
+};
+
+if (dirty.white_refresh)
+    refresh white from board;
+else
+    patch white;
+
+if (dirty.black_refresh)
+    refresh black from board;
+else
+    patch black;
+```
+
+For search performance, store accumulators in the stack and derive child accumulators from the parent. Do not allocate during evaluation.
+
+## 7. Reference Integer Forward Pass
+
+This is the canonical integer path. SIMD implementations must match it within rounding tolerance.
+
+```cpp
+int round_div_i64(int64_t x, int64_t d) {
+    return x >= 0 ? int((x + d / 2) / d) : int((x - d / 2) / d);
+}
+
+int evaluate_int_reference(
+    const Net& net,
+    const int16_t white_acc[FtSize],
+    const int16_t black_acc[FtSize],
+    bool white_to_move
+) {
+    const int16_t* us = white_to_move ? white_acc : black_acc;
     const int16_t* them = white_to_move ? black_acc : white_acc;
+    const int ft_scale = int(std::lround(net.ft_scale));
+    const int l1_scale = int(std::lround(net.l1_scale));
+    const int l2_scale = int(std::lround(net.l2_scale));
+    const int out_scale = int(std::lround(net.out_scale));
 
-    int16_t clipped0[512];
-    for (int i = 0; i < 256; ++i) {
-        clipped0[i]       = std::clamp(us[i],   (int16_t)0, (int16_t)net.ft_scale);
-        clipped0[256 + i] = std::clamp(them[i], (int16_t)0, (int16_t)net.ft_scale);
+    int16_t clipped0[FtSize * 2];
+    for (int i = 0; i < FtSize; ++i) {
+        clipped0[i] = std::clamp<int>(us[i], 0, ft_scale);
+        clipped0[FtSize + i] = std::clamp<int>(them[i], 0, ft_scale);
     }
 
-    int16_t h1[32];
-    for (int j = 0; j < 32; ++j) {
-        int64_t sum = 0;
-        for (int i = 0; i < 512; ++i)
-            sum += (int64_t)clipped0[i] * net.l1_weight[i][j];
-        sum += (int64_t)net.l1_bias[j] * net.ft_scale;
-        sum /= net.ft_scale; // now in Q1 scale
-        h1[j] = (int16_t)std::clamp<int64_t>(sum, 0, (int64_t)net.l1_scale);
+    int16_t h1[L1Size];
+    for (int j = 0; j < L1Size; ++j) {
+        int64_t sum = int64_t(net.l1_bias[j]) * int64_t(ft_scale);
+        for (int i = 0; i < FtSize * 2; ++i)
+            sum += int64_t(clipped0[i]) * int64_t(net.l1_weight[i][j]);
+        int v = round_div_i64(sum, int64_t(ft_scale));
+        h1[j] = std::clamp<int>(v, 0, l1_scale);
     }
 
-    int16_t h2[32];
-    for (int j = 0; j < 32; ++j) {
-        int64_t sum = 0;
-        for (int i = 0; i < 32; ++i)
-            sum += (int64_t)h1[i] * net.l2_weight[i][j];
-        sum += (int64_t)net.l2_bias[j] * net.l1_scale;
-        sum /= net.l1_scale; // now in Q2 scale
-        h2[j] = (int16_t)std::clamp<int64_t>(sum, 0, (int64_t)net.l2_scale);
+    int16_t h2[L2Size];
+    for (int j = 0; j < L2Size; ++j) {
+        int64_t sum = int64_t(net.l2_bias[j]) * int64_t(l1_scale);
+        for (int i = 0; i < L1Size; ++i)
+            sum += int64_t(h1[i]) * int64_t(net.l2_weight[i][j]);
+        int v = round_div_i64(sum, int64_t(l1_scale));
+        h2[j] = std::clamp<int>(v, 0, l2_scale);
     }
 
-    int64_t out = 0;
-    for (int i = 0; i < 32; ++i)
-        out += (int64_t)h2[i] * net.out_weight[i];
-    out += (int64_t)net.out_bias[0] * net.l2_scale;
-    out /= net.l2_scale; // now in QO scale
+    int64_t out = int64_t(net.out_bias[0]) * int64_t(l2_scale);
+    for (int i = 0; i < L2Size; ++i)
+        out += int64_t(h2[i]) * int64_t(net.out_weight[i]);
 
-    return (int)out;
+    int raw = round_div_i64(out, int64_t(l2_scale)); // out_scale units
+    return round_div_i64(raw, int64_t(out_scale));   // cp
 }
 ```
 
-Final centipawns:
+If you need exact parity with the Python float verifier, use a float reference path during bring-up, then switch to integer once quantized parity is tested.
+
+## 8. AVX2 Integration
+
+### 8.1 Data Layout
+
+Keep FT rows contiguous:
 
 ```cpp
-int score_cp = evaluate_int(net, white_acc, black_acc, white_to_move) / net.out_scale;
+alignas(64) int16_t ft_weight[NumFeatures][FtSize];
+alignas(64) int16_t ft_bias[FtSize];
 ```
 
-If you want rounding instead of truncation:
+For dense layers, the exported layout is row-major by input:
+
+```text
+l1_weight[FtSize * 2][L1Size]
+l2_weight[L1Size][L2Size]
+out_weight[L2Size]
+```
+
+For AVX2, also build transposed or packed copies at load time if that simplifies dot products:
+
+```text
+l1_weight_t[L1Size][FtSize * 2]
+l2_weight_t[L2Size][L1Size]
+```
+
+The loader may keep both original and packed forms; the file format stays unchanged.
+
+### 8.2 Accumulator Patches
+
+One FT row is `1024` `int16_t`, exactly 64 AVX2 vectors or 128 NEON `int16x8_t` vectors.
 
 ```cpp
-int score_cp = (raw_int >= 0)
-    ? (raw_int + net.out_scale / 2) / net.out_scale
-    : (raw_int - net.out_scale / 2) / net.out_scale;
+#include <immintrin.h>
+
+void add_row_avx2(int16_t acc[FtSize], const int16_t row[FtSize]) {
+    for (int i = 0; i < FtSize; i += 16) {
+        __m256i a = _mm256_load_si256((const __m256i*)(acc + i));
+        __m256i r = _mm256_load_si256((const __m256i*)(row + i));
+        _mm256_store_si256((__m256i*)(acc + i), _mm256_add_epi16(a, r));
+    }
+}
+
+void sub_row_avx2(int16_t acc[FtSize], const int16_t row[FtSize]) {
+    for (int i = 0; i < FtSize; i += 16) {
+        __m256i a = _mm256_load_si256((const __m256i*)(acc + i));
+        __m256i r = _mm256_load_si256((const __m256i*)(row + i));
+        _mm256_store_si256((__m256i*)(acc + i), _mm256_sub_epi16(a, r));
+    }
+}
 ```
 
-## 8. C++ Performance Notes
+Use unaligned loads only if your allocator cannot guarantee 32-byte alignment. Prefer `alignas(64)` for stack entries and network rows.
 
-### 8.1 Memory Layout
+### 8.3 Clipping and Packing
 
-- Keep `ft_weight` rows contiguous. One HalfKP feature row is exactly one accumulator add/sub patch.
-- Store accumulators as `alignas(64) int16_t acc[256]`.
-- Store clipped dense buffers as stack arrays, not heap allocations.
-- Keep one network blob with already-swizzled little-endian arrays after load.
+If `ft_scale <= 127` or `ft_scale <= 255`, you can pack clipped FT activations to bytes for faster dense multiplication. The exported default usually targets `ft_scale = 127`.
 
-### 8.2 Cache Locality
+```text
+clipped0_i16 = clamp(acc, 0, ft_scale)
+clipped0_u8  = narrow/clamp to uint8
+```
 
-- The accumulator update path is the hottest code in search. Optimize row adds/subs first.
-- Access FT rows sequentially for the changed features of one move before touching dense layers.
-- Keep white and black accumulators adjacent in the node stack to reduce pointer chasing.
-- Reuse the same scratch buffers for `clipped0`, `h1`, and `h2` across evaluations.
+Dense weights are signed int8. A fast AVX2 implementation can use one of these:
 
-### 8.3 SIMD
+- `_mm256_maddubs_epi16` after arranging unsigned activations and signed weights.
+- `_mm256_madd_epi16` after widening activations/weights to int16.
+- On AVX512/VNNI targets, a separate implementation can use dot-product instructions.
 
-- AVX2 is the primary target.
-- Accumulator updates: vectorize `int16` row adds/subs with `_mm256_add_epi16` and `_mm256_sub_epi16`.
-- First dense layer: if `ft_scale <= 255`, pack `clipped0` to `uint8_t` and use byte-wise loads with widened multiply-adds; otherwise keep the first clipped buffer as `int16_t`.
-- Second dense layer and output layer naturally fit packed byte activations because the clipped outputs live in `[0, l1_scale]` / `[0, l2_scale]` and the default dense scales keep them byte-sized.
-- Keep a scalar fallback that is bit-for-bit equivalent to the reference logic above.
+AVX2 byte dot-product outline:
 
-### 8.4 Refresh Strategy
+```cpp
+// activation: uint8, weight: int8
+// maddubs: pairs u8*s8 -> i16 pair sums
+// madd: i16 pair sums -> i32 quad sums
+__m256i prod16 = _mm256_maddubs_epi16(act_u8, w_i8);
+__m256i prod32 = _mm256_madd_epi16(prod16, _mm256_set1_epi16(1));
+sum32 = _mm256_add_epi32(sum32, prod32);
+```
 
-- Quiet non-king moves should patch both accumulators with a small number of row adds/subs.
-- Promotions and captures still patch incrementally unless the moving side king square changed.
-- King moves should trigger a full refresh for the moving side perspective only.
+Keep a scalar or int16 AVX2 fallback for unusual scales where byte packing is not valid.
 
-## 9. Sanity Suite
+### 8.4 Dense Layer Sizes
 
-Before shipping a net to the engine, confirm:
+The dense path is `2048 -> 256 -> 64 -> 1`. The first dense layer is intentionally wide enough to mix the larger `us|them` accumulator pair, while the second dense layer keeps the scalar head moderate. All dimensions are divisible by common AVX2 and NEON lane groups. The critical path is usually accumulator maintenance and the first dense layer.
 
-- starting position
-- white up pawn
-- white up knight
-- white up rook
-- white up queen
+## 9. NEON Integration
 
-Expected behavior:
+### 9.1 Accumulator Patches
 
-- start position is near `0cp`
-- `start < pawn < knight < rook < queen`
-- checkpoint/export parity is tight
-- opposite side-to-move flips the sign in symmetric positions
+One FT row is `FtSize` `int16_t`; the production `FtSize = 1024` is divisible by 8.
+
+```cpp
+#include <arm_neon.h>
+
+void add_row_neon(int16_t acc[FtSize], const int16_t row[FtSize]) {
+    for (int i = 0; i < FtSize; i += 8) {
+        int16x8_t a = vld1q_s16(acc + i);
+        int16x8_t r = vld1q_s16(row + i);
+        vst1q_s16(acc + i, vaddq_s16(a, r));
+    }
+}
+
+void sub_row_neon(int16_t acc[FtSize], const int16_t row[FtSize]) {
+    for (int i = 0; i < FtSize; i += 8) {
+        int16x8_t a = vld1q_s16(acc + i);
+        int16x8_t r = vld1q_s16(row + i);
+        vst1q_s16(acc + i, vsubq_s16(a, r));
+    }
+}
+```
+
+### 9.2 Dot Products
+
+On ARMv8.4-A with dot product support, use `sdot`/`vdotq_s32` for int8 dense layers. For broader NEON support, use widening multiply-add:
+
+```cpp
+int16x8_t act = vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(act_u8)));
+int16x8_t wt = vmovl_s8(vget_low_s8(w_i8));
+int32x4_t lo = vmull_s16(vget_low_s16(act), vget_low_s16(wt));
+int32x4_t hi = vmull_s16(vget_high_s16(act), vget_high_s16(wt));
+sum = vaddq_s32(sum, lo);
+sum = vaddq_s32(sum, hi);
+```
+
+Recommended dispatch:
+
+```text
+Apple Silicon / ARM dotprod available: NEON dot-product path
+generic ARM64: NEON widening path
+fallback: scalar reference
+```
+
+## 10. Search Integration
+
+Evaluation should be side-to-move:
+
+```cpp
+int evaluate(const Position& pos) {
+    const Accumulator& acc = ensure_accumulator(pos);
+    int cp = nnue.evaluate(acc.white, acc.black, pos.side_to_move() == WHITE);
+    return clamp_to_engine_value(cp);
+}
+```
+
+If your engine stores scores from White's perspective, convert at the boundary:
+
+```cpp
+int stm_cp = nnue.evaluate(...);
+int white_pov_cp = pos.side_to_move() == WHITE ? stm_cp : -stm_cp;
+```
+
+For alpha-beta negamax, side-to-move cp is the natural representation.
+
+Suggested search clamping:
+
+```cpp
+static constexpr int EvalLimit = 32000;
+static constexpr int MateScore = 30000;
+cp = std::clamp(cp, -EvalLimit, EvalLimit);
+cp = std::clamp(cp, -MateScore + max_ply, MateScore - max_ply);
+```
+
+Do not mix mate scores into NNUE output. Mate values are search values, not eval values.
+
+## 11. Validation Checklist
+
+Before enabling the net in search:
+
+1. Load header and dimensions.
+2. Run a float reference evaluator against the Python `verify-export` output.
+3. Run integer scalar against float reference.
+4. Run AVX2 against integer scalar.
+5. Run NEON against integer scalar.
+6. Verify accumulator refresh equals incremental update after random legal move sequences.
+7. Verify king moves refresh only the moving king perspective.
+8. Verify en passant, castling, promotions, and captures.
+9. Verify side-to-move behavior on symmetric positions.
+10. Run the material sanity ladder:
+
+```text
+starting_position < white_up_pawn < white_up_knight < white_up_rook < white_up_queen
+```
+
+The repository's export verifier reports:
+
+```text
+checkpoint_predictions
+exported_predictions
+max_abs_error
+mean_abs_error
+material_ordering_ok
+starting_position_near_zero
+```
+
+Use it as the source of truth while wiring engine-side parity tests.
+
+## 12. Common Bugs
+
+Wrong square indexing:
+
+- This spec uses `a1 = 0`.
+- FEN parsing often iterates ranks from 8 to 1; convert carefully.
+
+Wrong black orientation:
+
+- Black perspective flips vertically only.
+- Do not rotate 180 degrees.
+
+Including kings as active pieces:
+
+- Kings determine the HalfKP block.
+- Kings are not active piece features.
+
+Applying WDL at inference:
+
+- Do not. The net output is cp-like scalar eval.
+- WDL transforms are training loss machinery only.
+
+Refreshing both accumulators on king moves:
+
+- Only the moving king's perspective needs a king-square refresh.
+- The opposite perspective may still need ordinary piece patches for rook movement or captures.
+
+Scale mistakes:
+
+- Biases are already stored in their layer's output scale.
+- For integer dense layers, multiply bias by the input activation scale before adding products.
+- Convert final raw output from `out_scale` units to cp by rounded division.
+
+Silent overflow:
+
+- Use at least `int32` for dense accumulation.
+- Use `int64` in scalar reference and tests.
+- Accumulator rows are `int16`; patching should remain in range for valid exported nets, but debug builds should assert.
+
+## 13. Implementation Plan
+
+Recommended order:
+
+1. Implement file loader and scalar float evaluator.
+2. Implement feature generation and full accumulator refresh.
+3. Compare engine float eval with Python verifier on fixed FENs.
+4. Implement integer scalar evaluator.
+5. Add parent-to-child accumulator patching.
+6. Fuzz incremental accumulators against full refresh.
+7. Add AVX2 accumulator row add/sub.
+8. Add AVX2 first dense layer.
+9. Add NEON accumulator row add/sub.
+10. Add NEON first dense layer.
+11. Dispatch at startup by CPU capability.
+12. Run search with scalar/integer/SIMD parity assertions in debug builds.
+
+Keep the scalar integer path permanently. It is the reference for debugging SIMD and for unsupported targets.

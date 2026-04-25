@@ -17,7 +17,13 @@ except ModuleNotFoundError:
 
 from thrawn_nnue.checkpoint import save_checkpoint
 from thrawn_nnue.export import (
+    EXPECTED_NUM_FEATURES,
     ExportedNetwork,
+    HEADER_PREFIX_STRUCT,
+    HEADER_REST_STRUCT,
+    MAGIC,
+    OUTPUT_PERSPECTIVE_STM,
+    VERSION,
     _export_quantization_diagnostics,
     _exported_network_from_model,
     _fit_quantization_scale,
@@ -29,27 +35,44 @@ from thrawn_nnue.export import (
 )
 
 
+PRODUCTION_FT_SIZE = 1024
+PRODUCTION_L1_SIZE = 256
+PRODUCTION_L2_SIZE = 64
+
+
 class ExportFormatTests(unittest.TestCase):
-    def test_header_and_tensor_layout_round_trip(self) -> None:
+    def _round_trip_exported_network(self, *, ft_size: int, l1_size: int, l2_size: int) -> None:
+        ft_bias = np.arange(ft_size, dtype=np.int16)
+        ft_weight = np.zeros((EXPECTED_NUM_FEATURES, ft_size), dtype=np.int16)
+        ft_weight[0, 0] = 123
+        ft_weight[-1, -1] = -456
+        l1_bias = np.arange(l1_size, dtype=np.int32)
+        l1_weight = np.zeros((ft_size * 2, l1_size), dtype=np.int8)
+        l1_weight[0, 0] = 7
+        l1_weight[-1, -1] = -8
+        l2_bias = np.arange(l2_size, dtype=np.int32)
+        l2_weight = np.zeros((l1_size, l2_size), dtype=np.int8)
+        l2_weight[0, 0] = 9
+        l2_weight[-1, -1] = -10
+        out_weight = (np.arange(l2_size) % 127).astype(np.int8)
         exported = ExportedNetwork(
             description="fixture",
-            num_features=40960,
-            ft_size=4,
-            l1_size=2,
-            l2_size=2,
+            num_features=EXPECTED_NUM_FEATURES,
+            ft_size=ft_size,
+            l1_size=l1_size,
+            l2_size=l2_size,
             ft_scale=127.0,
             l1_scale=64.0,
             l2_scale=64.0,
             out_scale=64.0,
-            wdl_scale=410.0,
-            ft_bias=np.arange(4, dtype=np.int16),
-            ft_weight=np.arange(40960 * 4, dtype=np.int16).reshape(40960, 4),
-            l1_bias=np.array([7, -3], dtype=np.int32),
-            l1_weight=np.arange(8 * 2, dtype=np.int8).reshape(8, 2),
-            l2_bias=np.array([5, 9], dtype=np.int32),
-            l2_weight=np.arange(2 * 2, dtype=np.int8).reshape(2, 2),
+            ft_bias=ft_bias,
+            ft_weight=ft_weight,
+            l1_bias=l1_bias,
+            l1_weight=l1_weight,
+            l2_bias=l2_bias,
+            l2_weight=l2_weight,
             out_bias=np.array([11], dtype=np.int32),
-            out_weight=np.array([5, -2], dtype=np.int8),
+            out_weight=out_weight,
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -59,10 +82,10 @@ class ExportFormatTests(unittest.TestCase):
 
             loaded = load_export(path)
             self.assertEqual(loaded.description, "fixture")
-            self.assertEqual(loaded.num_features, 40960)
-            self.assertEqual(loaded.ft_size, 4)
-            self.assertEqual(loaded.l1_size, 2)
-            self.assertEqual(loaded.l2_size, 2)
+            self.assertEqual(loaded.num_features, EXPECTED_NUM_FEATURES)
+            self.assertEqual(loaded.ft_size, ft_size)
+            self.assertEqual(loaded.l1_size, l1_size)
+            self.assertEqual(loaded.l2_size, l2_size)
             self.assertEqual(loaded.l1_scale, exported.l1_scale)
             self.assertEqual(loaded.l2_scale, exported.l2_scale)
             self.assertEqual(loaded.out_scale, exported.out_scale)
@@ -74,6 +97,13 @@ class ExportFormatTests(unittest.TestCase):
             self.assertTrue(np.array_equal(loaded.l2_weight, exported.l2_weight))
             self.assertTrue(np.array_equal(loaded.out_bias, exported.out_bias))
             self.assertTrue(np.array_equal(loaded.out_weight, exported.out_weight))
+
+    def test_header_and_tensor_layout_round_trip(self) -> None:
+        self._round_trip_exported_network(
+            ft_size=PRODUCTION_FT_SIZE,
+            l1_size=PRODUCTION_L1_SIZE,
+            l2_size=PRODUCTION_L2_SIZE,
+        )
 
     def test_fit_quantization_scale_backs_off_to_avoid_clipping(self) -> None:
         scale = _fit_quantization_scale([np.array([5.0], dtype=np.float32)], 64.0, np.int8)
@@ -125,7 +155,6 @@ class ExportFormatTests(unittest.TestCase):
             l2_size=1,
             export_ft_scale=100.0,
             export_dense_scale=64.0,
-            wdl_scale=410.0,
         )
 
         exported = _exported_network_from_model(model, config)
@@ -135,7 +164,7 @@ class ExportFormatTests(unittest.TestCase):
         diagnostics = _export_quantization_diagnostics(exported)
         self.assertEqual(diagnostics["ft_weight"]["positive_limit_hits"], 0.0)
 
-    def test_export_folds_final_eval_scale_into_output_layer(self) -> None:
+    def test_export_uses_direct_scalar_output_layer(self) -> None:
         class FakeTensor:
             def __init__(self, values):
                 self._values = np.asarray(values, dtype=np.float32)
@@ -164,7 +193,6 @@ class ExportFormatTests(unittest.TestCase):
                 weight=FakeTensor(np.array([[0.25]], dtype=np.float32)),
                 bias=FakeTensor([0.5]),
             ),
-            final_eval_scale=16.0,
         )
         config = SimpleNamespace(
             export_description="fixture",
@@ -174,14 +202,13 @@ class ExportFormatTests(unittest.TestCase):
             l2_size=1,
             export_ft_scale=100.0,
             export_dense_scale=64.0,
-            wdl_scale=410.0,
         )
 
         exported = _exported_network_from_model(model, config)
         dequantized_weight = exported.out_weight.astype(np.float32) / exported.out_scale
         dequantized_bias = exported.out_bias.astype(np.float32) / exported.out_scale
-        self.assertAlmostEqual(float(dequantized_weight[0]), 4.0, delta=0.02)
-        self.assertAlmostEqual(float(dequantized_bias[0]), 8.0, places=5)
+        self.assertAlmostEqual(float(dequantized_weight[0]), 0.25, delta=0.02)
+        self.assertAlmostEqual(float(dequantized_bias[0]), 0.5, places=5)
 
     def test_evaluate_export_uses_direct_scalar_output(self) -> None:
         exported = ExportedNetwork(
@@ -194,7 +221,6 @@ class ExportFormatTests(unittest.TestCase):
             l1_scale=100.0,
             l2_scale=100.0,
             out_scale=100.0,
-            wdl_scale=410.0,
             ft_bias=np.array([100], dtype=np.int16),
             ft_weight=np.zeros((40960, 1), dtype=np.int16),
             l1_bias=np.zeros(1, dtype=np.int32),
@@ -221,13 +247,64 @@ class ExportFormatTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Unsupported \\.nnue version"):
                 load_export(path)
 
+    def test_load_export_rejects_corrupt_payloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "truncated.nnue"
+            description = b"fixture"
+            header = HEADER_PREFIX_STRUCT.pack(MAGIC, VERSION) + HEADER_REST_STRUCT.pack(
+                b"halfkp_v1".ljust(16, b"\x00"),
+                EXPECTED_NUM_FEATURES,
+                PRODUCTION_FT_SIZE,
+                PRODUCTION_L1_SIZE,
+                PRODUCTION_L2_SIZE,
+                OUTPUT_PERSPECTIVE_STM,
+                127.0,
+                64.0,
+                64.0,
+                64.0,
+                len(description),
+            )
+            path.write_bytes(header + description)
+
+            with self.assertRaisesRegex(ValueError, "ft_bias"):
+                load_export(path)
+
+    def test_load_export_rejects_trailing_data(self) -> None:
+        exported = ExportedNetwork(
+            description="fixture",
+            num_features=EXPECTED_NUM_FEATURES,
+            ft_size=PRODUCTION_FT_SIZE,
+            l1_size=PRODUCTION_L1_SIZE,
+            l2_size=PRODUCTION_L2_SIZE,
+            ft_scale=127.0,
+            l1_scale=64.0,
+            l2_scale=64.0,
+            out_scale=64.0,
+            ft_bias=np.zeros(PRODUCTION_FT_SIZE, dtype=np.int16),
+            ft_weight=np.zeros((EXPECTED_NUM_FEATURES, PRODUCTION_FT_SIZE), dtype=np.int16),
+            l1_bias=np.zeros(PRODUCTION_L1_SIZE, dtype=np.int32),
+            l1_weight=np.zeros((PRODUCTION_FT_SIZE * 2, PRODUCTION_L1_SIZE), dtype=np.int8),
+            l2_bias=np.zeros(PRODUCTION_L2_SIZE, dtype=np.int32),
+            l2_weight=np.zeros((PRODUCTION_L1_SIZE, PRODUCTION_L2_SIZE), dtype=np.int8),
+            out_bias=np.zeros(1, dtype=np.int32),
+            out_weight=np.zeros(PRODUCTION_L2_SIZE, dtype=np.int8),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "trailing.nnue"
+            with path.open("wb") as handle:
+                _write_export(handle, exported)
+                handle.write(b"x")
+
+            with self.assertRaisesRegex(ValueError, "trailing data"):
+                load_export(path)
+
 
 @unittest.skipUnless(torch is not None, "PyTorch is required for verify-export tests")
 class VerifyExportTests(unittest.TestCase):
     def test_verify_export_reports_material_sanity_suite(self) -> None:
         from thrawn_nnue.model import HalfKPNNUE
 
-        model = HalfKPNNUE()
+        model = HalfKPNNUE(ft_size=4, l1_size=2, l2_size=2)
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
         scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.992)
         scaler = torch.cuda.amp.GradScaler(enabled=False)
@@ -247,6 +324,9 @@ class VerifyExportTests(unittest.TestCase):
                     "train_datasets": ["/tmp/train.binpack"],
                     "total_train_positions": 1000,
                     "epoch_positions": 100,
+                    "ft_size": 4,
+                    "l1_size": 2,
+                    "l2_size": 2,
                 },
                 global_step=1,
                 positions_seen=128,

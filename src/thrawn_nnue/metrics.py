@@ -70,8 +70,6 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
     if effective_validation_interval in (None, 0):
         effective_validation_interval = epoch_positions
     score_clip = _as_float(_config_value(run, "score_clip"))
-    cp_loss_beta = _as_float(_config_value(run, "cp_loss_beta"))
-    wdl_scale = _as_float(_config_value(run, "wdl_scale"))
     wdl_lambda = _as_float(_config_value(run, "wdl_lambda"))
     output_regularization = _as_float(_config_value(run, "output_regularization"))
 
@@ -192,8 +190,6 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "lr_near_zero": lr_near_zero,
         "scheduler_exhausted": scheduler_exhausted,
         "score_clip": score_clip,
-        "cp_loss_beta": cp_loss_beta,
-        "wdl_scale": wdl_scale,
         "wdl_lambda": wdl_lambda,
         "output_regularization": output_regularization,
     }

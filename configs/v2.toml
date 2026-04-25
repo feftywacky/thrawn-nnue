@@ -2,49 +2,61 @@ run_name = "v2"
 output_dir = "runs/v2"
 
 train_datasets = [
-  "/Users/flin/src/thrawn-nnue/data/test80-2024-01-jan-2tb7p.min-v2.v6.binpack",
-  "/Users/flin/src/thrawn-nnue/data/test80-2024-02-feb-2tb7p.min-v2.v6.binpack",
-  "/Users/flin/src/thrawn-nnue/data/test80-2024-03-mar-2tb7p.min-v2.v6.binpack",
-  "/Users/flin/src/thrawn-nnue/data/test80-2024-04-apr-2tb7p.min-v2.v6.binpack",
-  "/Users/flin/src/thrawn-nnue/data/test80-2024-05-may-2tb7p.min-v2.v6.binpack",
+  "/Users/feiyulin/Code/thrawn-nnue/data/test80-2024-01-jan-2tb7p.min-v2.v6.binpack",
+  "/Users/feiyulin/Code/thrawn-nnue/data/test80-2024-02-feb-2tb7p.min-v2.v6.binpack",
+  "/Users/feiyulin/Code/thrawn-nnue/data/test80-2024-03-mar-2tb7p.min-v2.v6.binpack",
+  "/Users/feiyulin/Code/thrawn-nnue/data/test80-2024-04-apr-2tb7p.min-v2.v6.binpack",
+  "/Users/feiyulin/Code/thrawn-nnue/data/test80-2024-05-may-2tb7p.min-v2.v6.binpack",
 ]
 validation_datasets = [
-  "/Users/flin/src/thrawn-nnue/data/test80-2024-06-jun-2tb7p.min-v2.v6.binpack",
+  "/Users/feiyulin/Code/thrawn-nnue/data/test80-2024-06-jun-2tb7p.min-v2.v6.binpack",
 ]
 
 device = "mps"
-num_loader_threads = 12
+num_loader_threads = 8
 prefetch_batches = 2
-batch_size = 32768
+batch_size = 16384
 
-total_train_positions = 10000000000
+total_train_positions = 25000000000
 epoch_positions = 100000000
-validation_interval_positions = 250000000
+validation_interval_positions = 100000000
 validation_positions = 50000000
 
-checkpoint_every = 5000
-log_every = 50
+checkpoint_every = 10000
+log_every = 100
 console_mode = "progress"
 
-learning_rate = 0.000875
-weight_decay = 0.00002
-clip_grad_norm = 1.0
+learning_rate = 0.001
+weight_decay = 0.0
+output_regularization = 0.0
+sanity_anchor_weight = 0.01
+clip_grad_norm = 10.0
 amp = false
 
 feature_set = "halfkp"
 num_features = 40960
 num_factor_features = 640
 max_active_features = 30
-ft_size = 256
-l1_size = 32
-l2_size = 32
+ft_size = 1024
+l1_size = 256
+l2_size = 64
 output_perspective = "stm"
 
-score_clip = 1000.0
-cp_loss_beta = 128.0
-wdl_scale = 1000.0
-wdl_lambda = 0.7
+score_clip = 8000.0
+wdl_lambda = 0.8
+wdl_in_offset = 270.0
+wdl_out_offset = 270.0
+wdl_in_scaling = 4000.0
+wdl_out_scaling = 4000.0
+wdl_loss_power = 2.5
+
+skip_capture_positions = true
+skip_decisive_score_mismatch = true
+decisive_score_mismatch_margin = 1000.0
+skip_draw_score_mismatch = true
+draw_score_mismatch_margin = 1000.0
+max_abs_score = 0.0
 
 export_ft_scale = 127.0
 export_dense_scale = 64.0
-export_description = "thrawn halfkp nnue v2 10b"
+export_description = "thrawn halfkp nnue v2"

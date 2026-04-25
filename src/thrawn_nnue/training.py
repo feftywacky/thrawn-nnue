@@ -15,6 +15,13 @@ from .config import TrainConfig
 from .export import MATERIAL_SANITY_POSITIONS
 from .native import BinpackStream
 
+SANITY_ANCHOR_POSITIONS = [
+    ("starting_position_white", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1"),
+    ("starting_position_black", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b - - 0 1"),
+    ("bare_kings_white", "8/2k5/8/8/8/8/5K2/8 w - - 0 1"),
+    ("bare_kings_black", "8/2k5/8/8/8/8/5K2/8 b - - 0 1"),
+]
+
 
 def _require_torch():
     try:
@@ -260,6 +267,7 @@ def _run_training_loop(state: TrainState) -> None:
             state.config.train_datasets,
             num_threads=state.config.num_loader_threads,
             cyclic=True,
+            **_binpack_filter_options(state.config),
         ) as train_stream:
             remaining_positions = state.config.total_train_positions - state.positions_seen
             with _PreparedBatchSource(
@@ -321,6 +329,9 @@ def _run_training_loop(state: TrainState) -> None:
                                 "cp_loss": float(losses["cp_loss"].detach().cpu().item()),
                                 "wdl_loss": float(losses["wdl_loss"].detach().cpu().item()),
                                 "output_reg_loss": float(losses["output_reg_loss"].detach().cpu().item()),
+                                "sanity_anchor_loss": float(
+                                    losses["sanity_anchor_loss"].detach().cpu().item()
+                                ),
                                 "wdl_lambda": state.config.wdl_lambda,
                                 "lr": current_lr,
                                 "step_seconds": step_seconds,
@@ -405,12 +416,16 @@ def _run_train_step(state: TrainState, tensors, torch, *, autocast_enabled: bool
             prediction_cp,
             normalized_scores,
             result_wdl_stm,
-            state.config.wdl_scale,
-            state.config.cp_loss_beta,
-            state.config.wdl_lambda,
-            state.config.output_regularization,
-            torch,
+            wdl_eval_weight=state.config.wdl_lambda,
+            wdl_in_offset=state.config.wdl_in_offset,
+            wdl_out_offset=state.config.wdl_out_offset,
+            wdl_in_scaling=state.config.wdl_in_scaling,
+            wdl_out_scaling=state.config.wdl_out_scaling,
+            wdl_loss_power=state.config.wdl_loss_power,
+            output_regularization=state.config.output_regularization,
+            torch=torch,
         )
+        losses = _add_sanity_anchor_loss(losses, state.model, state.config, torch, state.device)
 
     state.scaler.scale(losses["loss"]).backward()
     state.scaler.unscale_(state.optimizer)
@@ -439,29 +454,53 @@ def _scalar_head_loss(
     prediction_cp,
     target_cp,
     result_wdl,
-    wdl_scale: float,
-    cp_loss_beta: float,
-    wdl_lambda: float,
+    *,
+    wdl_eval_weight: float,
+    wdl_in_offset: float,
+    wdl_out_offset: float,
+    wdl_in_scaling: float,
+    wdl_out_scaling: float,
+    wdl_loss_power: float,
     output_regularization: float,
     torch,
 ):
-    pred_wdl = _wdl_from_cp(prediction_cp, wdl_scale, torch)
-    target_wdl = _wdl_from_cp(target_cp, wdl_scale, torch)
-    blended_target = (1.0 - wdl_lambda) * target_wdl + wdl_lambda * result_wdl
-    cp_loss = torch.mean((pred_wdl - blended_target) ** 2)
-    wdl_loss = torch.mean((pred_wdl - result_wdl) ** 2)
+    pred_wdl = _wdl_expectation_from_cp(prediction_cp, wdl_in_offset, wdl_in_scaling, torch)
+    target_wdl = _wdl_expectation_from_cp(target_cp, wdl_out_offset, wdl_out_scaling, torch)
+    blended_target = wdl_eval_weight * target_wdl + (1.0 - wdl_eval_weight) * result_wdl
+    cp_loss = torch.mean((pred_wdl - blended_target).abs().pow(wdl_loss_power))
+    wdl_loss = torch.mean((pred_wdl - result_wdl).abs().pow(wdl_loss_power))
     output_reg_loss = torch.mean(prediction_cp.square())
-    # Keep cp_loss_beta in the config for backward compatibility with old checkpoints/configs.
-    _ = cp_loss_beta
     loss = cp_loss + output_regularization * output_reg_loss
     return {
         "loss": loss,
         "cp_loss": cp_loss,
         "wdl_loss": wdl_loss,
         "output_reg_loss": output_reg_loss,
+        "sanity_anchor_loss": loss.new_zeros(()),
         "predicted_cp": prediction_cp,
         "predicted_wdl": pred_wdl,
     }
+
+
+def _add_sanity_anchor_loss(losses, model, config: TrainConfig, torch, device: str):
+    if config.sanity_anchor_weight <= 0.0:
+        return losses
+
+    losses = dict(losses)
+    anchor_loss = _sanity_anchor_loss(model, config, torch, device)
+    losses["sanity_anchor_loss"] = anchor_loss
+    losses["loss"] = losses["loss"] + config.sanity_anchor_weight * anchor_loss
+    return losses
+
+
+def _sanity_anchor_loss(model, config: TrainConfig, torch, device: str):
+    tensors = _sanity_anchor_tensors(config, torch, device)
+    prediction_cp = model(
+        tensors["white_indices"],
+        tensors["black_indices"],
+        tensors["stm"],
+    )
+    return torch.mean((prediction_cp / config.wdl_out_scaling).square())
 
 
 def _clip_model_weights(model, config: TrainConfig) -> None:
@@ -493,6 +532,7 @@ def _run_validation(state: TrainState) -> dict[str, object]:
     total_cp_loss = 0.0
     total_wdl_loss = 0.0
     total_output_reg_loss = 0.0
+    total_sanity_anchor_loss = 0.0
     total_positions = 0
     total_correct = 0
     total_teacher_result_disagreement = 0
@@ -511,6 +551,7 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         state.config.validation_datasets,
         num_threads=state.config.num_loader_threads,
         cyclic=False,
+        **_binpack_filter_options(state.config),
     ) as validation_stream:
         validation_budget = state.config.validation_positions if state.config.validation_positions > 0 else None
         with _PreparedBatchSource(
@@ -541,15 +582,24 @@ def _run_validation(state: TrainState) -> dict[str, object]:
                             prediction_cp,
                             normalized_scores,
                             result_wdl_stm,
-                            state.config.wdl_scale,
-                            state.config.cp_loss_beta,
-                            state.config.wdl_lambda,
-                            state.config.output_regularization,
-                            torch,
+                            wdl_eval_weight=state.config.wdl_lambda,
+                            wdl_in_offset=state.config.wdl_in_offset,
+                            wdl_out_offset=state.config.wdl_out_offset,
+                            wdl_in_scaling=state.config.wdl_in_scaling,
+                            wdl_out_scaling=state.config.wdl_out_scaling,
+                            wdl_loss_power=state.config.wdl_loss_power,
+                            output_regularization=state.config.output_regularization,
+                            torch=torch,
                         )
+                        losses = _add_sanity_anchor_loss(losses, state.model, state.config, torch, state.device)
 
                     pred_wdl = losses["predicted_wdl"]
-                    target_wdl = _wdl_from_cp(normalized_scores, state.config.wdl_scale, torch)
+                    target_wdl = _wdl_expectation_from_cp(
+                        normalized_scores,
+                        state.config.wdl_out_offset,
+                        state.config.wdl_out_scaling,
+                        torch,
+                    )
                     result_bucket = _wdl_bucket(result_wdl_stm)
                     pred_bucket = _wdl_bucket(pred_wdl)
                     target_bucket = _wdl_bucket(target_wdl)
@@ -562,6 +612,9 @@ def _run_validation(state: TrainState) -> dict[str, object]:
                     total_cp_loss += float(losses["cp_loss"].detach().cpu().item()) * batch_positions
                     total_wdl_loss += float(losses["wdl_loss"].detach().cpu().item()) * batch_positions
                     total_output_reg_loss += float(losses["output_reg_loss"].detach().cpu().item()) * batch_positions
+                    total_sanity_anchor_loss += (
+                        float(losses["sanity_anchor_loss"].detach().cpu().item()) * batch_positions
+                    )
                     total_correct += int((pred_bucket == result_bucket).sum().detach().cpu().item())
                     total_teacher_result_disagreement += int(
                         (target_bucket != result_bucket).sum().detach().cpu().item()
@@ -584,6 +637,7 @@ def _run_validation(state: TrainState) -> dict[str, object]:
     average_cp_loss = math.inf if total_positions == 0 else total_cp_loss / total_positions
     average_wdl_loss = math.inf if total_positions == 0 else total_wdl_loss / total_positions
     average_output_reg_loss = math.inf if total_positions == 0 else total_output_reg_loss / total_positions
+    average_sanity_anchor_loss = math.inf if total_positions == 0 else total_sanity_anchor_loss / total_positions
     wdl_accuracy = 0.0 if total_positions == 0 else total_correct / total_positions
     teacher_result_disagreement_rate = (
         0.0 if total_positions == 0 else total_teacher_result_disagreement / total_positions
@@ -611,6 +665,7 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         "validation_cp_loss": average_cp_loss,
         "validation_wdl_loss": average_wdl_loss,
         "validation_output_reg_loss": average_output_reg_loss,
+        "validation_sanity_anchor_loss": average_sanity_anchor_loss,
         "cp_mae": cp_mae,
         "cp_rmse": cp_rmse,
         "cp_corr": cp_corr,
@@ -660,6 +715,28 @@ def _material_sanity_snapshot(state: TrainState) -> dict[str, object]:
     )
     named["starting_position_near_zero"] = abs(named["starting_position"]) <= 50.0
     return named
+
+
+def _sanity_anchor_tensors(config: TrainConfig, torch, device: str) -> dict[str, object]:
+    from .board import BoardState
+    from .features import active_feature_indices
+
+    white_indices: list[list[int]] = []
+    black_indices: list[list[int]] = []
+    stm: list[float] = []
+    for _, fen in SANITY_ANCHOR_POSITIONS:
+        board = BoardState.from_fen(fen)
+        white = active_feature_indices(board, "white")
+        black = active_feature_indices(board, "black")
+        white_indices.append(white + [-1] * (config.max_active_features - len(white)))
+        black_indices.append(black + [-1] * (config.max_active_features - len(black)))
+        stm.append(1.0 if board.side_to_move == "w" else 0.0)
+
+    return {
+        "white_indices": torch.tensor(white_indices, dtype=torch.long, device=device),
+        "black_indices": torch.tensor(black_indices, dtype=torch.long, device=device),
+        "stm": torch.tensor(stm, dtype=torch.float32, device=device).unsqueeze(1),
+    }
 
 
 def _pearson_correlation(
@@ -875,8 +952,6 @@ def _prepare_batch(batch, torch) -> _PreparedBatch:
         tensors={
             "white_indices": torch.from_numpy(batch.white_indices).to(dtype=torch.long),
             "black_indices": torch.from_numpy(batch.black_indices).to(dtype=torch.long),
-            "white_counts": torch.from_numpy(batch.white_counts).to(dtype=torch.int32),
-            "black_counts": torch.from_numpy(batch.black_counts).to(dtype=torch.int32),
             "stm": torch.from_numpy(batch.stm).to(dtype=torch.float32).unsqueeze(1),
             "score_cp": torch.from_numpy(batch.score_cp).to(dtype=torch.float32).unsqueeze(1),
             "result_wdl": torch.from_numpy(batch.result_wdl).to(dtype=torch.float32).unsqueeze(1),
@@ -894,8 +969,22 @@ def _batch_size(batch) -> int:
     return int(batch.stm.shape[0])
 
 
-def _wdl_from_cp(values, wdl_scale: float, torch):
-    return torch.sigmoid(values / wdl_scale)
+def _binpack_filter_options(config: TrainConfig) -> dict[str, object]:
+    return {
+        "skip_capture_positions": config.skip_capture_positions,
+        "skip_decisive_score_mismatch": config.skip_decisive_score_mismatch,
+        "decisive_score_mismatch_margin": config.decisive_score_mismatch_margin,
+        "skip_draw_score_mismatch": config.skip_draw_score_mismatch,
+        "draw_score_mismatch_margin": config.draw_score_mismatch_margin,
+        "max_abs_score": config.max_abs_score,
+    }
+
+
+def _wdl_expectation_from_cp(values, offset: float, scaling: float, torch):
+    win = torch.sigmoid((values - offset) / scaling)
+    loss = torch.sigmoid((-values - offset) / scaling)
+    draw = 1.0 - win - loss
+    return (win + 0.5 * draw).clamp(0.0, 1.0)
 
 
 def _wdl_bucket(values):

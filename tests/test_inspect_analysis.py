@@ -28,6 +28,10 @@ class InspectAnalysisTests(unittest.TestCase):
             self.assertIn("abs_score_percentiles", stats)
             self.assertIn("ply_percentiles", stats)
             self.assertIn("result_percentages", stats)
+            self.assertIn("score_buckets", stats)
+            self.assertIn("phase_buckets", stats)
+            self.assertIn("material", stats)
+            self.assertIn("wdl_scale_saturation", stats)
             self.assertIn("wdl_scale_diagnostics", stats)
             self.assertIn("recommendation", stats)
             self.assertIn("recommended_wdl_scale", stats["recommendation"])
@@ -93,10 +97,14 @@ class InspectAnalysisTests(unittest.TestCase):
             write_fixture_binpack(first)
             write_fixture_binpack(second)
 
-            combined = inspect_binpack_collection([first, second])
+            combined = inspect_binpack_collection([first, second], jobs=2)
 
             self.assertEqual(combined["file_count"], 2)
             self.assertEqual(len(combined["files"]), 2)
+            self.assertEqual(
+                [item["path"] for item in combined["files"]],
+                [str(first.resolve()), str(second.resolve())],
+            )
             self.assertEqual(combined["aggregate"]["entries_read"], 6)
             expected_wins = sum(int(item["stats"]["wins"]) for item in combined["files"])
             expected_draws = sum(int(item["stats"]["draws"]) for item in combined["files"])
@@ -104,7 +112,17 @@ class InspectAnalysisTests(unittest.TestCase):
             self.assertEqual(combined["aggregate"]["wins"], expected_wins)
             self.assertEqual(combined["aggregate"]["draws"], expected_draws)
             self.assertEqual(combined["aggregate"]["losses"], expected_losses)
+            self.assertIn("score_buckets", combined["aggregate"])
+            self.assertIn("wdl_scale_saturation", combined["aggregate"])
             self.assertIn("aggregate_notes", combined["aggregate"])
+
+    def test_collection_inspect_rejects_invalid_job_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "fixture.binpack"
+            write_fixture_binpack(path)
+
+            with self.assertRaisesRegex(ValueError, "jobs must be >= 1"):
+                inspect_binpack_collection([path], jobs=0)
 
 
 if __name__ == "__main__":
