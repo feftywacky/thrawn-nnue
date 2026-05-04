@@ -16,6 +16,7 @@ class TrainConfig:
     device: str = "auto"
     num_loader_threads: int = 2
     prefetch_batches: int = 0
+    cuda_pin_memory: bool = True
     batch_size: int = 256
     total_train_positions: int = 0
     epoch_positions: int = 0

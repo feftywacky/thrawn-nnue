@@ -54,13 +54,29 @@ if torch is not None:
         def _accumulate(self, indices: torch.Tensor) -> torch.Tensor:
             mask = indices.ge(0)
             clamped = indices.clamp_min(0)
-            factor_indices = torch.remainder(clamped, self.num_factor_features)
+            counts = mask.sum(dim=1, dtype=torch.long)
+            offsets = torch.empty(counts.numel() + 1, dtype=torch.long, device=indices.device)
+            offsets[0] = 0
+            offsets[1:] = torch.cumsum(counts, dim=0)
+            flat_indices = clamped[mask]
+            if flat_indices.numel() == 0:
+                return self.ft_bias.unsqueeze(0).expand(indices.shape[0], -1)
 
-            real_embeddings = self.ft(clamped)
-            factor_embeddings = self.ft_factor(factor_indices)
-            combined_embeddings = real_embeddings + factor_embeddings
-            combined_embeddings = combined_embeddings * mask.unsqueeze(-1).to(dtype=combined_embeddings.dtype)
-            return combined_embeddings.sum(dim=1) + self.ft_bias
+            real_acc = torch.nn.functional.embedding_bag(
+                flat_indices,
+                self.ft.weight,
+                offsets,
+                mode="sum",
+                include_last_offset=True,
+            )
+            factor_acc = torch.nn.functional.embedding_bag(
+                torch.remainder(flat_indices, self.num_factor_features),
+                self.ft_factor.weight,
+                offsets,
+                mode="sum",
+                include_last_offset=True,
+            )
+            return real_acc + factor_acc + self.ft_bias
 
         def forward(
             self,
@@ -71,11 +87,9 @@ if torch is not None:
             white_acc = self._accumulate(white_indices)
             black_acc = self._accumulate(black_indices)
             stm_bool = stm.ge(0.5)
-            combined = torch.where(
-                stm_bool,
-                torch.cat([white_acc, black_acc], dim=1),
-                torch.cat([black_acc, white_acc], dim=1),
-            )
+            us = torch.where(stm_bool, white_acc, black_acc)
+            them = torch.where(stm_bool, black_acc, white_acc)
+            combined = torch.cat([us, them], dim=1)
             hidden0 = torch.clamp(combined, 0.0, 1.0)
             hidden1 = torch.clamp(self.l1(hidden0), 0.0, 1.0)
             hidden2 = torch.clamp(self.l2(hidden1), 0.0, 1.0)

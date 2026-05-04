@@ -144,12 +144,14 @@ class _PreparedBatchSource:
         batch_size: int,
         total_positions: int | None,
         prefetch_batches: int,
+        pin_memory: bool,
         torch,
     ) -> None:
         self._stream = stream
         self._batch_size = batch_size
         self._remaining_positions = total_positions
         self._prefetch_batches = prefetch_batches
+        self._pin_memory = pin_memory
         self._torch = torch
         self._queue: Queue[object] | None = None
         self._stop_event = Event()
@@ -189,7 +191,7 @@ class _PreparedBatchSource:
         batch = self._stream.next_batch(requested_batch_size)
         if batch is None:
             raise StopIteration
-        prepared = _prepare_batch(batch, self._torch)
+        prepared = _prepare_batch(batch, self._torch, pin_memory=self._pin_memory)
         self._remaining_positions = _consume_positions(self._remaining_positions, prepared.batch_positions)
         return prepared
 
@@ -213,7 +215,7 @@ class _PreparedBatchSource:
                 batch = self._stream.next_batch(requested_batch_size)
                 if batch is None:
                     break
-                prepared = _prepare_batch(batch, self._torch)
+                prepared = _prepare_batch(batch, self._torch, pin_memory=self._pin_memory)
                 self._remaining_positions = _consume_positions(self._remaining_positions, prepared.batch_positions)
                 if not self._queue_put(prepared):
                     return
@@ -275,6 +277,7 @@ def _run_training_loop(state: TrainState) -> None:
                 batch_size=state.config.batch_size,
                 total_positions=remaining_positions,
                 prefetch_batches=state.config.prefetch_batches,
+                pin_memory=_pin_memory_enabled(state),
                 torch=torch,
             ) as train_batches:
                 while state.positions_seen < state.config.total_train_positions:
@@ -392,11 +395,12 @@ def _create_optimizer(config: TrainConfig, model, torch):
         model.parameters(),
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
+        foreach=False,
     )
 
 
 def _run_train_step(state: TrainState, tensors, torch, *, autocast_enabled: bool):
-    tensors = _move_tensors_to_device(tensors, state.device)
+    tensors = _move_tensors_to_device(tensors, state.device, non_blocking=_pin_memory_enabled(state))
     score_cp_stm, result_wdl_stm = _stm_oriented_targets(
         tensors["score_cp"],
         tensors["result_wdl"],
@@ -559,12 +563,17 @@ def _run_validation(state: TrainState) -> dict[str, object]:
             batch_size=state.config.batch_size,
             total_positions=validation_budget,
             prefetch_batches=state.config.prefetch_batches,
+            pin_memory=_pin_memory_enabled(state),
             torch=torch,
         ) as validation_batches:
             with torch.no_grad():
                 for prepared_batch in validation_batches:
                     batch_positions = prepared_batch.batch_positions
-                    tensors = _move_tensors_to_device(prepared_batch.tensors, state.device)
+                    tensors = _move_tensors_to_device(
+                        prepared_batch.tensors,
+                        state.device,
+                        non_blocking=_pin_memory_enabled(state),
+                    )
                     score_cp_stm, result_wdl_stm = _stm_oriented_targets(
                         tensors["score_cp"],
                         tensors["result_wdl"],
@@ -700,7 +709,8 @@ def _material_sanity_snapshot(state: TrainState) -> dict[str, object]:
     white_tensor = torch.tensor(white_indices, dtype=torch.long, device=state.device)
     black_tensor = torch.tensor(black_indices, dtype=torch.long, device=state.device)
     stm_tensor = torch.tensor(stm, dtype=torch.float32, device=state.device).unsqueeze(1)
-    predictions = state.model(white_tensor, black_tensor, stm_tensor)
+    with torch.no_grad():
+        predictions = state.model(white_tensor, black_tensor, stm_tensor)
     values = [float(value) for value in predictions.detach().cpu().reshape(-1).tolist()]
     named = {
         name: value
@@ -946,23 +956,35 @@ def _consume_positions(remaining_positions: int | None, batch_positions: int) ->
     return max(0, remaining_positions - batch_positions)
 
 
-def _prepare_batch(batch, torch) -> _PreparedBatch:
+def _prepare_batch(batch, torch, *, pin_memory: bool = False) -> _PreparedBatch:
+    tensors = {
+        "white_indices": torch.from_numpy(batch.white_indices).to(dtype=torch.long),
+        "black_indices": torch.from_numpy(batch.black_indices).to(dtype=torch.long),
+        "stm": torch.from_numpy(batch.stm).to(dtype=torch.float32).unsqueeze(1),
+        "score_cp": torch.from_numpy(batch.score_cp).to(dtype=torch.float32).unsqueeze(1),
+        "result_wdl": torch.from_numpy(batch.result_wdl).to(dtype=torch.float32).unsqueeze(1),
+    }
+    if pin_memory:
+        tensors = {name: tensor.pin_memory() for name, tensor in tensors.items()}
     return _PreparedBatch(
         batch_positions=_batch_size(batch),
-        tensors={
-            "white_indices": torch.from_numpy(batch.white_indices).to(dtype=torch.long),
-            "black_indices": torch.from_numpy(batch.black_indices).to(dtype=torch.long),
-            "stm": torch.from_numpy(batch.stm).to(dtype=torch.float32).unsqueeze(1),
-            "score_cp": torch.from_numpy(batch.score_cp).to(dtype=torch.float32).unsqueeze(1),
-            "result_wdl": torch.from_numpy(batch.result_wdl).to(dtype=torch.float32).unsqueeze(1),
-        },
+        tensors=tensors,
     )
 
 
-def _move_tensors_to_device(tensors: dict[str, object], device: str) -> dict[str, object]:
+def _move_tensors_to_device(
+    tensors: dict[str, object],
+    device: str,
+    *,
+    non_blocking: bool = False,
+) -> dict[str, object]:
     if device == "cpu":
         return tensors
-    return {name: tensor.to(device=device) for name, tensor in tensors.items()}
+    return {name: tensor.to(device=device, non_blocking=non_blocking) for name, tensor in tensors.items()}
+
+
+def _pin_memory_enabled(state: TrainState) -> bool:
+    return state.device == "cuda" and state.config.cuda_pin_memory
 
 
 def _batch_size(batch) -> int:

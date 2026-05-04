@@ -308,6 +308,7 @@ class ValidationTrainingTests(unittest.TestCase):
             batch_size=2,
             total_positions=None,
             prefetch_batches=0,
+            pin_memory=False,
             torch=torch,
         ) as sync_source:
             sync_scores = [batch.tensors["score_cp"].squeeze(1).tolist() for batch in sync_source]
@@ -318,6 +319,7 @@ class ValidationTrainingTests(unittest.TestCase):
             batch_size=2,
             total_positions=None,
             prefetch_batches=2,
+            pin_memory=False,
             torch=torch,
         ) as prefetched_source:
             prefetched_scores = [batch.tensors["score_cp"].squeeze(1).tolist() for batch in prefetched_source]
@@ -332,6 +334,7 @@ class ValidationTrainingTests(unittest.TestCase):
             batch_size=2,
             total_positions=None,
             prefetch_batches=2,
+            pin_memory=False,
             torch=torch,
         ) as source:
             first = next(source)
