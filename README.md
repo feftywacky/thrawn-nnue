@@ -1,6 +1,6 @@
 # thrawn-nnue
 
-`thrawn-nnue` is a trainer/export pipeline for a fixed HalfKP chess NNUE aimed at direct centipawn outputs for engine pruning.
+`thrawn-nnue` is a cli trainer for a HalfKP chess NNUE.
 
 ## Architecture
 
@@ -16,13 +16,66 @@ Training uses classic HalfKP with training-time `P` factorization. Exported `.nn
 
 ## Installation
 
-Install Python 3.11 and the repo in editable mode:
+This repo is packaged with `pyproject.toml`. Current project/package versions declared in the repo:
+
+- `thrawn-nnue`: `0.1.0`
+- Python: `>=3.11`
+- PyTorch: `>=2.2`
+- NumPy: `>=1.26`
+- Matplotlib: `>=3.8`
+- tqdm: `>=4.66
+
+If you want CUDA training, install a CUDA-enabled PyTorch wheel first, then install this repo without re-resolving dependencies. That avoids accidentally pulling a CPU-only PyTorch build from the default index.
+
+1. Create and activate a Python virtual environment:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+```
+
+2. Install CUDA PyTorch.
+
+For CUDA 12.1:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+```
+
+For CUDA 11.8:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu118
+```
+
+3. Install this repo in editable mode without replacing your chosen Torch build:
+
+```bash
+pip install --no-deps -e .
+```
+
+4. Install the remaining runtime dependencies:
+
+```bash
+pip install "numpy>=1.26" "matplotlib>=3.8" "tqdm>=4.66"
+```
+
+5. Confirm that PyTorch can see CUDA:
+
+```bash
+python -c "import torch; print(torch.__version__); print('cuda_available=', torch.cuda.is_available()); print('cuda_version=', torch.version.cuda)"
+```
+
+You should see `cuda_available= True`. If it prints `False`, you likely installed a CPU-only build or your CUDA driver/runtime does not match the wheel you installed.
+
+For CPU-only installation, you can simply run:
 
 ```bash
 python3.11 -m pip install -e .
 ```
 
-The native `.binpack` bridge builds automatically on first use.
+The native `.binpack` bridge builds automatically on first use. Training config files can require CUDA explicitly: [v2.toml](/Users/feiyulin/Code/thrawn-nnue/configs/v2.toml) sets `device = "cuda"`, and training will fail fast if the installed PyTorch build does not include CUDA support.
 
 ## Quick Start
 
@@ -66,20 +119,3 @@ thrawn-nnue verify-export --checkpoint runs/v2/checkpoints/best.pt --nnue runs/v
 thrawn-nnue metrics --run-dir runs/v2
 ```
 
-## Training Notes
-
-- `feature_set = "halfkp"` is the only supported feature set.
-- Binpack scores are converted from Stockfish internal units to true centipawns before inspection and training: `score_cp = raw_score * 100 / 208`.
-- `score_clip` clips teacher centipawns directly; there is no `score_scale`.
-- The training loss is expectation-space MSE on a blended target. For a cp value:
-  `win = sigmoid((cp - offset) / scale)`, `loss = sigmoid((-cp - offset) / scale)`, `draw = 1 - win - loss`, `expectation = win + 0.5 * draw`.
-- `wdl_lambda` weights the teacher expectation, so `wdl_lambda = 0.9` means 90% teacher expectation and 10% game result.
-- `sanity_anchor_weight` adds a small zero-cp anchor for neutral start/bare-king positions. It is enabled in v2.
-- LR decay is epoch-based cosine annealing: `epoch_positions` defines the fixed position budget per epoch, and scheduler steps occur at completed epoch boundaries.
-- `verify-export` includes a fixed material sanity ladder so you can quickly check `pawn < knight < rook < queen`.
-- The engine-side contract is documented in [nnue_spec.md](/Users/feiyulin/Code/thrawn-nnue/docs/nnue_spec.md).
-
-## Scope
-
-- This repository is trainer/export/spec only.
-- Engine loader and search integration stay in your engine repo.
