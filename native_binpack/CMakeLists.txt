@@ -13,8 +13,14 @@ target_include_directories(thrawn_nnue_native PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nnue_pytorch
 )
 
-if (APPLE)
+if (MSVC)
+  target_compile_options(thrawn_nnue_native PRIVATE /O2)
+elseif (APPLE)
   target_compile_options(thrawn_nnue_native PRIVATE -O3)
 else()
   target_compile_options(thrawn_nnue_native PRIVATE -O3 -fPIC)
+endif()
+
+if (WIN32)
+  set_target_properties(thrawn_nnue_native PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif()
