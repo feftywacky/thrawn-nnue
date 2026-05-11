@@ -7,7 +7,6 @@ import ctypes
 import math
 import os
 import subprocess
-import sys
 
 import numpy as np
 
@@ -23,14 +22,22 @@ class _BatchView(ctypes.Structure):
         ("white_indices", ctypes.POINTER(ctypes.c_int32)),
         ("black_indices", ctypes.POINTER(ctypes.c_int32)),
         ("stm", ctypes.POINTER(ctypes.c_float)),
-        ("score_cp", ctypes.POINTER(ctypes.c_float)),
+        ("score", ctypes.POINTER(ctypes.c_float)),
         ("result_wdl", ctypes.POINTER(ctypes.c_float)),
     ]
 
 
 class _InspectStats(ctypes.Structure):
     _fields_ = [
+        ("entries_seen", ctypes.c_uint64),
+        ("entries_skipped", ctypes.c_uint64),
         ("entries_read", ctypes.c_uint64),
+        ("root_entries", ctypes.c_uint64),
+        ("continuation_entries", ctypes.c_uint64),
+        ("chunk_count", ctypes.c_uint64),
+        ("chunk_payload_bytes", ctypes.c_uint64),
+        ("min_chunk_payload_bytes", ctypes.c_uint32),
+        ("max_chunk_payload_bytes", ctypes.c_uint32),
         ("white_to_move", ctypes.c_uint64),
         ("black_to_move", ctypes.c_uint64),
         ("wins", ctypes.c_uint64),
@@ -42,6 +49,8 @@ class _InspectStats(ctypes.Structure):
         ("max_ply", ctypes.c_uint16),
         ("mean_score", ctypes.c_double),
         ("score_std", ctypes.c_double),
+        ("mean_raw_score", ctypes.c_double),
+        ("raw_score_std", ctypes.c_double),
         ("mean_abs_score", ctypes.c_double),
         ("abs_score_std", ctypes.c_double),
         ("mean_ply", ctypes.c_double),
@@ -50,6 +59,7 @@ class _InspectStats(ctypes.Structure):
         ("piece_count_std", ctypes.c_double),
         ("mean_non_king_piece_count", ctypes.c_double),
         ("result_mean", ctypes.c_double),
+        ("result_wdl_mean", ctypes.c_double),
         ("score_result_correlation", ctypes.c_double),
         ("score_p01", ctypes.c_double),
         ("score_p05", ctypes.c_double),
@@ -101,14 +111,12 @@ class _InspectStats(ctypes.Structure):
         ("mean_abs_score_win", ctypes.c_double),
         ("mean_abs_score_draw", ctypes.c_double),
         ("mean_abs_score_loss", ctypes.c_double),
+        ("capture_positions", ctypes.c_uint64),
+        ("in_check_positions", ctypes.c_uint64),
+        ("move_type_counts", ctypes.c_uint64 * 4),
         ("piece_type_counts", ctypes.c_uint64 * 6),
         ("white_piece_counts", ctypes.c_uint64 * 6),
         ("black_piece_counts", ctypes.c_uint64 * 6),
-        ("wdl_scale_signed_target_mean", ctypes.c_double * 7),
-        ("wdl_scale_signed_target_std", ctypes.c_double * 7),
-        ("wdl_scale_abs_target_mean", ctypes.c_double * 7),
-        ("wdl_scale_saturated_99", ctypes.c_uint64 * 7),
-        ("wdl_scale_saturated_999", ctypes.c_uint64 * 7),
     ]
 
 
@@ -152,7 +160,13 @@ _PLY_BUCKET_LABELS = ["0_19", "20_39", "40_59", "60_79", "80_99", "100_149", "15
 _PIECE_COUNT_BUCKET_LABELS = ["2_7", "8_15", "16_23", "24_32"]
 _PHASE_LABELS = ["tablebase_like", "endgame", "late_middlegame", "opening_middlegame"]
 _PIECE_TYPE_LABELS = ["pawns", "knights", "bishops", "rooks", "queens", "kings"]
-_WDL_SCALE_LABELS = ["197", "410", "600", "1000", "2000", "4000", "8000"]
+_MOVE_TYPE_LABELS = ["normal", "promotion", "castle", "en_passant"]
+_STOCKFISH_INTERNAL_TO_CP = 100.0 / 208.0
+_SPLIT_ROLE_IDS = {
+    "all": 0,
+    "train": 1,
+    "validation": 2,
+}
 
 
 @dataclass(slots=True)
@@ -160,7 +174,7 @@ class NativeBatch:
     white_indices: np.ndarray
     black_indices: np.ndarray
     stm: np.ndarray
-    score_cp: np.ndarray
+    score: np.ndarray
     result_wdl: np.ndarray
 
 
@@ -190,22 +204,69 @@ def build_native_extension(force: bool = False) -> Path:
     return lib_path
 
 
-def inspect_binpack(path: str | Path) -> dict[str, int | float]:
+def inspect_binpack(
+    path: str | Path,
+    *,
+    skip_capture_positions: bool = False,
+    skip_wdl_score_mismatch: bool = False,
+    max_abs_score: float = 0.0,
+    sample_entries: int = 0,
+) -> dict[str, object]:
     lib = _load_library()
-    return _inspect_binpack_with_library(path, lib)
+    return _inspect_binpack_with_library(
+        path,
+        lib,
+        skip_capture_positions=skip_capture_positions,
+        skip_wdl_score_mismatch=skip_wdl_score_mismatch,
+        max_abs_score=max_abs_score,
+        sample_entries=sample_entries,
+    )
 
 
-def _inspect_binpack_with_library(path: str | Path, lib: ctypes.CDLL) -> dict[str, int | float]:
+def _inspect_binpack_with_library(
+    path: str | Path,
+    lib: ctypes.CDLL,
+    *,
+    skip_capture_positions: bool = False,
+    skip_wdl_score_mismatch: bool = False,
+    max_abs_score: float = 0.0,
+    sample_entries: int = 0,
+) -> dict[str, object]:
+    if max_abs_score < 0.0:
+        raise ValueError("max_abs_score must be >= 0")
+    if sample_entries < 0:
+        raise ValueError("sample_entries must be >= 0")
     stats = _InspectStats()
     resolved = Path(path).resolve()
-    ok = lib.thrawn_inspect_binpack(os.fsencode(resolved), ctypes.byref(stats))
+    ok = lib.thrawn_inspect_binpack_with_options(
+        os.fsencode(resolved),
+        ctypes.byref(stats),
+        1 if skip_capture_positions else 0,
+        1 if skip_wdl_score_mismatch else 0,
+        float(max_abs_score),
+        int(sample_entries),
+    )
     if ok != 1:
         raise NativeError(_last_error(lib))
     entries_read = int(stats.entries_read)
+    file_bytes = resolved.stat().st_size
     result = {
         "path": str(resolved),
-        "file_bytes": resolved.stat().st_size,
+        "file_bytes": file_bytes,
+        "format": _binpack_format_summary(),
+        "file": _file_summary(stats, file_bytes),
+        "filters": {
+            "skip_capture_positions": bool(skip_capture_positions),
+            "skip_wdl_score_mismatch": bool(skip_wdl_score_mismatch),
+            "max_abs_score": float(max_abs_score),
+            "sample_entries": int(sample_entries),
+        },
+        "sampled": sample_entries > 0,
+        "entries_seen": int(stats.entries_seen),
+        "entries_skipped_by_filters": int(stats.entries_skipped),
         "entries_read": int(stats.entries_read),
+        "root_entries": int(stats.root_entries),
+        "continuation_entries": int(stats.continuation_entries),
         "white_to_move": int(stats.white_to_move),
         "black_to_move": int(stats.black_to_move),
         "wins": int(stats.wins),
@@ -213,10 +274,14 @@ def _inspect_binpack_with_library(path: str | Path, lib: ctypes.CDLL) -> dict[st
         "losses": int(stats.losses),
         "min_score": float(stats.min_score),
         "max_score": float(stats.max_score),
+        "min_raw_score": _cp_to_raw_score(float(stats.min_score)),
+        "max_raw_score": _cp_to_raw_score(float(stats.max_score)),
         "min_ply": int(stats.min_ply),
         "max_ply": int(stats.max_ply),
         "mean_score": float(stats.mean_score),
         "score_std": float(stats.score_std),
+        "mean_raw_score": float(stats.mean_raw_score),
+        "raw_score_std": float(stats.raw_score_std),
         "mean_abs_score": float(stats.mean_abs_score),
         "abs_score_std": float(stats.abs_score_std),
         "mean_ply": float(stats.mean_ply),
@@ -225,6 +290,7 @@ def _inspect_binpack_with_library(path: str | Path, lib: ctypes.CDLL) -> dict[st
         "piece_count_std": float(stats.piece_count_std),
         "mean_non_king_piece_count": float(stats.mean_non_king_piece_count),
         "result_mean": float(stats.result_mean),
+        "result_wdl_mean": float(stats.result_wdl_mean),
         "score_result_correlation": float(stats.score_result_correlation),
         "score_percentiles": {
             "p01": float(stats.score_p01),
@@ -297,8 +363,18 @@ def _inspect_binpack_with_library(path: str | Path, lib: ctypes.CDLL) -> dict[st
                 "mean_abs_score": float(stats.mean_abs_score_loss),
             },
         },
+        "move_types": _move_type_summary(stats, entries_read),
+        "position_flags": {
+            "capture_positions": {
+                "count": int(stats.capture_positions),
+                "fraction": _safe_fraction(int(stats.capture_positions), entries_read),
+            },
+            "in_check_positions": {
+                "count": int(stats.in_check_positions),
+                "fraction": _safe_fraction(int(stats.in_check_positions), entries_read),
+            },
+        },
         "material": _material_summary(stats, entries_read),
-        "wdl_scale_saturation": _native_wdl_scale_saturation(stats, entries_read),
     }
     result["result_percentages"] = {
         "wins": _safe_fraction(int(stats.wins), entries_read),
@@ -309,26 +385,58 @@ def _inspect_binpack_with_library(path: str | Path, lib: ctypes.CDLL) -> dict[st
         key: _safe_fraction(value, entries_read)
         for key, value in result["abs_score_threshold_counts"].items()
     }
+    result["raw_score_percentiles"] = {
+        key: _cp_to_raw_score(value)
+        for key, value in result["score_percentiles"].items()
+    }
+    result["abs_raw_score_percentiles"] = {
+        key: _cp_to_raw_score(value)
+        for key, value in result["abs_score_percentiles"].items()
+    }
     result["result_score_alignment"]["fractions"] = {
         key: _safe_fraction(value, entries_read)
         for key, value in result["result_score_alignment"].items()
     }
-    result["wdl_scale_diagnostics"] = _wdl_scale_diagnostics(result)
-    result["recommendation"] = _inspect_recommendation(result)
+    if sample_entries > 0:
+        sampled_scan_bytes = int(stats.chunk_payload_bytes) + int(stats.chunk_count) * 8
+        file_summary = result["file"]
+        file_summary["sample_scan_bytes"] = sampled_scan_bytes
+        file_summary["bytes_per_entry_seen"] = _safe_fraction(sampled_scan_bytes, int(stats.entries_seen))
+        file_summary["bytes_per_entry_read"] = _safe_fraction(sampled_scan_bytes, entries_read)
+    result["wdl"] = _wdl_summary(result)
     return result
 
 
-def inspect_binpack_collection(paths: list[str | Path], *, jobs: int | None = None) -> dict[str, object]:
+def inspect_binpack_collection(
+    paths: list[str | Path],
+    *,
+    jobs: int | None = None,
+    skip_capture_positions: bool = False,
+    skip_wdl_score_mismatch: bool = False,
+    max_abs_score: float = 0.0,
+    sample_entries: int = 0,
+) -> dict[str, object]:
     resolved_paths = [Path(path).resolve() for path in paths]
     if not resolved_paths:
         raise ValueError("At least one .binpack path is required")
+    if max_abs_score < 0.0:
+        raise ValueError("max_abs_score must be >= 0")
+    if sample_entries < 0:
+        raise ValueError("sample_entries must be >= 0")
 
     sorted_paths = sorted(resolved_paths)
     worker_count = _inspection_worker_count(len(sorted_paths), jobs)
     lib = _load_library()
 
-    def inspect_path(path: Path) -> dict[str, int | float]:
-        return _inspect_binpack_with_library(path, lib)
+    def inspect_path(path: Path) -> dict[str, object]:
+        return _inspect_binpack_with_library(
+            path,
+            lib,
+            skip_capture_positions=skip_capture_positions,
+            skip_wdl_score_mismatch=skip_wdl_score_mismatch,
+            max_abs_score=max_abs_score,
+            sample_entries=sample_entries,
+        )
 
     if worker_count == 1:
         stats_list = [inspect_path(path) for path in sorted_paths]
@@ -344,6 +452,14 @@ def inspect_binpack_collection(paths: list[str | Path], *, jobs: int | None = No
     aggregate = _aggregate_inspection_stats([item["stats"] for item in per_file])
     return {
         "file_count": len(per_file),
+        "format": _binpack_format_summary(),
+        "filters": {
+            "skip_capture_positions": bool(skip_capture_positions),
+            "skip_wdl_score_mismatch": bool(skip_wdl_score_mismatch),
+            "max_abs_score": float(max_abs_score),
+            "sample_entries": int(sample_entries),
+        },
+        "sampled": sample_entries > 0,
         "aggregate": aggregate,
         "files": per_file,
     }
@@ -381,20 +497,24 @@ class BinpackStream:
         num_threads: int = 1,
         cyclic: bool = False,
         skip_capture_positions: bool = False,
-        skip_decisive_score_mismatch: bool = False,
-        decisive_score_mismatch_margin: float = 0.0,
-        skip_draw_score_mismatch: bool = False,
-        draw_score_mismatch_margin: float = 0.0,
+        skip_wdl_score_mismatch: bool = False,
+        skip_tactical_positions: bool = False,
+        random_fen_skipping: int = 0,
         max_abs_score: float = 0.0,
+        split_role: str = "all",
+        validation_split_fraction: float = 0.0,
     ):
         if not paths:
             raise ValueError("At least one dataset path is required")
-        if decisive_score_mismatch_margin < 0.0:
-            raise ValueError("decisive_score_mismatch_margin must be >= 0")
-        if draw_score_mismatch_margin < 0.0:
-            raise ValueError("draw_score_mismatch_margin must be >= 0")
         if max_abs_score < 0.0:
             raise ValueError("max_abs_score must be >= 0")
+        if validation_split_fraction < 0.0 or validation_split_fraction >= 1.0:
+            raise ValueError("validation_split_fraction must be >= 0 and < 1")
+        if random_fen_skipping < 0:
+            raise ValueError("random_fen_skipping must be >= 0")
+        if split_role not in _SPLIT_ROLE_IDS:
+            allowed = ", ".join(sorted(_SPLIT_ROLE_IDS))
+            raise ValueError(f"split_role must be one of: {allowed}")
 
         self._handle = None
         self._lib = _load_library()
@@ -406,11 +526,12 @@ class BinpackStream:
             num_threads,
             1 if cyclic else 0,
             1 if skip_capture_positions else 0,
-            1 if skip_decisive_score_mismatch else 0,
-            float(decisive_score_mismatch_margin),
-            1 if skip_draw_score_mismatch else 0,
-            float(draw_score_mismatch_margin),
+            1 if skip_wdl_score_mismatch else 0,
+            1 if skip_tactical_positions else 0,
+            int(random_fen_skipping),
             float(max_abs_score),
+            _SPLIT_ROLE_IDS[split_role],
+            float(validation_split_fraction),
         )
         if not self._handle:
             raise NativeError(_last_error(self._lib))
@@ -435,13 +556,13 @@ class BinpackStream:
             white_indices = np.ctypeslib.as_array(view.white_indices, shape=(size, max_active)).copy()
             black_indices = np.ctypeslib.as_array(view.black_indices, shape=(size, max_active)).copy()
             stm = np.ctypeslib.as_array(view.stm, shape=(size,)).copy()
-            score_cp = np.ctypeslib.as_array(view.score_cp, shape=(size,)).copy()
+            score = np.ctypeslib.as_array(view.score, shape=(size,)).copy()
             result_wdl = np.ctypeslib.as_array(view.result_wdl, shape=(size,)).copy()
             return NativeBatch(
                 white_indices=white_indices,
                 black_indices=black_indices,
                 stm=stm,
-                score_cp=score_cp,
+                score=score,
                 result_wdl=result_wdl,
             )
         finally:
@@ -487,9 +608,10 @@ def _configure_library_symbols(lib: ctypes.CDLL) -> None:
         ctypes.c_int32,
         ctypes.c_int32,
         ctypes.c_int32,
-        ctypes.c_double,
+        ctypes.c_int32,
         ctypes.c_int32,
         ctypes.c_double,
+        ctypes.c_int32,
         ctypes.c_double,
     ]
     lib.thrawn_binpack_open_many.restype = ctypes.c_void_p
@@ -501,6 +623,15 @@ def _configure_library_symbols(lib: ctypes.CDLL) -> None:
     lib.thrawn_batch_free.restype = None
     lib.thrawn_inspect_binpack.argtypes = [ctypes.c_char_p, ctypes.POINTER(_InspectStats)]
     lib.thrawn_inspect_binpack.restype = ctypes.c_int32
+    lib.thrawn_inspect_binpack_with_options.argtypes = [
+        ctypes.c_char_p,
+        ctypes.POINTER(_InspectStats),
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_double,
+        ctypes.c_uint64,
+    ]
+    lib.thrawn_inspect_binpack_with_options.restype = ctypes.c_int32
     lib.thrawn_write_fixture_binpack.argtypes = [ctypes.c_char_p]
     lib.thrawn_write_fixture_binpack.restype = ctypes.c_int32
     lib.thrawn_last_error.argtypes = []
@@ -529,6 +660,10 @@ def _safe_fraction(count: int, total: int) -> float:
     return float(count) / float(total)
 
 
+def _cp_to_raw_score(score_cp: float) -> float:
+    return float(score_cp) / _STOCKFISH_INTERNAL_TO_CP
+
+
 def _inspection_worker_count(file_count: int, jobs: int | None) -> int:
     if file_count <= 0:
         return 1
@@ -547,6 +682,61 @@ def _safe_std_from_parts(sum_value: float, sum_sq: float, total: int) -> float:
     return math.sqrt(max(0.0, variance))
 
 
+def _binpack_format_summary() -> dict[str, object]:
+    return {
+        "name": "nnue-pytorch binpack",
+        "container": {
+            "chunk_magic": "BINP",
+            "chunk_header_bytes": 8,
+            "chunk_payload_size_bytes": 4,
+            "chunk_payload_size_endianness": "little",
+            "writer_target_chunk_payload_bytes": 1024 * 1024,
+            "max_supported_chunk_payload_bytes": 100 * 1024 * 1024,
+        },
+        "entry": {
+            "root_entry_bytes": 32,
+            "continuation_count_bytes": 2,
+            "continuation_encoding": "bit-packed legal move ids plus variable-length signed score deltas",
+            "score_raw_type": "int16 Stockfish internal eval",
+            "score_cp_multiplier": _STOCKFISH_INTERNAL_TO_CP,
+            "score_cp_formula": "score_cp = raw_score * 100 / 208",
+            "ply_bits": 14,
+            "result_raw_values": {"win": 1, "draw": 0, "loss": -1},
+            "result_wdl_values": {"win": 1.0, "draw": 0.5, "loss": 0.0},
+        },
+        "features": {
+            "feature_set": "HalfKP",
+            "feature_count": 40960,
+            "factor_features": 640,
+            "max_active_features_per_perspective": 30,
+            "perspectives": ["white", "black"],
+            "king_pieces_in_feature_lists": False,
+        },
+    }
+
+
+def _file_summary(stats: _InspectStats, file_bytes: int) -> dict[str, int | float]:
+    chunk_count = int(stats.chunk_count)
+    chunk_payload_bytes = int(stats.chunk_payload_bytes)
+    entries_seen = int(stats.entries_seen)
+    entries_read = int(stats.entries_read)
+    return {
+        "bytes": int(file_bytes),
+        "chunk_count": chunk_count,
+        "chunk_payload_bytes": chunk_payload_bytes,
+        "chunk_header_overhead_bytes": chunk_count * 8,
+        "min_chunk_payload_bytes": int(stats.min_chunk_payload_bytes),
+        "max_chunk_payload_bytes": int(stats.max_chunk_payload_bytes),
+        "mean_chunk_payload_bytes": _safe_fraction(chunk_payload_bytes, chunk_count),
+        "bytes_per_entry_seen": _safe_fraction(int(file_bytes), entries_seen),
+        "bytes_per_entry_read": _safe_fraction(int(file_bytes), entries_read),
+    }
+
+
+def _move_type_summary(stats: _InspectStats, total: int) -> dict[str, dict[str, int | float]]:
+    return _bucket_summary(stats.move_type_counts, _MOVE_TYPE_LABELS, total)
+
+
 def _bucket_summary(counts, labels: list[str], total: int) -> dict[str, dict[str, int | float]]:
     return {
         label: {
@@ -554,6 +744,49 @@ def _bucket_summary(counts, labels: list[str], total: int) -> dict[str, dict[str
             "fraction": _safe_fraction(int(counts[index]), total),
         }
         for index, label in enumerate(labels)
+    }
+
+
+def _wdl_summary(stats: dict[str, object]) -> dict[str, object]:
+    entries_read = int(stats["entries_read"])
+    return {
+        "stored_result_targets": {
+            "wins": {
+                "count": int(stats["wins"]),
+                "fraction": _safe_fraction(int(stats["wins"]), entries_read),
+                "wdl_value": 1.0,
+                "signed_value": 1.0,
+            },
+            "draws": {
+                "count": int(stats["draws"]),
+                "fraction": _safe_fraction(int(stats["draws"]), entries_read),
+                "wdl_value": 0.5,
+                "signed_value": 0.0,
+            },
+            "losses": {
+                "count": int(stats["losses"]),
+                "fraction": _safe_fraction(int(stats["losses"]), entries_read),
+                "wdl_value": 0.0,
+                "signed_value": -1.0,
+            },
+        },
+        "result_wdl_mean": float(stats["result_wdl_mean"]),
+        "signed_result_mean": float(stats["result_mean"]),
+        "teacher_target_formula": {
+            "score_input": "raw_score",
+            "win": "sigmoid((raw_score - offset) / scale)",
+            "loss": "sigmoid((-raw_score - offset) / scale)",
+            "draw": "1 - win - loss",
+            "expectation": "win + 0.5 * draw",
+        },
+        "score_result_filter": {
+            "name": "skip_wdl_score_mismatch",
+            "enabled": bool(stats["filters"]["skip_wdl_score_mismatch"]),
+            "model": "TrainingDataEntry::score_result_prob() Stockfish win/draw/loss model over raw score and ply",
+            "effect": "when enabled, training entries are stochastically downsampled and validation inspection uses a deterministic hash draw",
+        },
+        "score_result_alignment": stats["result_score_alignment"],
+        "score_by_result": stats["score_by_result"],
     }
 
 
@@ -594,23 +827,6 @@ def _material_summary(stats: _InspectStats, total: int) -> dict[str, object]:
         "mean_white_piece_types_per_position": _piece_means_by_type(stats.white_piece_counts, total),
         "mean_black_piece_types_per_position": _piece_means_by_type(stats.black_piece_counts, total),
     }
-
-
-def _native_wdl_scale_saturation(stats: _InspectStats, total: int) -> dict[str, dict[str, float]]:
-    summary: dict[str, dict[str, float]] = {}
-    for index, label in enumerate(_WDL_SCALE_LABELS):
-        saturated_99 = int(stats.wdl_scale_saturated_99[index])
-        saturated_999 = int(stats.wdl_scale_saturated_999[index])
-        summary[label] = {
-            "signed_target_mean": float(stats.wdl_scale_signed_target_mean[index]),
-            "signed_target_std": float(stats.wdl_scale_signed_target_std[index]),
-            "abs_target_mean": float(stats.wdl_scale_abs_target_mean[index]),
-            "signed_target_le_0.01_or_ge_0.99_count": saturated_99,
-            "signed_target_le_0.01_or_ge_0.99_fraction": _safe_fraction(saturated_99, total),
-            "signed_target_le_0.001_or_ge_0.999_count": saturated_999,
-            "signed_target_le_0.001_or_ge_0.999_fraction": _safe_fraction(saturated_999, total),
-        }
-    return summary
 
 
 def _aggregate_bucket_summaries(
@@ -675,6 +891,23 @@ def _aggregate_alignment_summaries(
     return summary
 
 
+def _aggregate_position_flags(
+    stats_list: list[dict[str, object]],
+    total: int,
+) -> dict[str, dict[str, int | float]]:
+    keys = ["capture_positions", "in_check_positions"]
+    return {
+        key: {
+            "count": sum(int(stats["position_flags"][key]["count"]) for stats in stats_list),
+            "fraction": _safe_fraction(
+                sum(int(stats["position_flags"][key]["count"]) for stats in stats_list),
+                total,
+            ),
+        }
+        for key in keys
+    }
+
+
 def _aggregate_score_by_result(stats_list: list[dict[str, object]]) -> dict[str, dict[str, float]]:
     result_count_keys = {"wins": "wins", "draws": "draws", "losses": "losses"}
     summary: dict[str, dict[str, float]] = {}
@@ -728,58 +961,19 @@ def _aggregate_material_summaries(
     }
 
 
-def _aggregate_wdl_scale_saturation(
-    stats_list: list[dict[str, object]],
-    total: int,
-) -> dict[str, dict[str, float]]:
-    summary: dict[str, dict[str, float]] = {}
-    for label in _WDL_SCALE_LABELS:
-        signed_sum = sum(
-            float(stats["wdl_scale_saturation"][label]["signed_target_mean"]) * int(stats["entries_read"])
-            for stats in stats_list
-        )
-        signed_sum_sq = sum(
-            (
-                float(stats["wdl_scale_saturation"][label]["signed_target_std"]) ** 2
-                + float(stats["wdl_scale_saturation"][label]["signed_target_mean"]) ** 2
-            )
-            * int(stats["entries_read"])
-            for stats in stats_list
-        )
-        abs_sum = sum(
-            float(stats["wdl_scale_saturation"][label]["abs_target_mean"]) * int(stats["entries_read"])
-            for stats in stats_list
-        )
-        saturated_99 = sum(
-            int(stats["wdl_scale_saturation"][label]["signed_target_le_0.01_or_ge_0.99_count"])
-            for stats in stats_list
-        )
-        saturated_999 = sum(
-            int(stats["wdl_scale_saturation"][label]["signed_target_le_0.001_or_ge_0.999_count"])
-            for stats in stats_list
-        )
-        summary[label] = {
-            "signed_target_mean": signed_sum / float(total),
-            "signed_target_std": _safe_std_from_parts(signed_sum, signed_sum_sq, total),
-            "abs_target_mean": abs_sum / float(total),
-            "signed_target_le_0.01_or_ge_0.99_count": saturated_99,
-            "signed_target_le_0.01_or_ge_0.99_fraction": _safe_fraction(saturated_99, total),
-            "signed_target_le_0.001_or_ge_0.999_count": saturated_999,
-            "signed_target_le_0.001_or_ge_0.999_fraction": _safe_fraction(saturated_999, total),
-        }
-    return summary
-
-
 def _aggregate_inspection_stats(stats_list: list[dict[str, object]]) -> dict[str, object]:
     total_entries = sum(int(stats["entries_read"]) for stats in stats_list)
-    if total_entries <= 0:
-        raise ValueError("Inspection aggregate requires at least one dataset entry")
+    total_seen = sum(int(stats["entries_seen"]) for stats in stats_list)
 
     def weighted_mean(key: str) -> float:
+        if total_entries <= 0:
+            return 0.0
         numerator = sum(float(stats[key]) * int(stats["entries_read"]) for stats in stats_list)
         return numerator / total_entries
 
     def aggregate_std(mean_key: str, std_key: str) -> float:
+        if total_entries <= 0:
+            return 0.0
         total_sum = sum(float(stats[mean_key]) * int(stats["entries_read"]) for stats in stats_list)
         total_sum_sq = sum(
             ((float(stats[std_key]) ** 2) + (float(stats[mean_key]) ** 2)) * int(stats["entries_read"])
@@ -787,9 +981,38 @@ def _aggregate_inspection_stats(stats_list: list[dict[str, object]]) -> dict[str
         )
         return _safe_std_from_parts(total_sum, total_sum_sq, total_entries)
 
+    chunk_count = sum(int(stats["file"]["chunk_count"]) for stats in stats_list)
+    chunk_payload_bytes = sum(int(stats["file"]["chunk_payload_bytes"]) for stats in stats_list)
+    sampled_scan_bytes = sum(int(stats["file"].get("sample_scan_bytes", 0)) for stats in stats_list)
+    sampled = any(bool(stats.get("sampled")) for stats in stats_list)
+    entry_byte_basis = sampled_scan_bytes if sampled and sampled_scan_bytes > 0 else sum(
+        int(stats["file_bytes"]) for stats in stats_list
+    )
+    non_empty_chunk_mins = [
+        int(stats["file"]["min_chunk_payload_bytes"])
+        for stats in stats_list
+        if int(stats["file"]["chunk_count"]) > 0
+    ]
+
     aggregate: dict[str, object] = {
         "file_bytes": sum(int(stats["file_bytes"]) for stats in stats_list),
+        "filters": dict(stats_list[0].get("filters", {})),
+        "file": {
+            "bytes": sum(int(stats["file_bytes"]) for stats in stats_list),
+            "chunk_count": chunk_count,
+            "chunk_payload_bytes": chunk_payload_bytes,
+            "chunk_header_overhead_bytes": chunk_count * 8,
+            "min_chunk_payload_bytes": min(non_empty_chunk_mins) if non_empty_chunk_mins else 0,
+            "max_chunk_payload_bytes": max(int(stats["file"]["max_chunk_payload_bytes"]) for stats in stats_list),
+            "mean_chunk_payload_bytes": _safe_fraction(chunk_payload_bytes, chunk_count),
+            "bytes_per_entry_seen": _safe_fraction(entry_byte_basis, total_seen),
+            "bytes_per_entry_read": _safe_fraction(entry_byte_basis, total_entries),
+        },
+        "entries_seen": total_seen,
+        "entries_skipped_by_filters": sum(int(stats["entries_skipped_by_filters"]) for stats in stats_list),
         "entries_read": total_entries,
+        "root_entries": sum(int(stats["root_entries"]) for stats in stats_list),
+        "continuation_entries": sum(int(stats["continuation_entries"]) for stats in stats_list),
         "white_to_move": sum(int(stats["white_to_move"]) for stats in stats_list),
         "black_to_move": sum(int(stats["black_to_move"]) for stats in stats_list),
         "wins": sum(int(stats["wins"]) for stats in stats_list),
@@ -797,10 +1020,14 @@ def _aggregate_inspection_stats(stats_list: list[dict[str, object]]) -> dict[str
         "losses": sum(int(stats["losses"]) for stats in stats_list),
         "min_score": min(float(stats["min_score"]) for stats in stats_list),
         "max_score": max(float(stats["max_score"]) for stats in stats_list),
+        "min_raw_score": min(float(stats["min_raw_score"]) for stats in stats_list),
+        "max_raw_score": max(float(stats["max_raw_score"]) for stats in stats_list),
         "min_ply": min(int(stats["min_ply"]) for stats in stats_list),
         "max_ply": max(int(stats["max_ply"]) for stats in stats_list),
         "mean_score": weighted_mean("mean_score"),
         "score_std": aggregate_std("mean_score", "score_std"),
+        "mean_raw_score": weighted_mean("mean_raw_score"),
+        "raw_score_std": aggregate_std("mean_raw_score", "raw_score_std"),
         "mean_abs_score": weighted_mean("mean_abs_score"),
         "abs_score_std": aggregate_std("mean_abs_score", "abs_score_std"),
         "mean_ply": weighted_mean("mean_ply"),
@@ -809,12 +1036,15 @@ def _aggregate_inspection_stats(stats_list: list[dict[str, object]]) -> dict[str
         "piece_count_std": aggregate_std("mean_piece_count", "piece_count_std"),
         "mean_non_king_piece_count": weighted_mean("mean_non_king_piece_count"),
         "result_mean": weighted_mean("result_mean"),
+        "result_wdl_mean": weighted_mean("result_wdl_mean"),
         "score_result_correlation": weighted_mean("score_result_correlation"),
         "abs_score_threshold_counts": {
             threshold: sum(int(stats["abs_score_threshold_counts"][threshold]) for stats in stats_list)
             for threshold in ["ge_1000", "ge_2000", "ge_4000", "ge_8000", "ge_16000"]
         },
     }
+    if sampled:
+        aggregate["file"]["sample_scan_bytes"] = sampled_scan_bytes
     aggregate["result_percentages"] = {
         "wins": _safe_fraction(int(aggregate["wins"]), total_entries),
         "draws": _safe_fraction(int(aggregate["draws"]), total_entries),
@@ -841,8 +1071,9 @@ def _aggregate_inspection_stats(stats_list: list[dict[str, object]]) -> dict[str
     aggregate["phase_buckets"] = _aggregate_phase_summaries(stats_list, total_entries)
     aggregate["result_score_alignment"] = _aggregate_alignment_summaries(stats_list, total_entries)
     aggregate["score_by_result"] = _aggregate_score_by_result(stats_list)
+    aggregate["move_types"] = _aggregate_bucket_summaries(stats_list, "move_types", _MOVE_TYPE_LABELS, total_entries)
+    aggregate["position_flags"] = _aggregate_position_flags(stats_list, total_entries)
     aggregate["material"] = _aggregate_material_summaries(stats_list, total_entries)
-    aggregate["wdl_scale_saturation"] = _aggregate_wdl_scale_saturation(stats_list, total_entries)
 
     # Exact percentiles cannot be reconstructed from per-file summaries alone, so
     # aggregate percentiles are conservative extrema of the file-level estimates.
@@ -861,6 +1092,14 @@ def _aggregate_inspection_stats(stats_list: list[dict[str, object]]) -> dict[str
     aggregate["abs_score_percentiles"] = {
         percentile: max(float(stats["abs_score_percentiles"][percentile]) for stats in stats_list)
         for percentile in ["p50", "p75", "p90", "p95", "p99", "p999"]
+    }
+    aggregate["raw_score_percentiles"] = {
+        percentile: _cp_to_raw_score(value)
+        for percentile, value in aggregate["score_percentiles"].items()
+    }
+    aggregate["abs_raw_score_percentiles"] = {
+        percentile: _cp_to_raw_score(value)
+        for percentile, value in aggregate["abs_score_percentiles"].items()
     }
     aggregate["ply_percentiles"] = {
         **{
@@ -882,109 +1121,9 @@ def _aggregate_inspection_stats(stats_list: list[dict[str, object]]) -> dict[str
             for percentile in ["p50", "p75", "p95"]
         },
     }
-    aggregate["wdl_scale_diagnostics"] = _wdl_scale_diagnostics(aggregate)
-    aggregate["recommendation"] = _inspect_recommendation(aggregate)
+    aggregate["wdl"] = _wdl_summary(aggregate)
     aggregate["aggregate_notes"] = [
         "entries, result counts, threshold counts, minima, maxima, and means are exact aggregates",
         "percentiles are conservative extrema of per-file percentiles, not exact merged percentiles",
     ]
     return aggregate
-
-
-def _wdl_scale_diagnostics(stats: dict[str, object]) -> dict[str, dict[str, float]]:
-    mean_abs_score = float(stats["mean_abs_score"])
-    candidate_scales = [197.0, 410.0, 600.0, 1000.0, 2000.0, 4000.0, 8000.0]
-    diagnostics: dict[str, dict[str, float]] = {}
-    for scale in candidate_scales:
-        transformed = _wdl_target(mean_abs_score, scale)
-        p95_transformed = _wdl_target(float(stats["abs_score_percentiles"]["p95"]), scale)
-        native_scale = stats.get("wdl_scale_saturation", {}).get(str(int(scale)), {})
-        diagnostics[str(int(scale))] = {
-            "mean_abs_score_target": float(transformed),
-            "p95_abs_score_target": float(p95_transformed),
-            "high_saturation_proxy": float(transformed >= 0.98 or p95_transformed >= 0.995),
-            "signed_target_le_0.01_or_ge_0.99_fraction": float(
-                native_scale.get("signed_target_le_0.01_or_ge_0.99_fraction", 0.0)
-            ),
-            "signed_target_le_0.001_or_ge_0.999_fraction": float(
-                native_scale.get("signed_target_le_0.001_or_ge_0.999_fraction", 0.0)
-            ),
-        }
-    return diagnostics
-
-
-def _wdl_target(abs_score: float, effective_raw_wdl_scale: float) -> float:
-    return float(1.0 / (1.0 + np.exp(-(abs_score / effective_raw_wdl_scale))))
-
-
-def _recommend_wdl_scale(mean_abs_score: float, abs_p95: float) -> float:
-    for candidate in [410.0, 1000.0, 2000.0, 4000.0, 8000.0]:
-        mean_target = _wdl_target(mean_abs_score, candidate)
-        p95_target = _wdl_target(abs_p95, candidate)
-        if mean_target < 0.95 and p95_target < 0.995:
-            return candidate
-    return 8000.0
-
-
-def _teacher_target_collapse_risk(mean_abs_score: float, abs_p95: float, effective_raw_wdl_scale: float) -> bool:
-    mean_target = _wdl_target(mean_abs_score, effective_raw_wdl_scale)
-    p95_target = _wdl_target(abs_p95, effective_raw_wdl_scale)
-    return mean_target < 0.55 and p95_target < 0.60
-
-
-def _inspect_recommendation(stats: dict[str, object]) -> dict[str, object]:
-    entries_read = int(stats.get("entries_read", 0))
-    abs_p95 = float(stats["abs_score_percentiles"]["p95"])
-    abs_p99 = float(stats["abs_score_percentiles"]["p99"])
-    mean_abs_score = float(stats["mean_abs_score"])
-    diagnostics = stats["wdl_scale_diagnostics"]
-
-    if entries_read == 0:
-        return {
-            "saturated_at_default_wdl_scale": False,
-            "recommended_wdl_scale": 410.0,
-            "recommended_score_clip": 0.0,
-            "effective_raw_wdl_scale": 410.0,
-            "effective_mean_abs_score_target": 0.5,
-            "effective_p95_abs_score_target": 0.5,
-            "teacher_target_collapse_risk": False,
-            "notes": ["dataset is empty or unreadable; verify the binpack path before using this recommendation"],
-        }
-
-    recommended_score_clip = 0.0
-    if abs_p99 >= 16000:
-        recommended_score_clip = 16000.0
-    elif abs_p99 >= 8000:
-        recommended_score_clip = 8000.0
-
-    recommended_wdl_scale = _recommend_wdl_scale(mean_abs_score, abs_p95)
-    effective_raw_wdl_scale = recommended_wdl_scale
-    effective_mean_abs_score_target = _wdl_target(mean_abs_score, effective_raw_wdl_scale)
-    effective_p95_abs_score_target = _wdl_target(abs_p95, effective_raw_wdl_scale)
-    teacher_target_collapse_risk = _teacher_target_collapse_risk(
-        mean_abs_score,
-        abs_p95,
-        effective_raw_wdl_scale,
-    )
-
-    saturated_at_410 = bool(diagnostics["410"]["high_saturation_proxy"] >= 0.5)
-    notes = []
-    if saturated_at_410:
-        notes.append("dataset appears highly saturated for wdl_scale=410")
-    if recommended_score_clip > 0.0:
-        notes.append("extreme score tails suggest enabling score clipping")
-    if teacher_target_collapse_risk:
-        notes.append("recommended wdl_scale still keeps teacher targets too close to 0.5")
-    if not notes:
-        notes.append("current score distribution looks usable without aggressive normalization")
-
-    return {
-        "saturated_at_default_wdl_scale": saturated_at_410,
-        "recommended_wdl_scale": recommended_wdl_scale,
-        "recommended_score_clip": recommended_score_clip,
-        "effective_raw_wdl_scale": effective_raw_wdl_scale,
-        "effective_mean_abs_score_target": effective_mean_abs_score_target,
-        "effective_p95_abs_score_target": effective_p95_abs_score_target,
-        "teacher_target_collapse_risk": teacher_target_collapse_risk,
-        "notes": notes,
-    }

@@ -39,6 +39,9 @@ class MetricsSummaryTests(unittest.TestCase):
                 return_value={
                     "best_validation_loss": 0.123,
                     "best_validation_positions": 8192,
+                    "best_checkpoint_metric_name": "validation_score_mae",
+                    "best_checkpoint_metric_value": 77.0,
+                    "best_checkpoint_positions": 9000,
                     "config": {"batch_size": 1024},
                     "global_step": 42,
                     "positions_seen": 8192,
@@ -49,6 +52,7 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertEqual(diagnostics["best_validation_loss"], 0.123)
             self.assertEqual(diagnostics["global_step"], 42)
             self.assertEqual(diagnostics["positions_seen"], 8192)
+            self.assertEqual(diagnostics["best_checkpoint_metric_name"], "validation_score_mae")
 
     def test_load_and_summarize_train_only_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -62,7 +66,6 @@ class MetricsSummaryTests(unittest.TestCase):
                         "positions_seen": 2048,
                         "epoch_index": 0,
                         "loss": 0.9,
-                        "cp_loss": 0.8,
                         "wdl_loss": 1.0,
                         "lr": 0.001,
                     },
@@ -72,7 +75,6 @@ class MetricsSummaryTests(unittest.TestCase):
                         "positions_seen": 4096,
                         "epoch_index": 0,
                         "loss": 0.7,
-                        "cp_loss": 0.6,
                         "wdl_loss": 0.8,
                         "lr": 0.0008,
                     },
@@ -83,13 +85,14 @@ class MetricsSummaryTests(unittest.TestCase):
                 return_value={
                     "best_validation_loss": None,
                     "best_validation_positions": None,
+                    "best_checkpoint_metric_name": None,
+                    "best_checkpoint_metric_value": None,
+                    "best_checkpoint_positions": None,
                     "config": {
                         "batch_size": 2048,
                         "total_train_positions": 10_000,
                         "epoch_positions": 5_000,
                         "validation_interval_positions": 2_500,
-                        "score_clip": 4000.0,
-                        "cp_loss_beta": 128.0,
                         "wdl_lambda": 0.1,
                     },
                     "global_step": 2,
@@ -120,7 +123,6 @@ class MetricsSummaryTests(unittest.TestCase):
                         "positions_seen": 1024,
                         "epoch_index": 0,
                         "loss": 0.9,
-                        "cp_loss": 0.8,
                         "wdl_loss": 1.0,
                         "lr": 0.001,
                     },
@@ -130,7 +132,6 @@ class MetricsSummaryTests(unittest.TestCase):
                         "positions_seen": 4096,
                         "epoch_index": 1,
                         "loss": 0.4,
-                        "cp_loss": 0.2,
                         "wdl_loss": 0.5,
                         "lr": 0.0007,
                     },
@@ -139,7 +140,6 @@ class MetricsSummaryTests(unittest.TestCase):
                         "global_step": 2,
                         "positions_seen": 2048,
                         "validation_loss": 0.5,
-                        "validation_cp_loss": 0.4,
                         "validation_wdl_loss": 0.6,
                         "cp_mae": 120.0,
                         "cp_rmse": 140.0,
@@ -155,7 +155,6 @@ class MetricsSummaryTests(unittest.TestCase):
                         "global_step": 4,
                         "positions_seen": 4096,
                         "validation_loss": 0.3,
-                        "validation_cp_loss": 0.25,
                         "validation_wdl_loss": 0.35,
                         "cp_mae": 80.0,
                         "cp_rmse": 95.0,
@@ -173,13 +172,14 @@ class MetricsSummaryTests(unittest.TestCase):
                 return_value={
                     "best_validation_loss": 0.3,
                     "best_validation_positions": 4096,
+                    "best_checkpoint_metric_name": "validation_score_mae",
+                    "best_checkpoint_metric_value": 80.0,
+                    "best_checkpoint_positions": 4096,
                     "config": {
                         "batch_size": 1024,
                         "total_train_positions": 8192,
                         "epoch_positions": 4096,
                         "validation_interval_positions": 2048,
-                        "score_clip": 4000.0,
-                        "cp_loss_beta": 128.0,
                         "wdl_lambda": 0.1,
                     },
                     "global_step": 4,
@@ -191,6 +191,8 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertEqual(summary["status"], "validated")
             self.assertEqual(summary["best_validation_positions"], 4096)
             self.assertAlmostEqual(summary["best_validation_loss"], 0.3)
+            self.assertEqual(summary["best_checkpoint_metric_name"], "validation_score_mae")
+            self.assertAlmostEqual(summary["best_checkpoint_metric_value"], 80.0)
             self.assertEqual(summary["resume_recommendation"], "continue-latest")
             self.assertTrue(summary["best_is_latest_validation"])
             self.assertEqual(summary["epoch_positions"], 4096)
@@ -200,6 +202,7 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertTrue(summary["latest_material_ordering_ok"])
             text = render_summary_text(summary)
             self.assertIn("best_validation_positions: 4096", text)
+            self.assertIn("best_checkpoint_metric: validation_score_mae=80.000000", text)
             self.assertIn("epoch_positions: 4096", text)
             self.assertIn("Suggestions", text)
 
@@ -218,7 +221,6 @@ class MetricsPlotTests(unittest.TestCase):
                         "positions_seen": 1024,
                         "epoch_index": 0,
                         "loss": 0.9,
-                        "cp_loss": 0.8,
                         "wdl_loss": 1.0,
                         "lr": 0.001,
                     },
@@ -228,7 +230,6 @@ class MetricsPlotTests(unittest.TestCase):
                         "positions_seen": 2048,
                         "epoch_index": 1,
                         "loss": 0.7,
-                        "cp_loss": 0.6,
                         "wdl_loss": 0.8,
                         "lr": 0.0008,
                     },
@@ -237,7 +238,6 @@ class MetricsPlotTests(unittest.TestCase):
                         "global_step": 2,
                         "positions_seen": 2048,
                         "validation_loss": 0.5,
-                        "validation_cp_loss": 0.45,
                         "validation_wdl_loss": 0.55,
                         "cp_mae": 100.0,
                         "cp_rmse": 120.0,
@@ -255,6 +255,9 @@ class MetricsPlotTests(unittest.TestCase):
                 return_value={
                     "best_validation_loss": None,
                     "best_validation_positions": None,
+                    "best_checkpoint_metric_name": None,
+                    "best_checkpoint_metric_value": None,
+                    "best_checkpoint_positions": None,
                     "config": {
                         "batch_size": 1024,
                         "total_train_positions": 4096,

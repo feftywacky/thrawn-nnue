@@ -17,18 +17,23 @@ class TrainConfig:
     num_loader_threads: int = 2
     prefetch_batches: int = 0
     cuda_pin_memory: bool = True
+    cuda_tf32: bool = True
+    cuda_fused_optimizer: bool = True
     batch_size: int = 256
     total_train_positions: int = 0
     epoch_positions: int = 0
     validation_interval_positions: int = 0
     validation_positions: int = 0
+    validation_split_fraction: float = 0.0
+    max_abs_score: float = 0.0
+    smart_fen_skipping: bool = False
+    wld_fen_skipping: bool = False
+    random_fen_skipping: int = 0
     checkpoint_every: int = 250
     log_every: int = 25
     console_mode: str = "progress"
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
-    output_regularization: float = 0.0
-    sanity_anchor_weight: float = 0.0
     clip_grad_norm: float = 1.0
     amp: bool = True
     feature_set: str = "halfkp"
@@ -39,19 +44,15 @@ class TrainConfig:
     l1_size: int = 256
     l2_size: int = 64
     output_perspective: str = "stm"
-    score_clip: float = 4000.0
+    nnue2score: float = 600.0
     wdl_lambda: float = 1.0
+    wdl_lambda_end: float | None = None
     wdl_in_offset: float = 270.0
     wdl_out_offset: float = 270.0
     wdl_in_scaling: float = 340.0
     wdl_out_scaling: float = 380.0
     wdl_loss_power: float = 2.5
-    skip_capture_positions: bool = True
-    skip_decisive_score_mismatch: bool = True
-    decisive_score_mismatch_margin: float = 1000.0
-    skip_draw_score_mismatch: bool = True
-    draw_score_mismatch_margin: float = 1000.0
-    max_abs_score: float = 0.0
+    lr_gamma: float = 0.992
     export_ft_scale: float = 127.0
     export_dense_scale: float = 64.0
     export_description: str = "thrawn halfkp nnue"
@@ -65,6 +66,7 @@ class TrainConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], *, base_dir: Path | None = None) -> "TrainConfig":
+        data = _normalize_legacy_config_keys(data)
         known = {field.name for field in cls.__dataclass_fields__.values()}
         extras = sorted(set(data) - known)
         if extras:
@@ -95,6 +97,8 @@ class TrainConfig:
             raise ValueError("Chess HalfKP expects max_active_features=30")
         if self.output_perspective != "stm":
             raise ValueError("Only output_perspective='stm' is supported")
+        if self.nnue2score <= 0.0:
+            raise ValueError("nnue2score must be positive")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if self.total_train_positions <= 0:
@@ -105,20 +109,22 @@ class TrainConfig:
             raise ValueError("validation_interval_positions must be >= 0")
         if self.validation_positions < 0:
             raise ValueError("validation_positions must be >= 0")
-        if self.score_clip < 0.0:
-            raise ValueError("score_clip must be >= 0")
+        if self.validation_split_fraction < 0.0 or self.validation_split_fraction >= 1.0:
+            raise ValueError("validation_split_fraction must be >= 0 and < 1")
+        if self.max_abs_score < 0.0:
+            raise ValueError("max_abs_score must be >= 0")
+        if self.random_fen_skipping < 0:
+            raise ValueError("random_fen_skipping must be >= 0")
         if self.wdl_lambda < 0.0 or self.wdl_lambda > 1.0:
             raise ValueError("wdl_lambda must be between 0 and 1")
+        if self.wdl_lambda_end is not None and (self.wdl_lambda_end < 0.0 or self.wdl_lambda_end > 1.0):
+            raise ValueError("wdl_lambda_end must be between 0 and 1")
         if self.wdl_in_scaling <= 0.0 or self.wdl_out_scaling <= 0.0:
             raise ValueError("wdl scaling values must be positive")
         if self.wdl_loss_power <= 0.0:
             raise ValueError("wdl_loss_power must be positive")
-        if self.decisive_score_mismatch_margin < 0.0:
-            raise ValueError("decisive_score_mismatch_margin must be >= 0")
-        if self.draw_score_mismatch_margin < 0.0:
-            raise ValueError("draw_score_mismatch_margin must be >= 0")
-        if self.max_abs_score < 0.0:
-            raise ValueError("max_abs_score must be >= 0")
+        if self.lr_gamma <= 0.0 or self.lr_gamma > 1.0:
+            raise ValueError("lr_gamma must be > 0 and <= 1")
         if self.export_ft_scale <= 0.0 or self.export_dense_scale <= 0.0:
             raise ValueError("export scales must be > 0")
         if self.num_loader_threads <= 0:
@@ -133,10 +139,6 @@ class TrainConfig:
             raise ValueError("learning_rate must be positive")
         if self.weight_decay < 0.0:
             raise ValueError("weight_decay must be >= 0")
-        if self.output_regularization < 0.0:
-            raise ValueError("output_regularization must be >= 0")
-        if self.sanity_anchor_weight < 0.0:
-            raise ValueError("sanity_anchor_weight must be >= 0")
         if self.clip_grad_norm <= 0.0:
             raise ValueError("clip_grad_norm must be positive")
         if self.ft_size <= 0 or self.l1_size <= 0 or self.l2_size <= 0:
@@ -147,13 +149,20 @@ class TrainConfig:
             raise ValueError("console_mode must be one of: progress, text")
 
         overlap = _dataset_overlap(self.train_datasets, self.validation_datasets)
-        if overlap:
+        if overlap and self.validation_split_fraction <= 0.0:
             overlap_list = ", ".join(overlap)
-            raise ValueError(f"train_datasets and validation_datasets overlap: {overlap_list}")
+            raise ValueError(
+                "train_datasets and validation_datasets overlap without validation_split_fraction: "
+                f"{overlap_list}"
+            )
 
 
 def load_config(path: str | Path) -> TrainConfig:
     return TrainConfig.from_toml(path)
+
+
+def _normalize_legacy_config_keys(data: dict[str, Any]) -> dict[str, Any]:
+    return dict(data)
 
 
 def _resolve_dataset_list(base_dir: Path, values: list[str]) -> list[str]:

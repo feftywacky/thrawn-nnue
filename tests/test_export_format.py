@@ -65,6 +65,7 @@ class ExportFormatTests(unittest.TestCase):
             l1_scale=64.0,
             l2_scale=64.0,
             out_scale=64.0,
+            score_scale=1.0,
             ft_bias=ft_bias,
             ft_weight=ft_weight,
             l1_bias=l1_bias,
@@ -89,6 +90,7 @@ class ExportFormatTests(unittest.TestCase):
             self.assertEqual(loaded.l1_scale, exported.l1_scale)
             self.assertEqual(loaded.l2_scale, exported.l2_scale)
             self.assertEqual(loaded.out_scale, exported.out_scale)
+            self.assertEqual(loaded.score_scale, exported.score_scale)
             self.assertTrue(np.array_equal(loaded.ft_bias, exported.ft_bias))
             self.assertTrue(np.array_equal(loaded.ft_weight, exported.ft_weight))
             self.assertTrue(np.array_equal(loaded.l1_bias, exported.l1_bias))
@@ -155,6 +157,7 @@ class ExportFormatTests(unittest.TestCase):
             l2_size=1,
             export_ft_scale=100.0,
             export_dense_scale=64.0,
+            nnue2score=1.0,
         )
 
         exported = _exported_network_from_model(model, config)
@@ -164,7 +167,7 @@ class ExportFormatTests(unittest.TestCase):
         diagnostics = _export_quantization_diagnostics(exported)
         self.assertEqual(diagnostics["ft_weight"]["positive_limit_hits"], 0.0)
 
-    def test_export_uses_direct_scalar_output_layer(self) -> None:
+    def test_export_keeps_nnue2score_as_score_scale(self) -> None:
         class FakeTensor:
             def __init__(self, values):
                 self._values = np.asarray(values, dtype=np.float32)
@@ -202,6 +205,7 @@ class ExportFormatTests(unittest.TestCase):
             l2_size=1,
             export_ft_scale=100.0,
             export_dense_scale=64.0,
+            nnue2score=4.0,
         )
 
         exported = _exported_network_from_model(model, config)
@@ -209,6 +213,7 @@ class ExportFormatTests(unittest.TestCase):
         dequantized_bias = exported.out_bias.astype(np.float32) / exported.out_scale
         self.assertAlmostEqual(float(dequantized_weight[0]), 0.25, delta=0.02)
         self.assertAlmostEqual(float(dequantized_bias[0]), 0.5, places=5)
+        self.assertAlmostEqual(exported.score_scale, 4.0)
 
     def test_evaluate_export_uses_direct_scalar_output(self) -> None:
         exported = ExportedNetwork(
@@ -221,6 +226,7 @@ class ExportFormatTests(unittest.TestCase):
             l1_scale=100.0,
             l2_scale=100.0,
             out_scale=100.0,
+            score_scale=1.0,
             ft_bias=np.array([100], dtype=np.int16),
             ft_weight=np.zeros((40960, 1), dtype=np.int16),
             l1_bias=np.zeros(1, dtype=np.int32),
@@ -262,6 +268,7 @@ class ExportFormatTests(unittest.TestCase):
                 64.0,
                 64.0,
                 64.0,
+                1.0,
                 len(description),
             )
             path.write_bytes(header + description)
@@ -280,6 +287,7 @@ class ExportFormatTests(unittest.TestCase):
             l1_scale=64.0,
             l2_scale=64.0,
             out_scale=64.0,
+            score_scale=1.0,
             ft_bias=np.zeros(PRODUCTION_FT_SIZE, dtype=np.int16),
             ft_weight=np.zeros((EXPECTED_NUM_FEATURES, PRODUCTION_FT_SIZE), dtype=np.int16),
             l1_bias=np.zeros(PRODUCTION_L1_SIZE, dtype=np.int32),
@@ -336,7 +344,7 @@ class VerifyExportTests(unittest.TestCase):
             report = verify_export(checkpoint_path, nnue_path)
 
         self.assertIn("sanity_positions", report)
-        self.assertEqual(len(report["sanity_positions"]), 5)
+        self.assertEqual(len(report["sanity_positions"]), 6)
         self.assertIn("material_ordering_ok", report)
         self.assertIn("starting_position_near_zero", report)
 

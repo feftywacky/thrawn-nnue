@@ -17,6 +17,7 @@ class ConsoleContext:
     epoch_positions: int
     validation_interval_positions: int
     log_every: int
+    nnue2score: float = 600.0
     prefetch_batches: int = 0
 
 
@@ -68,6 +69,7 @@ class TextReporter(_BaseReporter):
             f" validation_shards={context.validation_shards}"
             f" total_positions={_format_count(context.total_train_positions)}"
             f" batch_size={_format_count(context.batch_size)}"
+            f" nnue2score={context.nnue2score:g}"
             f" prefetch_batches={context.prefetch_batches}"
         )
         print(
@@ -122,9 +124,10 @@ class TextReporter(_BaseReporter):
             f" step={int(metrics['global_step'])}"
             f" positions={_format_count(int(metrics['positions_seen']))}"
             f" loss={float(metrics['validation_loss']):.6f}"
-            f" cp={float(metrics['validation_cp_loss']):.6f}"
             f" wdl={float(metrics['validation_wdl_loss']):.6f}"
+            f" result_wdl={float(metrics.get('validation_result_wdl_loss', metrics['validation_wdl_loss'])):.6f}"
             f" output_reg={float(metrics['validation_output_reg_loss']):.6f}"
+            f" score_mae={float(metrics.get('score_mae', 0.0)):.2f}"
             f" cp_mae={float(metrics['cp_mae']):.2f}"
             f" cp_corr={float(metrics['cp_corr']):.4f}"
             f" wdl_acc={float(metrics['wdl_accuracy']):.4f}"
@@ -166,6 +169,7 @@ class ProgressReporter(_BaseReporter):
             f" validation_shards={context.validation_shards}"
             f" total_positions={_format_count(context.total_train_positions)}"
             f" batch_size={_format_count(context.batch_size)}"
+            f" nnue2score={context.nnue2score:g}"
             f" prefetch_batches={context.prefetch_batches}"
         )
         self._bar.write(
@@ -221,9 +225,10 @@ class ProgressReporter(_BaseReporter):
                 f" step={int(metrics['global_step'])}"
                 f" positions={_format_count(int(metrics['positions_seen']))}"
                 f" loss={float(metrics['validation_loss']):.6f}"
-                f" cp={float(metrics['validation_cp_loss']):.6f}"
                 f" wdl={float(metrics['validation_wdl_loss']):.6f}"
+                f" result_wdl={float(metrics.get('validation_result_wdl_loss', metrics['validation_wdl_loss'])):.6f}"
                 f" output_reg={float(metrics['validation_output_reg_loss']):.6f}"
+                f" score_mae={float(metrics.get('score_mae', 0.0)):.2f}"
                 f" cp_mae={float(metrics['cp_mae']):.2f}"
                 f" cp_corr={float(metrics['cp_corr']):.4f}"
                 f" wdl_acc={float(metrics['wdl_accuracy']):.4f}"

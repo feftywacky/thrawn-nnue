@@ -10,9 +10,7 @@ from thrawn_nnue.board import BoardState, flip_vertical, square_to_index
 from thrawn_nnue.features import (
     MAX_ACTIVE_FEATURES,
     NUM_FEATURES,
-    active_factor_feature_indices,
     active_feature_indices,
-    extract_halfkp,
     factor_feature_index,
     feature_index,
     king_square,
@@ -39,23 +37,6 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(len(black), MAX_ACTIVE_FEATURES)
         self.assertTrue(all(0 <= value < NUM_FEATURES for value in white))
         self.assertTrue(all(0 <= value < NUM_FEATURES for value in black))
-
-    def test_extract_halfkp_returns_real_and_factor_features(self) -> None:
-        board = BoardState.from_fen("8/8/8/8/8/8/4p3/4K2k w - - 0 1")
-        features = extract_halfkp(board)
-        self.assertEqual(len(features.white), MAX_ACTIVE_FEATURES)
-        self.assertEqual(len(features.black), MAX_ACTIVE_FEATURES)
-        self.assertEqual(len(features.white_factor), MAX_ACTIVE_FEATURES)
-        self.assertEqual(len(features.black_factor), MAX_ACTIVE_FEATURES)
-        self.assertEqual(features.stm, 1.0)
-        self.assertIn(-1, features.white)
-        self.assertIn(-1, features.white_factor)
-
-    def test_factor_features_match_real_feature_modulo(self) -> None:
-        board = BoardState.from_fen("8/8/8/8/8/8/P7/K6k w - - 0 1")
-        real = active_feature_indices(board, "white")
-        factor = active_factor_feature_indices(board, "white")
-        self.assertEqual([value % 640 for value in real], factor)
 
     def test_king_square_uses_perspective_king(self) -> None:
         board = BoardState.from_fen("8/8/8/8/8/8/4p3/4K2k b - - 0 1")

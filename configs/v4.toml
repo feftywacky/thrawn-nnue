@@ -1,0 +1,54 @@
+run_name = "v4"
+output_dir = "runs/v4"
+
+train_datasets = [
+  "C:/Users/Felix/OneDrive/Documents/thrawn-nnue/data/nodes5000pv2_UHO.binpack",
+]
+
+validation_datasets = [
+  "C:/Users/Felix/OneDrive/Documents/thrawn-nnue/data/nodes5000pv2_UHO.binpack",
+]
+validation_split_fraction = 0.01
+smart_fen_skipping = true
+wld_fen_skipping = true
+random_fen_skipping = 3
+max_abs_score = 0.0
+
+device = "cuda"
+num_loader_threads = 8
+prefetch_batches = 8
+cuda_pin_memory = true
+cuda_tf32 = true
+cuda_fused_optimizer = true
+batch_size = 16384
+
+total_train_positions = 10000000000
+epoch_positions = 100000000
+validation_positions = 1000000
+
+checkpoint_every = 10000
+log_every = 250
+console_mode = "progress"
+
+learning_rate = 0.000875
+lr_gamma = 0.992
+weight_decay = 0.0
+clip_grad_norm = 10.0
+amp = true
+
+ft_size = 1024
+l1_size = 256
+l2_size = 64
+
+nnue2score = 600.0
+wdl_lambda = 1.0
+wdl_lambda_end = 0.75
+wdl_in_offset = 270.0
+wdl_in_scaling = 340.0
+wdl_out_offset = 270.0
+wdl_out_scaling = 380.0
+wdl_loss_power = 2.5
+
+export_ft_scale = 127.0
+export_dense_scale = 64.0
+export_description = "thrawn halfkp nnue stockfish raw nodes5000pv2 UHO"

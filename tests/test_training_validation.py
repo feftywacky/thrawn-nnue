@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import math
 import sys
 from pathlib import Path
 import tempfile
@@ -19,15 +18,13 @@ except ModuleNotFoundError:
 from thrawn_nnue.native import NativeBatch, write_fixture_binpack
 from thrawn_nnue.config import TrainConfig
 from thrawn_nnue.training import (
-    _add_sanity_anchor_loss,
     _advance_scheduler_for_epoch_boundaries,
     _PreparedBatchSource,
     _clip_model_weights,
     _create_scheduler,
     _create_state,
-    _normalize_teacher_scores,
+    _model_output_to_score,
     _run_validation,
-    _sanity_anchor_loss,
     _scalar_head_loss,
     train_from_config,
 )
@@ -39,7 +36,7 @@ def _make_native_batch(values: list[float]) -> NativeBatch:
         white_indices=np.zeros((size, 30), dtype=np.int32),
         black_indices=np.zeros((size, 30), dtype=np.int32),
         stm=np.ones((size,), dtype=np.float32),
-        score_cp=np.asarray(values, dtype=np.float32),
+        score=np.asarray(values, dtype=np.float32),
         result_wdl=np.full((size,), 0.5, dtype=np.float32),
     )
 
@@ -67,24 +64,10 @@ class _DummyStream:
 @unittest.skipUnless(torch is not None, "PyTorch is required for validation training tests")
 class ValidationTrainingTests(unittest.TestCase):
     @staticmethod
-    def _cosine_epoch_lr(base_lr: float, eta_min: float, epoch_step: int, t_max: int) -> float:
-        return eta_min + (base_lr - eta_min) * (1.0 + math.cos(math.pi * epoch_step / t_max)) / 2.0
+    def _exponential_epoch_lr(base_lr: float, gamma: float, epoch_step: int) -> float:
+        return base_lr * (gamma ** epoch_step)
 
-    def test_score_normalization_only_clips(self) -> None:
-        values = torch.tensor([[-5000.0], [2000.0], [9000.0]], dtype=torch.float32)
-        config = TrainConfig.from_dict(
-            {
-                "train_datasets": ["/tmp/train.binpack"],
-                "total_train_positions": 10_000,
-                "epoch_positions": 1_000,
-                "score_clip": 4000.0,
-            }
-        )
-        normalized = _normalize_teacher_scores(values, config, torch)
-        expected = torch.tensor([[-4000.0], [2000.0], [4000.0]], dtype=torch.float32)
-        self.assertTrue(torch.equal(normalized, expected))
-
-    def test_scalar_head_loss_reports_cp_and_wdl_components(self) -> None:
+    def test_scalar_head_loss_reports_score_and_wdl_components(self) -> None:
         prediction = torch.tensor([[150.0], [-50.0]], dtype=torch.float32)
         target = torch.tensor([[100.0], [-100.0]], dtype=torch.float32)
         result = torch.tensor([[1.0], [0.0]], dtype=torch.float32)
@@ -99,78 +82,20 @@ class ValidationTrainingTests(unittest.TestCase):
             wdl_in_scaling=4000.0,
             wdl_out_scaling=4000.0,
             wdl_loss_power=2.5,
-            output_regularization=0.0,
             torch=torch,
         )
 
-        self.assertIn("cp_loss", losses)
         self.assertIn("wdl_loss", losses)
+        self.assertIn("teacher_wdl_loss", losses)
+        self.assertIn("result_wdl_loss", losses)
         self.assertGreater(float(losses["loss"].item()), 0.0)
 
-    def test_sanity_anchor_loss_pulls_neutral_positions_toward_zero_cp(self) -> None:
-        class _ConstantModel(torch.nn.Module):
-            def __init__(self, value: float) -> None:
-                super().__init__()
-                self.value = value
+    def test_model_output_to_score_applies_nnue2score(self) -> None:
+        raw = torch.tensor([[1.25], [-0.5]], dtype=torch.float32)
 
-            def forward(self, white_indices, black_indices, stm):
-                return torch.full((white_indices.shape[0], 1), self.value, dtype=torch.float32)
+        scaled = _model_output_to_score(raw, 600.0)
 
-        config = TrainConfig.from_dict(
-            {
-                "train_datasets": ["/tmp/train.binpack"],
-                "total_train_positions": 10_000,
-                "epoch_positions": 1_000,
-                "wdl_out_scaling": 4000.0,
-            }
-        )
-
-        zero_loss = _sanity_anchor_loss(_ConstantModel(0.0), config, torch, "cpu")
-        drift_loss = _sanity_anchor_loss(_ConstantModel(1000.0), config, torch, "cpu")
-
-        self.assertAlmostEqual(float(zero_loss.item()), 0.0)
-        self.assertAlmostEqual(float(drift_loss.item()), (1000.0 / 4000.0) ** 2)
-
-    def test_sanity_anchor_loss_is_additive_and_does_not_change_wdl_formula(self) -> None:
-        class _ConstantModel(torch.nn.Module):
-            def forward(self, white_indices, black_indices, stm):
-                return torch.full((white_indices.shape[0], 1), 1000.0, dtype=torch.float32)
-
-        prediction = torch.tensor([[150.0], [-50.0]], dtype=torch.float32)
-        target = torch.tensor([[100.0], [-100.0]], dtype=torch.float32)
-        result = torch.tensor([[1.0], [0.0]], dtype=torch.float32)
-        config = TrainConfig.from_dict(
-            {
-                "train_datasets": ["/tmp/train.binpack"],
-                "total_train_positions": 10_000,
-                "epoch_positions": 1_000,
-                "wdl_out_scaling": 4000.0,
-                "sanity_anchor_weight": 0.01,
-            }
-        )
-        losses = _scalar_head_loss(
-            prediction,
-            target,
-            result,
-            wdl_eval_weight=0.9,
-            wdl_in_offset=270.0,
-            wdl_out_offset=270.0,
-            wdl_in_scaling=4000.0,
-            wdl_out_scaling=4000.0,
-            wdl_loss_power=2.5,
-            output_regularization=0.0,
-            torch=torch,
-        )
-
-        updated = _add_sanity_anchor_loss(losses, _ConstantModel(), config, torch, "cpu")
-
-        expected_anchor = (1000.0 / 4000.0) ** 2
-        self.assertAlmostEqual(float(updated["sanity_anchor_loss"].item()), expected_anchor)
-        self.assertTrue(torch.equal(updated["cp_loss"], losses["cp_loss"]))
-        self.assertAlmostEqual(
-            float(updated["loss"].item()),
-            float(losses["loss"].item()) + config.sanity_anchor_weight * expected_anchor,
-        )
+        self.assertTrue(torch.equal(scaled, torch.tensor([[750.0], [-300.0]], dtype=torch.float32)))
 
     def test_clip_model_weights_respects_dense_export_scale(self) -> None:
         class _Layer:
@@ -198,9 +123,9 @@ class ValidationTrainingTests(unittest.TestCase):
         expected_limit = torch.tensor((127.0 - 0.5) / 64.0, dtype=torch.float32)
         self.assertLessEqual(float(model.l1.weight.abs().max()), float(expected_limit))
         self.assertLessEqual(float(model.l2.weight.abs().max()), float(expected_limit))
-        self.assertGreater(float(model.output.weight.abs().max()), float(expected_limit))
+        self.assertLessEqual(float(model.output.weight.abs().max()), float(expected_limit))
 
-    def test_create_scheduler_supports_cosine_annealing(self) -> None:
+    def test_create_scheduler_supports_stockfish_exponential_decay(self) -> None:
         learning_rate = 0.000875
         optimizer = torch.optim.AdamW(
             [torch.nn.Parameter(torch.tensor([1.0], dtype=torch.float32))],
@@ -212,13 +137,13 @@ class ValidationTrainingTests(unittest.TestCase):
                 "total_train_positions": 10_000,
                 "epoch_positions": 1_000,
                 "learning_rate": learning_rate,
+                "lr_gamma": 0.992,
             }
         )
 
         scheduler = _create_scheduler(config, optimizer, torch)
-        self.assertEqual(scheduler.__class__.__name__, "CosineAnnealingLR")
-        self.assertEqual(scheduler.T_max, 10)
-        self.assertAlmostEqual(scheduler.eta_min, learning_rate * 0.01)
+        self.assertEqual(scheduler.__class__.__name__, "ExponentialLR")
+        self.assertAlmostEqual(scheduler.gamma, 0.992)
 
     def test_epoch_scheduler_does_not_step_within_epoch(self) -> None:
         optimizer = torch.optim.AdamW(
@@ -231,6 +156,7 @@ class ValidationTrainingTests(unittest.TestCase):
                 "total_train_positions": 10_000,
                 "epoch_positions": 1_000,
                 "learning_rate": 0.000875,
+                "lr_gamma": 0.992,
             }
         )
         scheduler = _create_scheduler(config, optimizer, torch)
@@ -257,6 +183,7 @@ class ValidationTrainingTests(unittest.TestCase):
                 "total_train_positions": 10_000,
                 "epoch_positions": 1_000,
                 "learning_rate": learning_rate,
+                "lr_gamma": 0.992,
             }
         )
         scheduler = _create_scheduler(config, optimizer, torch)
@@ -269,7 +196,7 @@ class ValidationTrainingTests(unittest.TestCase):
             positions_after_step=1_100,
         )
 
-        expected = self._cosine_epoch_lr(learning_rate, learning_rate * 0.01, epoch_step=1, t_max=10)
+        expected = self._exponential_epoch_lr(learning_rate, 0.992, epoch_step=1)
         self.assertAlmostEqual(optimizer.param_groups[0]["lr"], expected)
 
     def test_epoch_scheduler_steps_multiple_times_when_batch_crosses_multiple_epochs(self) -> None:
@@ -284,6 +211,7 @@ class ValidationTrainingTests(unittest.TestCase):
                 "total_train_positions": 10_000,
                 "epoch_positions": 1_000,
                 "learning_rate": learning_rate,
+                "lr_gamma": 0.992,
             }
         )
         scheduler = _create_scheduler(config, optimizer, torch)
@@ -296,7 +224,7 @@ class ValidationTrainingTests(unittest.TestCase):
             positions_after_step=3_100,
         )
 
-        expected = self._cosine_epoch_lr(learning_rate, learning_rate * 0.01, epoch_step=3, t_max=10)
+        expected = self._exponential_epoch_lr(learning_rate, 0.992, epoch_step=3)
         self.assertAlmostEqual(optimizer.param_groups[0]["lr"], expected)
 
     def test_prefetched_batches_match_synchronous_order(self) -> None:
@@ -311,7 +239,7 @@ class ValidationTrainingTests(unittest.TestCase):
             pin_memory=False,
             torch=torch,
         ) as sync_source:
-            sync_scores = [batch.tensors["score_cp"].squeeze(1).tolist() for batch in sync_source]
+            sync_scores = [batch.tensors["score"].squeeze(1).tolist() for batch in sync_source]
 
         prefetched_stream = _DummyStream(expected_batches)
         with _PreparedBatchSource(
@@ -322,7 +250,7 @@ class ValidationTrainingTests(unittest.TestCase):
             pin_memory=False,
             torch=torch,
         ) as prefetched_source:
-            prefetched_scores = [batch.tensors["score_cp"].squeeze(1).tolist() for batch in prefetched_source]
+            prefetched_scores = [batch.tensors["score"].squeeze(1).tolist() for batch in prefetched_source]
 
         self.assertEqual(sync_scores, prefetched_scores)
         self.assertEqual(prefetched_stream.requests, [2, 2, 2, 2])
@@ -369,11 +297,13 @@ class ValidationTrainingTests(unittest.TestCase):
             self.assertEqual(metrics["event"], "validation")
             self.assertEqual(metrics["validation_batches"], 1)
             self.assertEqual(metrics["validation_positions"], 2)
-            self.assertIn("validation_cp_loss", metrics)
             self.assertIn("validation_wdl_loss", metrics)
             self.assertIn("cp_mae", metrics)
             self.assertIn("cp_rmse", metrics)
             self.assertIn("cp_corr", metrics)
+            self.assertIn("score_mae", metrics)
+            self.assertIn("score_rmse", metrics)
+            self.assertIn("score_corr", metrics)
             self.assertIn("material_sanity", metrics)
             self.assertIn("material_ordering_ok", metrics)
             for key, before in model_before.items():
@@ -412,10 +342,8 @@ class ValidationTrainingTests(unittest.TestCase):
             records = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
             train_records = [record for record in records if record["event"] == "train"]
             validation_records = [record for record in records if record["event"] == "validation"]
-            self.assertTrue(all("cp_loss" in record for record in train_records))
             self.assertTrue(all("wdl_loss" in record for record in train_records))
             self.assertEqual([record["epoch_index"] for record in train_records], [1, 2])
-            self.assertTrue(all("validation_cp_loss" in record for record in validation_records))
             self.assertTrue(all("validation_wdl_loss" in record for record in validation_records))
 
 

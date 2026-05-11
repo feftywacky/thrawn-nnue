@@ -15,6 +15,9 @@ class MetricsRun:
     best_validation_loss: float | None
     best_validation_positions: int | None
     best_checkpoint_exists: bool
+    best_checkpoint_metric_name: str | None
+    best_checkpoint_metric_value: float | None
+    best_checkpoint_positions: int | None
     checkpoint_config: dict[str, object] | None
     checkpoint_global_step: int | None
     checkpoint_positions_seen: int | None
@@ -49,6 +52,9 @@ def load_metrics_run(run_dir: str | Path) -> MetricsRun:
         best_validation_loss=best_validation_loss,
         best_validation_positions=best_validation_positions,
         best_checkpoint_exists=_best_checkpoint_path(run_path) is not None,
+        best_checkpoint_metric_name=None if checkpoint.get("best_checkpoint_metric_name") is None else str(checkpoint.get("best_checkpoint_metric_name")),
+        best_checkpoint_metric_value=_as_float(checkpoint.get("best_checkpoint_metric_value")),
+        best_checkpoint_positions=_as_int(checkpoint.get("best_checkpoint_positions")),
         checkpoint_config=checkpoint["config"],
         checkpoint_global_step=checkpoint["global_step"],
         checkpoint_positions_seen=checkpoint["positions_seen"],
@@ -69,9 +75,15 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
     effective_validation_interval = configured_validation_interval
     if effective_validation_interval in (None, 0):
         effective_validation_interval = epoch_positions
-    score_clip = _as_float(_config_value(run, "score_clip"))
     wdl_lambda = _as_float(_config_value(run, "wdl_lambda"))
-    output_regularization = _as_float(_config_value(run, "output_regularization"))
+    nnue2score = _as_float(_config_value(run, "nnue2score"))
+    wdl_in_scaling = _as_float(_config_value(run, "wdl_in_scaling"))
+    wdl_out_scaling = _as_float(_config_value(run, "wdl_out_scaling"))
+    max_abs_score = _as_float(_config_value(run, "max_abs_score"))
+    lr_gamma = _as_float(_config_value(run, "lr_gamma"))
+    smart_fen_skipping = _config_value(run, "smart_fen_skipping")
+    wld_fen_skipping = _config_value(run, "wld_fen_skipping")
+    random_fen_skipping = _as_int(_config_value(run, "random_fen_skipping"))
 
     latest_train_step = _record_step(latest_train)
     latest_train_positions = _record_positions(latest_train, batch_size)
@@ -106,13 +118,13 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         _metric_value(latest_train_at_validation, "loss"),
         _metric_value(latest_validation, "validation_loss"),
     )
-    cp_gap = _gap(
-        _metric_value(latest_train_at_validation, "cp_loss"),
-        _metric_value(latest_validation, "validation_cp_loss"),
-    )
     wdl_gap = _gap(
         _metric_value(latest_train_at_validation, "wdl_loss"),
         _metric_value(latest_validation, "validation_wdl_loss"),
+    )
+    result_wdl_gap = _gap(
+        _metric_value(latest_train_at_validation, "result_wdl_loss", "wdl_loss"),
+        _metric_value(latest_validation, "validation_result_wdl_loss", "validation_wdl_loss"),
     )
 
     latest_position_fraction = None
@@ -147,16 +159,25 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "positions_seen": latest_train_positions,
         "latest_epoch_index": latest_epoch_index,
         "latest_train_loss": _metric_value(latest_train, "loss"),
-        "latest_train_cp_loss": _metric_value(latest_train, "cp_loss"),
         "latest_train_wdl_loss": _metric_value(latest_train, "wdl_loss"),
+        "latest_train_teacher_wdl_loss": _metric_value(latest_train, "teacher_wdl_loss"),
+        "latest_train_result_wdl_loss": _metric_value(latest_train, "result_wdl_loss", "wdl_loss"),
         "latest_train_output_reg_loss": _metric_value(latest_train, "output_reg_loss"),
         "latest_lr": latest_lr,
         "latest_validation_step": latest_validation_step,
         "latest_validation_positions": latest_validation_positions,
         "latest_validation_loss": _metric_value(latest_validation, "validation_loss"),
-        "latest_validation_cp_loss": _metric_value(latest_validation, "validation_cp_loss"),
         "latest_validation_wdl_loss": _metric_value(latest_validation, "validation_wdl_loss"),
+        "latest_validation_teacher_wdl_loss": _metric_value(latest_validation, "validation_teacher_wdl_loss"),
+        "latest_validation_result_wdl_loss": _metric_value(
+            latest_validation,
+            "validation_result_wdl_loss",
+            "validation_wdl_loss",
+        ),
         "latest_validation_output_reg_loss": _metric_value(latest_validation, "validation_output_reg_loss"),
+        "latest_validation_score_mae": _metric_value(latest_validation, "score_mae"),
+        "latest_validation_score_rmse": _metric_value(latest_validation, "score_rmse"),
+        "latest_validation_score_corr": _metric_value(latest_validation, "score_corr", "cp_corr"),
         "latest_validation_cp_mae": _metric_value(latest_validation, "cp_mae"),
         "latest_validation_cp_rmse": _metric_value(latest_validation, "cp_rmse"),
         "latest_validation_cp_corr": _metric_value(latest_validation, "cp_corr"),
@@ -171,6 +192,9 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "best_validation_loss": run.best_validation_loss,
         "best_validation_positions": run.best_validation_positions,
         "best_checkpoint_exists": run.best_checkpoint_exists,
+        "best_checkpoint_metric_name": run.best_checkpoint_metric_name,
+        "best_checkpoint_metric_value": run.best_checkpoint_metric_value,
+        "best_checkpoint_positions": run.best_checkpoint_positions,
         "configured_total_positions": total_train_positions,
         "latest_position_fraction": latest_position_fraction,
         "batch_size": batch_size,
@@ -184,14 +208,20 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "best_is_latest_validation": best_is_latest_validation,
         "resume_recommendation": resume_recommendation,
         "train_validation_gap": train_validation_gap,
-        "cp_gap": cp_gap,
         "wdl_gap": wdl_gap,
+        "result_wdl_gap": result_wdl_gap,
         "latest_lr_fraction_of_initial": latest_lr_fraction_of_initial,
         "lr_near_zero": lr_near_zero,
         "scheduler_exhausted": scheduler_exhausted,
-        "score_clip": score_clip,
         "wdl_lambda": wdl_lambda,
-        "output_regularization": output_regularization,
+        "nnue2score": nnue2score,
+        "wdl_in_scaling": wdl_in_scaling,
+        "wdl_out_scaling": wdl_out_scaling,
+        "max_abs_score": max_abs_score,
+        "lr_gamma": lr_gamma,
+        "smart_fen_skipping": smart_fen_skipping,
+        "wld_fen_skipping": wld_fen_skipping,
+        "random_fen_skipping": random_fen_skipping,
     }
     summary["suggestions"] = _build_suggestions(summary)
     return summary
@@ -211,8 +241,8 @@ def render_summary_text(summary: dict[str, object]) -> str:
                 f"positions_seen: {_format_optional_int(summary['positions_seen'])}",
                 f"latest_epoch_index: {_format_optional_int(summary['latest_epoch_index'])}",
                 f"latest_train_loss: {_format_optional_float(summary['latest_train_loss'])}",
-                f"latest_train_cp_loss: {_format_optional_float(summary['latest_train_cp_loss'])}",
                 f"latest_train_wdl_loss: {_format_optional_float(summary['latest_train_wdl_loss'])}",
+                f"latest_train_result_wdl_loss: {_format_optional_float(summary['latest_train_result_wdl_loss'])}",
                 f"latest_train_output_reg_loss: {_format_optional_float(summary['latest_train_output_reg_loss'])}",
                 f"latest_lr: {_format_optional_float(summary['latest_lr'], precision=8)}",
             ]
@@ -223,12 +253,18 @@ def render_summary_text(summary: dict[str, object]) -> str:
                 f"latest_validation_step: {summary['latest_validation_step']}",
                 f"latest_validation_positions: {_format_optional_int(summary['latest_validation_positions'])}",
                 f"latest_validation_loss: {_format_optional_float(summary['latest_validation_loss'])}",
-                f"latest_validation_cp_loss: {_format_optional_float(summary['latest_validation_cp_loss'])}",
                 f"latest_validation_wdl_loss: {_format_optional_float(summary['latest_validation_wdl_loss'])}",
+                (
+                    "latest_validation_result_wdl_loss: "
+                    f"{_format_optional_float(summary['latest_validation_result_wdl_loss'])}"
+                ),
                 (
                     "latest_validation_output_reg_loss: "
                     f"{_format_optional_float(summary['latest_validation_output_reg_loss'])}"
                 ),
+                f"latest_validation_score_mae: {_format_optional_float(summary['latest_validation_score_mae'])}",
+                f"latest_validation_score_rmse: {_format_optional_float(summary['latest_validation_score_rmse'])}",
+                f"latest_validation_score_corr: {_format_optional_float(summary['latest_validation_score_corr'])}",
                 f"latest_validation_cp_mae: {_format_optional_float(summary['latest_validation_cp_mae'])}",
                 f"latest_validation_cp_rmse: {_format_optional_float(summary['latest_validation_cp_rmse'])}",
                 f"latest_validation_cp_corr: {_format_optional_float(summary['latest_validation_cp_corr'])}",
@@ -255,6 +291,12 @@ def render_summary_text(summary: dict[str, object]) -> str:
         lines.append("best_validation_positions: none")
 
     lines.append(f"best_checkpoint_exists: {summary['best_checkpoint_exists']}")
+    if summary["best_checkpoint_metric_name"] is not None:
+        lines.append(
+            "best_checkpoint_metric: "
+            f"{summary['best_checkpoint_metric_name']}={_format_optional_float(summary['best_checkpoint_metric_value'])}"
+        )
+        lines.append(f"best_checkpoint_positions: {_format_optional_int(summary['best_checkpoint_positions'])}")
     lines.append("")
     lines.append("Run Budget")
     lines.append(f"configured_total_positions: {_format_optional_int(summary['configured_total_positions'])}")
@@ -267,10 +309,17 @@ def render_summary_text(summary: dict[str, object]) -> str:
     lines.append(f"train_log_interval_steps: {_format_optional_int(summary['train_log_interval_steps'])}")
     lines.append(f"validation_interval_positions: {_format_optional_int(summary['validation_interval_positions'])}")
     lines.append(f"latest_lr_fraction_of_initial: {_format_optional_float(summary['latest_lr_fraction_of_initial'])}")
+    lines.append(f"lr_gamma: {_format_optional_float(summary['lr_gamma'])}")
     lines.append(f"lr_near_zero: {summary['lr_near_zero']}")
     lines.append(f"scheduler_exhausted: {summary['scheduler_exhausted']}")
     lines.append(f"wdl_lambda: {_format_optional_float(summary['wdl_lambda'])}")
-    lines.append(f"output_regularization: {_format_optional_float(summary['output_regularization'])}")
+    lines.append(f"nnue2score: {_format_optional_float(summary['nnue2score'])}")
+    lines.append(f"wdl_in_scaling: {_format_optional_float(summary['wdl_in_scaling'])}")
+    lines.append(f"wdl_out_scaling: {_format_optional_float(summary['wdl_out_scaling'])}")
+    lines.append(f"max_abs_score: {_format_optional_float(summary['max_abs_score'])}")
+    lines.append(f"smart_fen_skipping: {summary['smart_fen_skipping']}")
+    lines.append(f"wld_fen_skipping: {summary['wld_fen_skipping']}")
+    lines.append(f"random_fen_skipping: {_format_optional_int(summary['random_fen_skipping'])}")
     lines.append("")
     lines.append("Generalization")
     lines.append(f"best_validation_gap: {_format_optional_float(summary['best_validation_gap'])}")
@@ -278,8 +327,8 @@ def render_summary_text(summary: dict[str, object]) -> str:
     lines.append(f"best_is_latest_validation: {summary['best_is_latest_validation']}")
     lines.append(f"resume_recommendation: {summary['resume_recommendation']}")
     lines.append(f"train_validation_gap: {_format_optional_float(summary['train_validation_gap'])}")
-    lines.append(f"cp_gap: {_format_optional_float(summary['cp_gap'])}")
     lines.append(f"wdl_gap: {_format_optional_float(summary['wdl_gap'])}")
+    lines.append(f"result_wdl_gap: {_format_optional_float(summary['result_wdl_gap'])}")
     lines.append("")
     lines.append("Suggestions")
     for suggestion in summary["suggestions"]:
@@ -344,8 +393,9 @@ def _plot_train_loss(plt, output_path: Path, run: MetricsRun, *, batch_size: int
     figure, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True, height_ratios=[3, 2])
     positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.train_records]
     blended = [_required_metric(record, ("loss",)) for record in run.train_records]
-    cp_loss = [_required_metric(record, ("cp_loss",)) for record in run.train_records]
     wdl_loss = [_required_metric(record, ("wdl_loss",)) for record in run.train_records]
+    teacher_wdl_loss = [_metric_value(record, "teacher_wdl_loss") for record in run.train_records]
+    result_wdl_loss = [_metric_value(record, "result_wdl_loss") for record in run.train_records]
     smoothed = _moving_average(blended, window=_smoothing_window(len(blended)))
 
     top_axis, bottom_axis = axes
@@ -357,18 +407,23 @@ def _plot_train_loss(plt, output_path: Path, run: MetricsRun, *, batch_size: int
     top_axis.legend(loc="upper right")
     _set_focus_ylim(top_axis, smoothed)
 
-    bottom_axis.plot(positions, cp_loss, label="cp loss", linewidth=1.8, color="C2")
-    bottom_axis.plot(positions, wdl_loss, label="wdl loss", linewidth=1.8, color="C3")
+    bottom_axis.plot(positions, wdl_loss, label="wdl objective loss", linewidth=1.8, color="C3")
+    finite_teacher = _complete_finite_series(teacher_wdl_loss, len(positions))
+    finite_result = _complete_finite_series(result_wdl_loss, len(positions))
+    if finite_teacher:
+        bottom_axis.plot(positions, finite_teacher, label="teacher wdl loss", linewidth=1.5, color="C2")
+    if finite_result:
+        bottom_axis.plot(positions, finite_result, label="result wdl loss", linewidth=1.5, color="C4")
     bottom_axis.set_ylabel("Component Loss")
     bottom_axis.grid(True, alpha=0.3)
     bottom_axis.legend(loc="upper right")
-    _set_focus_ylim(bottom_axis, cp_loss, wdl_loss)
+    _set_focus_ylim(bottom_axis, wdl_loss, finite_teacher, finite_result)
     _style_positions_axis(bottom_axis)
     bottom_axis.set_xlabel("Positions Seen (B)")
     bottom_axis.text(
         0.01,
         0.04,
-        "total = cp sigmoid-MSE + output regularization",
+        "total = WDL objective; raw score and cp-style metrics are reported separately",
         transform=bottom_axis.transAxes,
         fontsize=9,
         alpha=0.75,
@@ -385,8 +440,9 @@ def _plot_validation_loss(plt, output_path: Path, run: MetricsRun, *, batch_size
     figure, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True, height_ratios=[3, 2])
     positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.validation_records]
     blended = [_required_metric(record, ("validation_loss",)) for record in run.validation_records]
-    cp_loss = [_required_metric(record, ("validation_cp_loss",)) for record in run.validation_records]
     wdl_loss = [_required_metric(record, ("validation_wdl_loss",)) for record in run.validation_records]
+    teacher_wdl_loss = [_metric_value(record, "validation_teacher_wdl_loss") for record in run.validation_records]
+    result_wdl_loss = [_metric_value(record, "validation_result_wdl_loss") for record in run.validation_records]
 
     top_axis, bottom_axis = axes
     top_axis.plot(positions, blended, marker="o", markersize=4.0, linewidth=2.0, color="C0", label="total loss")
@@ -398,32 +454,45 @@ def _plot_validation_loss(plt, output_path: Path, run: MetricsRun, *, batch_size
 
     bottom_axis.plot(
         positions,
-        cp_loss,
-        marker="o",
-        markersize=4.0,
-        linewidth=1.8,
-        color="C2",
-        label="cp loss",
-    )
-    bottom_axis.plot(
-        positions,
         wdl_loss,
         marker="o",
         markersize=4.0,
         linewidth=1.8,
         color="C3",
-        label="wdl loss",
+        label="wdl objective loss",
     )
+    finite_teacher = _complete_finite_series(teacher_wdl_loss, len(positions))
+    finite_result = _complete_finite_series(result_wdl_loss, len(positions))
+    if finite_teacher:
+        bottom_axis.plot(
+            positions,
+            finite_teacher,
+            marker="o",
+            markersize=4.0,
+            linewidth=1.5,
+            color="C2",
+            label="teacher wdl loss",
+        )
+    if finite_result:
+        bottom_axis.plot(
+            positions,
+            finite_result,
+            marker="o",
+            markersize=4.0,
+            linewidth=1.5,
+            color="C4",
+            label="result wdl loss",
+        )
     bottom_axis.set_ylabel("Component Loss")
     bottom_axis.grid(True, alpha=0.3)
     bottom_axis.legend(loc="upper right")
-    _set_focus_ylim(bottom_axis, cp_loss, wdl_loss)
+    _set_focus_ylim(bottom_axis, wdl_loss, finite_teacher, finite_result)
     _style_positions_axis(bottom_axis)
     bottom_axis.set_xlabel("Positions Seen (B)")
     bottom_axis.text(
         0.01,
         0.04,
-        "validation also tracks cp_mae/cp_rmse/cp_corr in metrics.jsonl",
+        "validation also tracks raw score_mae and cp-style cp_mae/cp_corr in metrics.jsonl",
         transform=bottom_axis.transAxes,
         fontsize=9,
         alpha=0.75,
@@ -557,6 +626,13 @@ def _moving_average(values: list[float], window: int) -> list[float]:
     return smoothed
 
 
+def _complete_finite_series(values: list[float | None], expected_length: int) -> list[float]:
+    series = [float(value) for value in values if value is not None and math.isfinite(float(value))]
+    if len(series) != expected_length:
+        return []
+    return series
+
+
 def _smoothing_window(length: int) -> int:
     return max(5, min(401, length // 50))
 
@@ -606,6 +682,9 @@ def _checkpoint_diagnostics(run_dir: Path) -> dict[str, object]:
         return {
             "best_validation_loss": None,
             "best_validation_positions": None,
+            "best_checkpoint_metric_name": None,
+            "best_checkpoint_metric_value": None,
+            "best_checkpoint_positions": None,
             "config": None,
             "global_step": None,
             "positions_seen": None,
@@ -618,6 +697,9 @@ def _checkpoint_diagnostics(run_dir: Path) -> dict[str, object]:
         return {
             "best_validation_loss": None,
             "best_validation_positions": None,
+            "best_checkpoint_metric_name": None,
+            "best_checkpoint_metric_value": None,
+            "best_checkpoint_positions": None,
             "config": None,
             "global_step": None,
             "positions_seen": None,
@@ -630,6 +712,9 @@ def _checkpoint_diagnostics(run_dir: Path) -> dict[str, object]:
     return {
         "best_validation_loss": payload.get("best_validation_loss"),
         "best_validation_positions": best_validation_positions,
+        "best_checkpoint_metric_name": payload.get("best_checkpoint_metric_name"),
+        "best_checkpoint_metric_value": payload.get("best_checkpoint_metric_value"),
+        "best_checkpoint_positions": payload.get("best_checkpoint_positions"),
         "config": config,
         "global_step": payload.get("global_step"),
         "positions_seen": positions_seen,
@@ -684,9 +769,12 @@ def _record_positions(record: dict[str, object] | None, batch_size: int | None) 
 
 
 def _config_value(run: MetricsRun, key: str) -> object | None:
-    if run.checkpoint_config is None:
-        return None
-    return run.checkpoint_config.get(key)
+    if run.checkpoint_config is not None and key in run.checkpoint_config:
+        return run.checkpoint_config.get(key)
+    for records in (run.validation_records, run.train_records):
+        if records and key in records[-1]:
+            return records[-1].get(key)
+    return None
 
 
 def _closest_train_record(
@@ -793,7 +881,16 @@ def _build_suggestions(summary: dict[str, object]) -> list[str]:
         suggestions.append("CP correlation is still weak; raw outputs likely are not yet stable enough for pruning thresholds.")
     material_ok = summary["latest_material_ordering_ok"]
     if material_ok is False:
-        suggestions.append("Material ladder sanity is out of order; revisit score clipping, data exposure, or loss weighting before shipping.")
+        suggestions.append("Material ladder sanity is out of order; revisit data exposure, WDL calibration, or loss weighting before shipping.")
+    wdl_in_scaling = summary["wdl_in_scaling"]
+    wdl_out_scaling = summary["wdl_out_scaling"]
+    if (
+        (wdl_in_scaling is not None and wdl_in_scaling >= 2000.0)
+        or (wdl_out_scaling is not None and wdl_out_scaling >= 2000.0)
+    ):
+        suggestions.append(
+            "WDL scaling is very flat for a filtered stream; inspect with the same filters as training and prefer a Stockfish-like scale near 400-600 unless the filtered data is still saturated."
+        )
     if summary["scheduler_exhausted"]:
         suggestions.append("Learning rate is effectively exhausted; if validation is still improving, continue by increasing the position budget.")
     if summary["positions_seen"] is not None and summary["positions_seen"] < 500_000_000:

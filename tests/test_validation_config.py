@@ -28,18 +28,7 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.validation_positions, 0)
         self.assertEqual(config.feature_set, "halfkp")
 
-    def test_score_clip_is_validated(self) -> None:
-        with self.assertRaises(ValueError):
-            TrainConfig.from_dict(
-                {
-                    "train_datasets": ["/tmp/train.binpack"],
-                    "total_train_positions": 10_000,
-                    "epoch_positions": 1_000,
-                    "score_clip": -1.0,
-                }
-            )
-
-    def test_stockfish_wdl_and_filter_fields_are_validated(self) -> None:
+    def test_stockfish_wdl_fields_are_validated(self) -> None:
         valid = {
             "train_datasets": ["/tmp/train.binpack"],
             "total_train_positions": 10_000,
@@ -47,13 +36,15 @@ class ValidationConfigTests(unittest.TestCase):
         }
         for key, value in (
             ("wdl_lambda", 1.1),
+            ("wdl_lambda_end", -0.1),
             ("wdl_in_scaling", 0.0),
             ("wdl_out_scaling", 0.0),
             ("wdl_loss_power", 0.0),
-            ("decisive_score_mismatch_margin", -1.0),
-            ("draw_score_mismatch_margin", -1.0),
+            ("nnue2score", 0.0),
             ("max_abs_score", -1.0),
-            ("sanity_anchor_weight", -1.0),
+            ("validation_split_fraction", 1.0),
+            ("random_fen_skipping", -1),
+            ("lr_gamma", 0.0),
         ):
             with self.assertRaises(ValueError):
                 TrainConfig.from_dict({**valid, key: value})
@@ -118,8 +109,6 @@ class ValidationConfigTests(unittest.TestCase):
             ("lr_schedule", "exponential"),
             ("lr_drop_fractions", [0.8, 0.95]),
             ("lr_drop_factor", 0.1),
-            ("lr_gamma", 0.992),
-            ("cp_loss_beta", 128.0),
         ):
             with self.assertRaisesRegex(ValueError, "Unknown config keys"):
                 TrainConfig.from_dict(
@@ -135,7 +124,7 @@ class ValidationConfigTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             TrainConfig.from_dict({"train_datasets": ["/tmp/train.binpack"]})
 
-    def test_overlap_between_train_and_validation_is_rejected(self) -> None:
+    def test_overlap_between_train_and_validation_requires_split_fraction(self) -> None:
         with self.assertRaises(ValueError):
             TrainConfig.from_dict(
                 {
@@ -145,6 +134,17 @@ class ValidationConfigTests(unittest.TestCase):
                     "epoch_positions": 1_000,
                 }
             )
+
+        config = TrainConfig.from_dict(
+            {
+                "train_datasets": ["/tmp/shared.binpack"],
+                "validation_datasets": ["/tmp/shared.binpack"],
+                "total_train_positions": 10_000,
+                "epoch_positions": 1_000,
+                "validation_split_fraction": 0.1,
+            }
+        )
+        self.assertEqual(config.validation_split_fraction, 0.1)
 
     def test_dataset_directories_and_globs_expand_to_binpack_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -196,20 +196,30 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.num_features, 40_960)
         self.assertEqual(config.max_active_features, 30)
 
-    def test_v2_reference_config_loads_with_larger_halfkp_shape(self) -> None:
-        config_path = Path(__file__).resolve().parents[1] / "configs" / "v2.toml"
+    def test_v4_reference_config_loads_with_current_halfkp_shape(self) -> None:
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "v4.toml"
         config = TrainConfig.from_toml(config_path)
 
-        self.assertEqual(config.run_name, "v2")
+        self.assertTrue(config.run_name)
         self.assertEqual(config.ft_size, 1024)
         self.assertEqual(config.l1_size, 256)
         self.assertEqual(config.l2_size, 64)
         self.assertEqual(config.num_features, 40_960)
-        self.assertEqual(config.score_clip, 8000.0)
-        self.assertEqual(config.wdl_lambda, 0.9)
-        self.assertEqual(config.wdl_in_scaling, 4000.0)
-        self.assertEqual(config.wdl_out_scaling, 4000.0)
-        self.assertEqual(config.sanity_anchor_weight, 0.01)
+        self.assertEqual(config.wdl_lambda, 1.0)
+        self.assertEqual(config.wdl_lambda_end, 0.75)
+        self.assertEqual(config.nnue2score, 600.0)
+        self.assertEqual(config.wdl_in_offset, 270.0)
+        self.assertEqual(config.wdl_in_scaling, 340.0)
+        self.assertEqual(config.wdl_out_offset, 270.0)
+        self.assertEqual(config.wdl_out_scaling, 380.0)
+        self.assertEqual(config.learning_rate, 0.000875)
+        self.assertEqual(config.lr_gamma, 0.992)
+        self.assertEqual(config.random_fen_skipping, 3)
+        self.assertTrue(config.smart_fen_skipping)
+        self.assertTrue(config.wld_fen_skipping)
+        self.assertTrue(config.cuda_tf32)
+        self.assertTrue(config.cuda_fused_optimizer)
+        self.assertEqual(config.validation_split_fraction, 0.01)
 
 
 if __name__ == "__main__":

@@ -55,12 +55,24 @@ class CheckpointMetadataTests(unittest.TestCase):
                 global_step=3017,
                 positions_seen=12_345_678,
                 epoch_index=12,
+                best_validation_loss=0.25,
+                best_validation_positions=9_999,
+                best_checkpoint_metric_name="validation_score_mae",
+                best_checkpoint_metric_value=123.0,
+                best_checkpoint_positions=11_111,
+                best_checkpoint_sort_key=(0.0, 123.0, 0.01, -0.9, 0.25),
             )
             payload = load_checkpoint(checkpoint_path)
             self.assertEqual(payload["global_step"], 3017)
             self.assertEqual(payload["positions_seen"], 12_345_678)
             self.assertEqual(payload["epoch_index"], 12)
             self.assertIn("rng_state", payload)
+            self.assertEqual(payload["best_validation_loss"], 0.25)
+            self.assertEqual(payload["best_validation_positions"], 9_999)
+            self.assertEqual(payload["best_checkpoint_metric_name"], "validation_score_mae")
+            self.assertEqual(payload["best_checkpoint_metric_value"], 123.0)
+            self.assertEqual(payload["best_checkpoint_positions"], 11_111)
+            self.assertEqual(payload["best_checkpoint_sort_key"], [0.0, 123.0, 0.01, -0.9, 0.25])
 
 
 if __name__ == "__main__":

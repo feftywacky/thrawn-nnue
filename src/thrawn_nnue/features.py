@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from .board import BoardState, flip_vertical
 
 
@@ -76,41 +74,6 @@ def active_feature_indices(board_state: BoardState, perspective: str) -> list[in
     return indices
 
 
-def active_factor_feature_indices(board_state: BoardState, perspective: str) -> list[int]:
-    indices = [
-        factor_feature_index(square_index, piece, perspective)
-        for square_index, piece in sorted(board_state.board.items())
-        if piece.upper() != "K"
-    ]
-    if len(indices) > MAX_ACTIVE_FEATURES:
-        raise ValueError(f"Expected at most {MAX_ACTIVE_FEATURES} active features, got {len(indices)}")
-    return indices
-
-
 def padded_feature_indices(board_state: BoardState, perspective: str) -> list[int]:
     indices = active_feature_indices(board_state, perspective)
     return indices + [-1] * (MAX_ACTIVE_FEATURES - len(indices))
-
-
-def padded_factor_feature_indices(board_state: BoardState, perspective: str) -> list[int]:
-    indices = active_factor_feature_indices(board_state, perspective)
-    return indices + [-1] * (MAX_ACTIVE_FEATURES - len(indices))
-
-
-@dataclass(slots=True)
-class HalfKPFeatures:
-    white: list[int]
-    black: list[int]
-    white_factor: list[int]
-    black_factor: list[int]
-    stm: float
-
-
-def extract_halfkp(board_state: BoardState) -> HalfKPFeatures:
-    return HalfKPFeatures(
-        white=padded_feature_indices(board_state, "white"),
-        black=padded_feature_indices(board_state, "black"),
-        white_factor=padded_factor_feature_indices(board_state, "white"),
-        black_factor=padded_factor_feature_indices(board_state, "black"),
-        stm=1.0 if board_state.side_to_move == "w" else 0.0,
-    )

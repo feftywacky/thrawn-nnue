@@ -12,25 +12,28 @@ from .features import active_feature_indices
 
 
 MAGIC = b"THNNUE\x00\x01"
-VERSION = 6
+VERSION = 7
 FEATURE_SET_ID = "halfkp_v1"
 OUTPUT_PERSPECTIVE_STM = 1
 EXPECTED_NUM_FEATURES = 40960
 MAX_DESCRIPTION_BYTES = 1_000_000
+STOCKFISH_INTERNAL_TO_CP = 100.0 / 208.0
 HEADER_PREFIX_STRUCT = struct.Struct("<8sI")
-HEADER_REST_STRUCT = struct.Struct("<16sIIIIIffffI")
+HEADER_REST_STRUCT = struct.Struct("<16sIIIIIfffffI")
 DEFAULT_VERIFICATION_FENS = [
     "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b - - 0 1",
     "r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/2P5/PP3PPP/RNBQKBNR b - - 0 3",
     "8/2k5/8/8/8/8/5K2/8 w - - 0 1",
 ]
-MATERIAL_SANITY_POSITIONS = [
-    ("starting_position", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1"),
-    ("white_up_pawn", "rnbqkbnr/1ppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1"),
-    ("white_up_knight", "r1bqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1"),
-    ("white_up_rook", "1nbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1"),
-    ("white_up_queen", "rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1"),
+STARTING_POSITION_SANITY = ("starting_position", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1")
+MATERIAL_LADDER_POSITIONS = [
+    ("equal_material", "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR w - - 0 3"),
+    ("white_up_pawn", "r1bqkbnr/1ppp1ppp/2n5/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR w - - 0 3"),
+    ("white_up_knight", "r1bqkbnr/pppp1ppp/8/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR w - - 0 3"),
+    ("white_up_rook", "2bqkbnr/pppp1ppp/2n5/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR w - - 0 3"),
+    ("white_up_queen", "r1b1kbnr/pppp1ppp/2n5/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR w - - 0 3"),
 ]
+SANITY_POSITIONS = [STARTING_POSITION_SANITY, *MATERIAL_LADDER_POSITIONS]
 
 
 @dataclass(slots=True)
@@ -44,6 +47,7 @@ class ExportedNetwork:
     l1_scale: float
     l2_scale: float
     out_scale: float
+    score_scale: float
     ft_bias: np.ndarray
     ft_weight: np.ndarray
     l1_bias: np.ndarray
@@ -110,6 +114,7 @@ def load_export(path: str | Path) -> ExportedNetwork:
             l1_scale,
             l2_scale,
             out_scale,
+            score_scale,
             description_length,
         ) = HEADER_REST_STRUCT.unpack(raw_rest)
 
@@ -125,6 +130,7 @@ def load_export(path: str | Path) -> ExportedNetwork:
             l1_scale=l1_scale,
             l2_scale=l2_scale,
             out_scale=out_scale,
+            score_scale=score_scale,
             description_length=description_length,
         )
 
@@ -160,6 +166,7 @@ def load_export(path: str | Path) -> ExportedNetwork:
             l1_scale=l1_scale,
             l2_scale=l2_scale,
             out_scale=out_scale,
+            score_scale=score_scale,
             ft_bias=ft_bias,
             ft_weight=ft_weight,
             l1_bias=l1_bias,
@@ -189,6 +196,7 @@ def _validate_export_header(
     l1_scale: float,
     l2_scale: float,
     out_scale: float,
+    score_scale: float,
     description_length: int,
 ) -> None:
     if num_features != EXPECTED_NUM_FEATURES:
@@ -203,6 +211,7 @@ def _validate_export_header(
         ("l1_scale", l1_scale),
         ("l2_scale", l2_scale),
         ("out_scale", out_scale),
+        ("score_scale", score_scale),
     ):
         if not np.isfinite(scale) or scale <= 0.0:
             raise ValueError(f"{name} must be finite and positive")
@@ -236,6 +245,7 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
             torch.from_numpy(black_indices).long(),
             torch.from_numpy(stm).float().unsqueeze(1),
         )
+        predictions = predictions * float(config.nnue2score)
         predictions = [float(value) for value in predictions.reshape(-1).cpu().tolist()]
 
     exported = load_export(nnue_path)
@@ -249,7 +259,7 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
     exported_predictions = evaluate_export(exported, fens)
     abs_errors = [abs(a - b) for a, b in zip(predictions, exported_predictions, strict=True)]
 
-    sanity_fens = [fen for _, fen in MATERIAL_SANITY_POSITIONS]
+    sanity_fens = [fen for _, fen in SANITY_POSITIONS]
     with torch.no_grad():
         white_indices, black_indices, stm = _batch_arrays_from_fens(sanity_fens)
         sanity_checkpoint = model(
@@ -257,26 +267,30 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
             torch.from_numpy(black_indices).long(),
             torch.from_numpy(stm).float().unsqueeze(1),
         )
+        sanity_checkpoint = sanity_checkpoint * float(config.nnue2score)
         sanity_checkpoint_values = [float(value) for value in sanity_checkpoint.reshape(-1).cpu().tolist()]
     sanity_exported_values = evaluate_export(exported, sanity_fens)
     sanity_positions = [
         {
             "name": name,
             "fen": fen,
-            "checkpoint_cp": checkpoint_cp,
-            "exported_cp": exported_cp,
-            "abs_error": abs(checkpoint_cp - exported_cp),
+            "checkpoint_score": checkpoint_score,
+            "exported_score": exported_score,
+            "checkpoint_cp": _score_to_cp(checkpoint_score),
+            "exported_cp": _score_to_cp(exported_score),
+            "abs_error": abs(checkpoint_score - exported_score),
+            "abs_error_cp": _score_to_cp(abs(checkpoint_score - exported_score)),
         }
-        for (name, fen), checkpoint_cp, exported_cp in zip(
-            MATERIAL_SANITY_POSITIONS,
+        for (name, fen), checkpoint_score, exported_score in zip(
+            SANITY_POSITIONS,
             sanity_checkpoint_values,
             sanity_exported_values,
             strict=True,
         )
     ]
-    sanity_export_lookup = {item["name"]: float(item["exported_cp"]) for item in sanity_positions}
+    sanity_export_lookup = {item["name"]: float(item["exported_score"]) for item in sanity_positions}
     material_ordering_ok = (
-        sanity_export_lookup["starting_position"]
+        sanity_export_lookup["equal_material"]
         < sanity_export_lookup["white_up_pawn"]
         < sanity_export_lookup["white_up_knight"]
         < sanity_export_lookup["white_up_rook"]
@@ -289,15 +303,22 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
         "mean_abs_error": (sum(abs_errors) / len(abs_errors)) if abs_errors else 0.0,
         "checkpoint_predictions": predictions,
         "exported_predictions": exported_predictions,
+        "checkpoint_predictions_cp": [_score_to_cp(value) for value in predictions],
+        "exported_predictions_cp": [_score_to_cp(value) for value in exported_predictions],
         "abs_errors": abs_errors,
+        "abs_errors_cp": [_score_to_cp(value) for value in abs_errors],
+        "score_units": "Stockfish internal score",
+        "score_cp_formula": "score_cp = score * 100 / 208",
         "export_ft_scale": float(exported.ft_scale),
         "export_l1_scale": float(exported.l1_scale),
         "export_l2_scale": float(exported.l2_scale),
         "export_out_scale": float(exported.out_scale),
+        "export_score_scale": float(exported.score_scale),
+        "nnue2score": float(config.nnue2score),
         "quantization": _export_quantization_diagnostics(exported),
         "sanity_positions": sanity_positions,
         "material_ordering_ok": bool(material_ordering_ok),
-        "starting_position_near_zero": abs(sanity_export_lookup["starting_position"]) <= 50.0,
+        "starting_position_near_zero": abs(sanity_export_lookup["starting_position"]) <= _cp_to_score(50.0),
     }
 
 
@@ -325,9 +346,17 @@ def evaluate_export(exported: ExportedNetwork, fens: list[str]) -> list[float]:
         hidden1 = np.clip(combined, 0.0, 1.0)
         hidden2 = np.clip(hidden1 @ l1_weight + l1_bias, 0.0, 1.0)
         hidden3 = np.clip(hidden2 @ l2_weight + l2_bias, 0.0, 1.0)
-        output = hidden3 @ out_weight + out_bias[0]
+        output = (hidden3 @ out_weight + out_bias[0]) * exported.score_scale
         results.append(float(output))
     return results
+
+
+def _score_to_cp(value: float) -> float:
+    return float(value) * STOCKFISH_INTERNAL_TO_CP
+
+
+def _cp_to_score(value: float) -> float:
+    return float(value) / STOCKFISH_INTERNAL_TO_CP
 
 
 def _coalesced_ft_weights_from_model(model) -> tuple[np.ndarray, np.ndarray]:
@@ -353,6 +382,7 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
     l1_bias = model.l1.bias.detach().cpu().numpy()
     l2_weight = model.l2.weight.detach().cpu().numpy().T
     l2_bias = model.l2.bias.detach().cpu().numpy()
+    score_scale = float(config.nnue2score)
     out_weight = model.output.weight.detach().cpu().numpy().reshape(-1)
     out_bias = model.output.bias.detach().cpu().numpy()
 
@@ -372,6 +402,7 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
         l1_scale=l1_scale,
         l2_scale=l2_scale,
         out_scale=out_scale,
+        score_scale=score_scale,
         ft_bias=_quantize(ft_bias, ft_scale, np.int16),
         ft_weight=_quantize(ft_weight, ft_scale, np.int16),
         l1_bias=_quantize(l1_bias, l1_scale, np.int32),
@@ -447,6 +478,7 @@ def _write_export(handle, exported: ExportedNetwork) -> None:
         float(exported.l1_scale),
         float(exported.l2_scale),
         float(exported.out_scale),
+        float(exported.score_scale),
         len(description_bytes),
     )
     handle.write(header)
