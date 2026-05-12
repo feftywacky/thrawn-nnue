@@ -22,7 +22,7 @@ cuda_tf32 = true
 cuda_fused_optimizer = true
 batch_size = 16384
 
-total_train_positions = 10000000000
+total_train_positions = 20000000000
 epoch_positions = 100000000
 validation_positions = 1000000
 
