@@ -41,7 +41,7 @@ class ValidationConfigTests(unittest.TestCase):
             ("wdl_out_scaling", 0.0),
             ("wdl_loss_power", 0.0),
             ("nnue2score", 0.0),
-            ("max_abs_score", -1.0),
+            ("max_abs_score_cp", -1.0),
             ("validation_split_fraction", 1.0),
             ("random_fen_skipping", -1),
             ("lr_gamma", 0.0),
@@ -215,11 +215,32 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.learning_rate, 0.000875)
         self.assertEqual(config.lr_gamma, 0.992)
         self.assertEqual(config.random_fen_skipping, 3)
-        self.assertTrue(config.smart_fen_skipping)
-        self.assertTrue(config.wld_fen_skipping)
+        self.assertTrue(config.skip_tactical_positions)
+        self.assertTrue(config.skip_wdl_score_mismatch)
         self.assertTrue(config.cuda_tf32)
         self.assertTrue(config.cuda_fused_optimizer)
         self.assertEqual(config.validation_split_fraction, 0.01)
+
+    def test_v5_farseer_t74_finetune_config_uses_stockfish_second_stage_shape(self) -> None:
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "v5.toml"
+        config = TrainConfig.from_toml(config_path)
+
+        self.assertEqual(config.run_name, "v5")
+        self.assertIn("farseerT74.binpack", config.train_datasets[0])
+        self.assertEqual(config.ft_size, 1024)
+        self.assertEqual(config.l1_size, 256)
+        self.assertEqual(config.l2_size, 64)
+        self.assertEqual(config.batch_size, 16384)
+        self.assertEqual(config.total_train_positions, 20_000_000_000)
+        self.assertEqual(config.validation_interval_positions, 100_000_000)
+        self.assertEqual(config.learning_rate, 0.0004375)
+        self.assertEqual(config.lr_gamma, 0.995)
+        self.assertEqual(config.random_fen_skipping, 3)
+        self.assertTrue(config.skip_tactical_positions)
+        self.assertTrue(config.skip_wdl_score_mismatch)
+        self.assertEqual(config.wdl_lambda, 1.0)
+        self.assertEqual(config.wdl_lambda_end, 0.75)
+        self.assertEqual(config.max_abs_score_cp, 0.0)
 
 
 if __name__ == "__main__":

@@ -18,6 +18,10 @@ class MetricsRun:
     best_checkpoint_metric_name: str | None
     best_checkpoint_metric_value: float | None
     best_checkpoint_positions: int | None
+    best_deployable_checkpoint_exists: bool
+    best_deployable_checkpoint_metric_name: str | None
+    best_deployable_checkpoint_metric_value: float | None
+    best_deployable_checkpoint_positions: int | None
     checkpoint_config: dict[str, object] | None
     checkpoint_global_step: int | None
     checkpoint_positions_seen: int | None
@@ -55,6 +59,18 @@ def load_metrics_run(run_dir: str | Path) -> MetricsRun:
         best_checkpoint_metric_name=None if checkpoint.get("best_checkpoint_metric_name") is None else str(checkpoint.get("best_checkpoint_metric_name")),
         best_checkpoint_metric_value=_as_float(checkpoint.get("best_checkpoint_metric_value")),
         best_checkpoint_positions=_as_int(checkpoint.get("best_checkpoint_positions")),
+        best_deployable_checkpoint_exists=_best_deployable_checkpoint_path(run_path) is not None,
+        best_deployable_checkpoint_metric_name=(
+            None
+            if checkpoint.get("best_deployable_checkpoint_metric_name") is None
+            else str(checkpoint.get("best_deployable_checkpoint_metric_name"))
+        ),
+        best_deployable_checkpoint_metric_value=_as_float(
+            checkpoint.get("best_deployable_checkpoint_metric_value")
+        ),
+        best_deployable_checkpoint_positions=_as_int(
+            checkpoint.get("best_deployable_checkpoint_positions")
+        ),
         checkpoint_config=checkpoint["config"],
         checkpoint_global_step=checkpoint["global_step"],
         checkpoint_positions_seen=checkpoint["positions_seen"],
@@ -76,13 +92,14 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
     if effective_validation_interval in (None, 0):
         effective_validation_interval = epoch_positions
     wdl_lambda = _as_float(_config_value(run, "wdl_lambda"))
+    wdl_lambda_end = _as_float(_config_value(run, "wdl_lambda_end"))
     nnue2score = _as_float(_config_value(run, "nnue2score"))
     wdl_in_scaling = _as_float(_config_value(run, "wdl_in_scaling"))
     wdl_out_scaling = _as_float(_config_value(run, "wdl_out_scaling"))
-    max_abs_score = _as_float(_config_value(run, "max_abs_score"))
+    max_abs_score_cp = _as_float(_config_value(run, "max_abs_score_cp", "max_abs_score"))
     lr_gamma = _as_float(_config_value(run, "lr_gamma"))
-    smart_fen_skipping = _config_value(run, "smart_fen_skipping")
-    wld_fen_skipping = _config_value(run, "wld_fen_skipping")
+    skip_tactical_positions = _config_value(run, "skip_tactical_positions", "smart_fen_skipping")
+    skip_wdl_score_mismatch = _config_value(run, "skip_wdl_score_mismatch", "wld_fen_skipping")
     random_fen_skipping = _as_int(_config_value(run, "random_fen_skipping"))
 
     latest_train_step = _record_step(latest_train)
@@ -160,6 +177,7 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "latest_epoch_index": latest_epoch_index,
         "latest_train_loss": _metric_value(latest_train, "loss"),
         "latest_train_wdl_loss": _metric_value(latest_train, "wdl_loss"),
+        "latest_train_wdl_lambda": _metric_value(latest_train, "wdl_lambda"),
         "latest_train_teacher_wdl_loss": _metric_value(latest_train, "teacher_wdl_loss"),
         "latest_train_result_wdl_loss": _metric_value(latest_train, "result_wdl_loss", "wdl_loss"),
         "latest_train_output_reg_loss": _metric_value(latest_train, "output_reg_loss"),
@@ -168,6 +186,7 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "latest_validation_positions": latest_validation_positions,
         "latest_validation_loss": _metric_value(latest_validation, "validation_loss"),
         "latest_validation_wdl_loss": _metric_value(latest_validation, "validation_wdl_loss"),
+        "latest_validation_wdl_lambda": _metric_value(latest_validation, "wdl_lambda"),
         "latest_validation_teacher_wdl_loss": _metric_value(latest_validation, "validation_teacher_wdl_loss"),
         "latest_validation_result_wdl_loss": _metric_value(
             latest_validation,
@@ -195,6 +214,10 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "best_checkpoint_metric_name": run.best_checkpoint_metric_name,
         "best_checkpoint_metric_value": run.best_checkpoint_metric_value,
         "best_checkpoint_positions": run.best_checkpoint_positions,
+        "best_deployable_checkpoint_exists": run.best_deployable_checkpoint_exists,
+        "best_deployable_checkpoint_metric_name": run.best_deployable_checkpoint_metric_name,
+        "best_deployable_checkpoint_metric_value": run.best_deployable_checkpoint_metric_value,
+        "best_deployable_checkpoint_positions": run.best_deployable_checkpoint_positions,
         "configured_total_positions": total_train_positions,
         "latest_position_fraction": latest_position_fraction,
         "batch_size": batch_size,
@@ -214,13 +237,14 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "lr_near_zero": lr_near_zero,
         "scheduler_exhausted": scheduler_exhausted,
         "wdl_lambda": wdl_lambda,
+        "wdl_lambda_end": wdl_lambda_end,
         "nnue2score": nnue2score,
         "wdl_in_scaling": wdl_in_scaling,
         "wdl_out_scaling": wdl_out_scaling,
-        "max_abs_score": max_abs_score,
+        "max_abs_score_cp": max_abs_score_cp,
         "lr_gamma": lr_gamma,
-        "smart_fen_skipping": smart_fen_skipping,
-        "wld_fen_skipping": wld_fen_skipping,
+        "skip_tactical_positions": skip_tactical_positions,
+        "skip_wdl_score_mismatch": skip_wdl_score_mismatch,
         "random_fen_skipping": random_fen_skipping,
     }
     summary["suggestions"] = _build_suggestions(summary)
@@ -297,6 +321,17 @@ def render_summary_text(summary: dict[str, object]) -> str:
             f"{summary['best_checkpoint_metric_name']}={_format_optional_float(summary['best_checkpoint_metric_value'])}"
         )
         lines.append(f"best_checkpoint_positions: {_format_optional_int(summary['best_checkpoint_positions'])}")
+    lines.append(f"best_deployable_checkpoint_exists: {summary['best_deployable_checkpoint_exists']}")
+    if summary["best_deployable_checkpoint_metric_name"] is not None:
+        lines.append(
+            "best_deployable_checkpoint_metric: "
+            f"{summary['best_deployable_checkpoint_metric_name']}="
+            f"{_format_optional_float(summary['best_deployable_checkpoint_metric_value'])}"
+        )
+        lines.append(
+            "best_deployable_checkpoint_positions: "
+            f"{_format_optional_int(summary['best_deployable_checkpoint_positions'])}"
+        )
     lines.append("")
     lines.append("Run Budget")
     lines.append(f"configured_total_positions: {_format_optional_int(summary['configured_total_positions'])}")
@@ -313,12 +348,15 @@ def render_summary_text(summary: dict[str, object]) -> str:
     lines.append(f"lr_near_zero: {summary['lr_near_zero']}")
     lines.append(f"scheduler_exhausted: {summary['scheduler_exhausted']}")
     lines.append(f"wdl_lambda: {_format_optional_float(summary['wdl_lambda'])}")
+    lines.append(f"wdl_lambda_end: {_format_optional_float(summary['wdl_lambda_end'])}")
+    lines.append(f"latest_train_wdl_lambda: {_format_optional_float(summary['latest_train_wdl_lambda'])}")
+    lines.append(f"latest_validation_wdl_lambda: {_format_optional_float(summary['latest_validation_wdl_lambda'])}")
     lines.append(f"nnue2score: {_format_optional_float(summary['nnue2score'])}")
     lines.append(f"wdl_in_scaling: {_format_optional_float(summary['wdl_in_scaling'])}")
     lines.append(f"wdl_out_scaling: {_format_optional_float(summary['wdl_out_scaling'])}")
-    lines.append(f"max_abs_score: {_format_optional_float(summary['max_abs_score'])}")
-    lines.append(f"smart_fen_skipping: {summary['smart_fen_skipping']}")
-    lines.append(f"wld_fen_skipping: {summary['wld_fen_skipping']}")
+    lines.append(f"max_abs_score_cp: {_format_optional_float(summary['max_abs_score_cp'])}")
+    lines.append(f"skip_tactical_positions: {summary['skip_tactical_positions']}")
+    lines.append(f"skip_wdl_score_mismatch: {summary['skip_wdl_score_mismatch']}")
     lines.append(f"random_fen_skipping: {_format_optional_int(summary['random_fen_skipping'])}")
     lines.append("")
     lines.append("Generalization")
@@ -685,10 +723,14 @@ def _checkpoint_diagnostics(run_dir: Path) -> dict[str, object]:
             "best_checkpoint_metric_name": None,
             "best_checkpoint_metric_value": None,
             "best_checkpoint_positions": None,
+            "best_deployable_checkpoint_metric_name": None,
+            "best_deployable_checkpoint_metric_value": None,
+            "best_deployable_checkpoint_positions": None,
             "config": None,
             "global_step": None,
             "positions_seen": None,
         }
+    deployable_payload = _load_optional_checkpoint_payload(_best_deployable_checkpoint_path(run_dir))
     try:
         from .checkpoint import load_checkpoint
 
@@ -700,6 +742,18 @@ def _checkpoint_diagnostics(run_dir: Path) -> dict[str, object]:
             "best_checkpoint_metric_name": None,
             "best_checkpoint_metric_value": None,
             "best_checkpoint_positions": None,
+            "best_deployable_checkpoint_metric_name": _payload_value(
+                deployable_payload,
+                "best_deployable_checkpoint_metric_name",
+            ),
+            "best_deployable_checkpoint_metric_value": _payload_value(
+                deployable_payload,
+                "best_deployable_checkpoint_metric_value",
+            ),
+            "best_deployable_checkpoint_positions": _payload_value(
+                deployable_payload,
+                "best_deployable_checkpoint_positions",
+            ),
             "config": None,
             "global_step": None,
             "positions_seen": None,
@@ -715,6 +769,21 @@ def _checkpoint_diagnostics(run_dir: Path) -> dict[str, object]:
         "best_checkpoint_metric_name": payload.get("best_checkpoint_metric_name"),
         "best_checkpoint_metric_value": payload.get("best_checkpoint_metric_value"),
         "best_checkpoint_positions": payload.get("best_checkpoint_positions"),
+        "best_deployable_checkpoint_metric_name": _payload_value(
+            deployable_payload,
+            "best_deployable_checkpoint_metric_name",
+            fallback=payload.get("best_deployable_checkpoint_metric_name"),
+        ),
+        "best_deployable_checkpoint_metric_value": _payload_value(
+            deployable_payload,
+            "best_deployable_checkpoint_metric_value",
+            fallback=payload.get("best_deployable_checkpoint_metric_value"),
+        ),
+        "best_deployable_checkpoint_positions": _payload_value(
+            deployable_payload,
+            "best_deployable_checkpoint_positions",
+            fallback=payload.get("best_deployable_checkpoint_positions"),
+        ),
         "config": config,
         "global_step": payload.get("global_step"),
         "positions_seen": positions_seen,
@@ -768,13 +837,44 @@ def _record_positions(record: dict[str, object] | None, batch_size: int | None) 
     return None
 
 
-def _config_value(run: MetricsRun, key: str) -> object | None:
-    if run.checkpoint_config is not None and key in run.checkpoint_config:
-        return run.checkpoint_config.get(key)
+def _config_value(run: MetricsRun, *keys: str) -> object | None:
+    for key in keys:
+        if run.checkpoint_config is not None and key in run.checkpoint_config:
+            return run.checkpoint_config.get(key)
     for records in (run.validation_records, run.train_records):
-        if records and key in records[-1]:
-            return records[-1].get(key)
+        if not records:
+            continue
+        for key in keys:
+            if key in records[-1]:
+                return records[-1].get(key)
     return None
+
+
+def _best_deployable_checkpoint_path(run_dir: Path) -> Path | None:
+    alias_path = run_dir / "checkpoints" / "best_deployable.pt"
+    if alias_path.exists():
+        return alias_path
+    stamped_paths = sorted((run_dir / "checkpoints").glob("best_deployable_step_*.pt"))
+    if stamped_paths:
+        return stamped_paths[-1]
+    return None
+
+
+def _load_optional_checkpoint_payload(checkpoint_path: Path | None) -> dict[str, object] | None:
+    if checkpoint_path is None:
+        return None
+    try:
+        from .checkpoint import load_checkpoint
+
+        return load_checkpoint(checkpoint_path, map_location="cpu")
+    except Exception:
+        return None
+
+
+def _payload_value(payload: dict[str, object] | None, key: str, *, fallback: object | None = None) -> object | None:
+    if payload is not None and key in payload:
+        return payload.get(key)
+    return fallback
 
 
 def _closest_train_record(
@@ -867,7 +967,17 @@ def _resume_recommendation(
 
 def _build_suggestions(summary: dict[str, object]) -> list[str]:
     suggestions: list[str] = []
-    if summary["resume_recommendation"] == "continue-latest":
+    material_sanity = summary.get("latest_material_sanity")
+    starting_position_near_zero = (
+        material_sanity.get("starting_position_near_zero")
+        if isinstance(material_sanity, dict)
+        else None
+    )
+    if starting_position_near_zero is False:
+        suggestions.append(
+            "Starting-position sanity is far from zero; stop this run and restart from the previous checkpoint with a filtered/lower-LR fine-tune config."
+        )
+    elif summary["resume_recommendation"] == "continue-latest":
         suggestions.append(
             "Validation is still near its best point; resume from the latest checkpoint and extend total_train_positions."
         )
@@ -876,12 +986,32 @@ def _build_suggestions(summary: dict[str, object]) -> list[str]:
     else:
         suggestions.append("There are too few validation points to judge continuation confidently yet.")
 
+    wdl_lambda = summary["wdl_lambda"]
+    wdl_lambda_end = summary["wdl_lambda_end"]
+    if (
+        wdl_lambda is not None
+        and wdl_lambda_end is not None
+        and abs(float(wdl_lambda) - float(wdl_lambda_end)) > 1e-12
+    ):
+        suggestions.append(
+            "Total loss uses a moving wdl_lambda, so compare score_mae and teacher_wdl_loss before treating an upward total-loss curve as divergence."
+        )
+
     cp_corr = summary["latest_validation_cp_corr"]
     if cp_corr is not None and cp_corr < 0.4:
         suggestions.append("CP correlation is still weak; raw outputs likely are not yet stable enough for pruning thresholds.")
     material_ok = summary["latest_material_ordering_ok"]
+    material_margins_ok = (
+        material_sanity.get("material_margins_ok")
+        if isinstance(material_sanity, dict)
+        else None
+    )
     if material_ok is False:
         suggestions.append("Material ladder sanity is out of order; revisit data exposure, WDL calibration, or loss weighting before shipping.")
+    elif material_margins_ok is False:
+        suggestions.append(
+            "Material ladder is barely ordered; prefer best_deployable.pt when available, or continue/retrain until the material gaps clear the deployable margin."
+        )
     wdl_in_scaling = summary["wdl_in_scaling"]
     wdl_out_scaling = summary["wdl_out_scaling"]
     if (

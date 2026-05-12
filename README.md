@@ -182,6 +182,15 @@ That config currently points at:
 - `data/nodes5000pv2_UHO.binpack`
 - output directory `configs/runs/v4`
 
+The current second-stage fine-tune config is:
+
+- [configs/v5.toml](configs/v5.toml): Stockfish-style Farseer/T74 retrain config after a stable `nodes5000pv2_UHO` baseline.
+
+It starts from a v4 checkpoint and trains on:
+
+- `data/farseerT74.binpack`
+- output directories under `configs/runs/`
+
 Important config themes:
 
 - dataset paths and validation split
@@ -213,6 +222,16 @@ thrawn-nnue train --config configs/v4.toml --init-checkpoint configs/runs/v4/che
 
 `--init-checkpoint` warm-starts model weights but starts a fresh optimizer/scheduler state for the new run.
 
+### Fine-tune
+
+Fine-tune from an existing checkpoint with a new config and a fresh optimizer:
+
+```bash
+thrawn-nnue fine-tune --config configs/v5.toml --checkpoint configs/runs/v4/checkpoints/best.pt
+```
+
+This is equivalent to `train --init-checkpoint`, but names the workflow directly. Use it when changing datasets or optimizer settings while keeping trained weights.
+
 ### Resume
 
 Resume from a saved checkpoint:
@@ -237,7 +256,8 @@ thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/best.pt --out config
 
 Checkpoint selection notes:
 
-- `best.pt` is the best stable engine-facing checkpoint according to validation score metrics.
+- `best.pt` is the best checkpoint according to validation score metrics.
+- `best_deployable.pt`, when present, is the best validation-score checkpoint that also passes starting-position sanity and margin-aware material ordering.
 - `best_loss.pt` is the checkpoint with the lowest blended validation loss.
 
 ### Verify export
@@ -330,11 +350,12 @@ thrawn-nnue test --pattern "test_cli.py"
 2. Inspect a dataset before training.
 3. Edit a TOML config under `configs/`.
 4. Start training.
-5. Resume if interrupted.
-6. Inspect `thrawn-nnue metrics`.
-7. Export `best.pt` or another chosen checkpoint.
-8. Run `verify-export`.
-9. Integrate using [docs/nnue_spec.md](docs/nnue_spec.md).
+5. Fine-tune with `thrawn-nnue fine-tune` when switching to better data.
+6. Resume if interrupted.
+7. Inspect `thrawn-nnue metrics`.
+8. Export `best.pt` or another chosen checkpoint.
+9. Run `verify-export`.
+10. Integrate using [docs/nnue_spec.md](docs/nnue_spec.md).
 
 ## Tests
 

@@ -52,6 +52,10 @@ def save_checkpoint(
     best_checkpoint_metric_value: float | None = None,
     best_checkpoint_positions: int | None = None,
     best_checkpoint_sort_key: tuple[float, ...] | None = None,
+    best_deployable_checkpoint_metric_name: str | None = None,
+    best_deployable_checkpoint_metric_value: float | None = None,
+    best_deployable_checkpoint_positions: int | None = None,
+    best_deployable_checkpoint_sort_key: tuple[float, ...] | None = None,
 ) -> Path:
     torch = _require_torch()
     output_path = Path(path)
@@ -72,6 +76,14 @@ def save_checkpoint(
         "best_checkpoint_metric_value": best_checkpoint_metric_value,
         "best_checkpoint_positions": best_checkpoint_positions,
         "best_checkpoint_sort_key": list(best_checkpoint_sort_key) if best_checkpoint_sort_key is not None else None,
+        "best_deployable_checkpoint_metric_name": best_deployable_checkpoint_metric_name,
+        "best_deployable_checkpoint_metric_value": best_deployable_checkpoint_metric_value,
+        "best_deployable_checkpoint_positions": best_deployable_checkpoint_positions,
+        "best_deployable_checkpoint_sort_key": (
+            list(best_deployable_checkpoint_sort_key)
+            if best_deployable_checkpoint_sort_key is not None
+            else None
+        ),
     }
     torch.save(payload, output_path)
     return output_path

@@ -34,6 +34,37 @@ class CliTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 0)
         runner.assert_called_once_with(pattern="test_cli.py", verbosity=1, failfast=True)
 
+    def test_fine_tune_command_uses_checkpoint_as_initial_weights(self) -> None:
+        argv = sys.argv
+        config = object()
+        try:
+            sys.argv = [
+                "thrawn-nnue",
+                "fine-tune",
+                "--config",
+                "configs/v5.toml",
+                "--checkpoint",
+                "configs/runs/v4/checkpoints/best.pt",
+                "--console-mode",
+                "text",
+            ]
+            with (
+                patch("thrawn_nnue.config.load_config", return_value=config) as load_config,
+                patch("thrawn_nnue.training.train_from_config", return_value=Path("out.pt")) as train_from_config,
+                patch("builtins.print") as print_mock,
+            ):
+                main()
+        finally:
+            sys.argv = argv
+
+        load_config.assert_called_once_with("configs/v5.toml")
+        train_from_config.assert_called_once_with(
+            config,
+            console_mode="text",
+            init_checkpoint="configs/runs/v4/checkpoints/best.pt",
+        )
+        print_mock.assert_called_once_with("out.pt")
+
 
 if __name__ == "__main__":
     unittest.main()

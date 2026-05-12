@@ -54,6 +54,14 @@ def main() -> None:
         help="Warm-start model weights from a checkpoint while using the supplied config and a fresh optimizer",
     )
 
+    fine_tune_parser = subparsers.add_parser(
+        "fine-tune",
+        help="Fine-tune from an existing checkpoint with a fresh optimizer and a new TOML config",
+    )
+    fine_tune_parser.add_argument("--config", required=True)
+    fine_tune_parser.add_argument("--checkpoint", required=True)
+    fine_tune_parser.add_argument("--console-mode", choices=["progress", "text"])
+
     resume_parser = subparsers.add_parser("resume", help="Resume from a checkpoint")
     resume_parser.add_argument("--checkpoint", required=True)
     resume_parser.add_argument("--console-mode", choices=["progress", "text"])
@@ -129,6 +137,19 @@ def main() -> None:
             config,
             console_mode=args.console_mode,
             init_checkpoint=args.init_checkpoint,
+        )
+        print(str(checkpoint_path))
+        return
+
+    if args.command == "fine-tune":
+        from .config import load_config
+        from .training import train_from_config
+
+        config = load_config(args.config)
+        checkpoint_path = train_from_config(
+            config,
+            console_mode=args.console_mode,
+            init_checkpoint=args.checkpoint,
         )
         print(str(checkpoint_path))
         return

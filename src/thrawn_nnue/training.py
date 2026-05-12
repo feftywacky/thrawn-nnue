@@ -17,6 +17,7 @@ from .native import BinpackStream
 
 
 _STOCKFISH_INTERNAL_TO_CP = 100.0 / 208.0
+_MATERIAL_ORDER_MIN_GAP_CP = 20.0
 
 
 def _require_torch():
@@ -43,6 +44,10 @@ class TrainState:
     best_checkpoint_metric_value: float | None = None
     best_checkpoint_positions: int | None = None
     best_checkpoint_sort_key: tuple[float, ...] | None = None
+    best_deployable_checkpoint_metric_name: str = "validation_score_mae"
+    best_deployable_checkpoint_metric_value: float | None = None
+    best_deployable_checkpoint_positions: int | None = None
+    best_deployable_checkpoint_sort_key: tuple[float, ...] | None = None
     global_step: int = 0
     positions_seen: int = 0
     epoch_index: int = 0
@@ -103,7 +108,23 @@ def resume_training(checkpoint_path: str | Path, *, console_mode: str | None = N
     state.best_checkpoint_metric_value = _payload_optional_float(payload, "best_checkpoint_metric_value")
     state.best_checkpoint_positions = _payload_optional_int(payload, "best_checkpoint_positions")
     state.best_checkpoint_sort_key = _payload_optional_float_tuple(payload, "best_checkpoint_sort_key")
+    state.best_deployable_checkpoint_metric_name = str(
+        payload.get("best_deployable_checkpoint_metric_name", "validation_score_mae")
+    )
+    state.best_deployable_checkpoint_metric_value = _payload_optional_float(
+        payload,
+        "best_deployable_checkpoint_metric_value",
+    )
+    state.best_deployable_checkpoint_positions = _payload_optional_int(
+        payload,
+        "best_deployable_checkpoint_positions",
+    )
+    state.best_deployable_checkpoint_sort_key = _payload_optional_float_tuple(
+        payload,
+        "best_deployable_checkpoint_sort_key",
+    )
     _restore_best_checkpoint_tracking_from_metrics(state)
+    _restore_best_deployable_checkpoint_tracking_from_metrics(state)
     state.global_step = int(payload["global_step"])
     state.positions_seen = _payload_positions_seen(payload)
     state.epoch_index = _payload_epoch_index(payload)
@@ -362,9 +383,9 @@ def _run_training_loop(state: TrainState) -> None:
                                 "wdl_in_scaling": state.config.wdl_in_scaling,
                                 "wdl_out_offset": state.config.wdl_out_offset,
                                 "wdl_out_scaling": state.config.wdl_out_scaling,
-                                "max_abs_score": state.config.max_abs_score,
-                                "smart_fen_skipping": state.config.smart_fen_skipping,
-                                "wld_fen_skipping": state.config.wld_fen_skipping,
+                                "max_abs_score_cp": state.config.max_abs_score_cp,
+                                "skip_tactical_positions": state.config.skip_tactical_positions,
+                                "skip_wdl_score_mismatch": state.config.skip_wdl_score_mismatch,
                                 "random_fen_skipping": state.config.random_fen_skipping,
                                 "lr": current_lr,
                                 "step_seconds": step_seconds,
@@ -408,6 +429,10 @@ def _save_training_checkpoint(state: TrainState, checkpoint_path: Path) -> None:
         best_checkpoint_metric_value=state.best_checkpoint_metric_value,
         best_checkpoint_positions=state.best_checkpoint_positions,
         best_checkpoint_sort_key=state.best_checkpoint_sort_key,
+        best_deployable_checkpoint_metric_name=state.best_deployable_checkpoint_metric_name,
+        best_deployable_checkpoint_metric_value=state.best_deployable_checkpoint_metric_value,
+        best_deployable_checkpoint_positions=state.best_deployable_checkpoint_positions,
+        best_deployable_checkpoint_sort_key=state.best_deployable_checkpoint_sort_key,
     )
 
 
@@ -501,14 +526,20 @@ def _run_train_step(state: TrainState, tensors, torch, *, autocast_enabled: bool
 def _run_validation_and_report(state: TrainState, reporter) -> None:
     reporter.validation_started(global_step=state.global_step, positions_seen=state.positions_seen)
     metrics = _run_validation(state)
-    is_best = _maybe_update_best_checkpoint(state, metrics)
+    is_best, is_deployable_best = _maybe_update_best_checkpoint(state, metrics)
     metrics["is_best"] = is_best
+    metrics["is_deployable_best"] = is_deployable_best
     _log_metrics(state, metrics)
     reporter.validation_finished(metrics, is_best=is_best)
     if is_best:
         reporter.checkpoint_saved(
             str(_best_step_checkpoint_path(state.run_dir, state.global_step)),
             is_best=True,
+        )
+    if is_deployable_best:
+        reporter.checkpoint_saved(
+            str(_best_deployable_step_checkpoint_path(state.run_dir, state.global_step)),
+            is_best=False,
         )
 
 
@@ -732,9 +763,9 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         "wdl_in_scaling": state.config.wdl_in_scaling,
         "wdl_out_offset": state.config.wdl_out_offset,
         "wdl_out_scaling": state.config.wdl_out_scaling,
-        "max_abs_score": state.config.max_abs_score,
-        "smart_fen_skipping": state.config.smart_fen_skipping,
-        "wld_fen_skipping": state.config.wld_fen_skipping,
+        "max_abs_score_cp": state.config.max_abs_score_cp,
+        "skip_tactical_positions": state.config.skip_tactical_positions,
+        "skip_wdl_score_mismatch": state.config.skip_wdl_score_mismatch,
         "random_fen_skipping": state.config.random_fen_skipping,
     }
 
@@ -775,8 +806,24 @@ def _material_sanity_snapshot(state: TrainState) -> dict[str, object]:
         < named["white_up_rook"]
         < named["white_up_queen"]
     )
+    material_gaps = _material_gaps_cp(named)
+    named["material_gaps_cp"] = material_gaps
+    named["material_min_gap_cp"] = _MATERIAL_ORDER_MIN_GAP_CP
+    named["material_margins_ok"] = bool(
+        named["ordering_ok"]
+        and all(gap >= _MATERIAL_ORDER_MIN_GAP_CP for gap in material_gaps.values())
+    )
     named["starting_position_near_zero"] = abs(named["starting_position"]) <= _cp_to_score(50.0)
     return named
+
+
+def _material_gaps_cp(values: dict[str, object]) -> dict[str, float]:
+    return {
+        "pawn_over_equal": _score_to_cp(float(values["white_up_pawn"]) - float(values["equal_material"])),
+        "knight_over_pawn": _score_to_cp(float(values["white_up_knight"]) - float(values["white_up_pawn"])),
+        "rook_over_knight": _score_to_cp(float(values["white_up_rook"]) - float(values["white_up_knight"])),
+        "queen_over_rook": _score_to_cp(float(values["white_up_queen"]) - float(values["white_up_rook"])),
+    }
 
 
 def _pearson_correlation(
@@ -800,25 +847,41 @@ def _pearson_correlation(
     return float(value)
 
 
-def _maybe_update_best_checkpoint(state: TrainState, metrics: dict[str, object]) -> bool:
+def _maybe_update_best_checkpoint(state: TrainState, metrics: dict[str, object]) -> tuple[bool, bool]:
     validation_loss = float(metrics["validation_loss"])
     if not math.isfinite(validation_loss):
-        return False
+        return False, False
 
     if state.best_validation_loss is None or validation_loss < state.best_validation_loss:
         state.best_validation_loss = validation_loss
         state.best_validation_positions = state.positions_seen
         _write_best_loss_checkpoint(state)
 
+    is_best = False
     candidate_key = _best_checkpoint_sort_key(metrics)
-    if state.best_checkpoint_sort_key is not None and candidate_key >= state.best_checkpoint_sort_key:
-        return False
+    if state.best_checkpoint_sort_key is None or candidate_key < state.best_checkpoint_sort_key:
+        state.best_checkpoint_metric_value = float(metrics["score_mae"])
+        state.best_checkpoint_positions = state.positions_seen
+        state.best_checkpoint_sort_key = candidate_key
+        is_best = True
 
-    state.best_checkpoint_metric_value = float(metrics["score_mae"])
-    state.best_checkpoint_positions = state.positions_seen
-    state.best_checkpoint_sort_key = candidate_key
-    _write_best_checkpoint(state)
-    return True
+    is_deployable_best = False
+    if _material_sanity_is_deployable(metrics):
+        if (
+            state.best_deployable_checkpoint_sort_key is None
+            or candidate_key < state.best_deployable_checkpoint_sort_key
+        ):
+            state.best_deployable_checkpoint_metric_value = float(metrics["score_mae"])
+            state.best_deployable_checkpoint_positions = state.positions_seen
+            state.best_deployable_checkpoint_sort_key = candidate_key
+            is_deployable_best = True
+
+    if is_best:
+        _write_best_checkpoint(state)
+    if is_deployable_best:
+        _write_best_deployable_checkpoint(state)
+
+    return is_best, is_deployable_best
 
 
 def _write_best_checkpoint(state: TrainState) -> Path:
@@ -845,6 +908,18 @@ def _write_best_loss_checkpoint(state: TrainState) -> Path:
     return stamped_path
 
 
+def _write_best_deployable_checkpoint(state: TrainState) -> Path:
+    checkpoints_dir = state.run_dir / "checkpoints"
+    alias_path = checkpoints_dir / "best_deployable.pt"
+    stamped_path = _best_deployable_step_checkpoint_path(state.run_dir, state.global_step)
+    _save_training_checkpoint(state, alias_path)
+    _save_training_checkpoint(state, stamped_path)
+    for candidate in checkpoints_dir.glob("best_deployable_step_*.pt"):
+        if candidate != stamped_path:
+            candidate.unlink()
+    return stamped_path
+
+
 def _best_step_checkpoint_path(run_dir: Path, global_step: int) -> Path:
     return run_dir / "checkpoints" / f"best_step_{global_step:08d}.pt"
 
@@ -853,12 +928,27 @@ def _best_loss_step_checkpoint_path(run_dir: Path, global_step: int) -> Path:
     return run_dir / "checkpoints" / f"best_loss_step_{global_step:08d}.pt"
 
 
+def _best_deployable_step_checkpoint_path(run_dir: Path, global_step: int) -> Path:
+    return run_dir / "checkpoints" / f"best_deployable_step_{global_step:08d}.pt"
+
+
 def _best_checkpoint_sort_key(metrics: dict[str, object]) -> tuple[float, ...]:
     return (
         float(metrics["score_mae"]),
         float(metrics["validation_teacher_wdl_loss"]),
         -float(metrics["score_corr"]),
         float(metrics["validation_loss"]),
+    )
+
+
+def _material_sanity_is_deployable(metrics: dict[str, object]) -> bool:
+    material_sanity = metrics.get("material_sanity")
+    if not isinstance(material_sanity, dict):
+        return False
+    return bool(
+        material_sanity.get("starting_position_near_zero")
+        and material_sanity.get("ordering_ok")
+        and material_sanity.get("material_margins_ok")
     )
 
 
@@ -889,6 +979,35 @@ def _restore_best_checkpoint_tracking_from_metrics(state: TrainState) -> None:
     state.best_checkpoint_sort_key = best_key
     state.best_checkpoint_metric_value = float(best_record["score_mae"])
     state.best_checkpoint_positions = int(best_record["positions_seen"])
+
+
+def _restore_best_deployable_checkpoint_tracking_from_metrics(state: TrainState) -> None:
+    if state.best_deployable_checkpoint_sort_key is not None:
+        return
+    if not state.metrics_path.exists():
+        return
+
+    best_record: dict[str, object] | None = None
+    best_key: tuple[float, ...] | None = None
+    with state.metrics_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            record = json.loads(line)
+            if record.get("event") != "validation" or not _material_sanity_is_deployable(record):
+                continue
+            try:
+                candidate_key = _best_checkpoint_sort_key(record)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if best_key is None or candidate_key < best_key:
+                best_key = candidate_key
+                best_record = record
+
+    if best_record is None or best_key is None:
+        return
+
+    state.best_deployable_checkpoint_sort_key = best_key
+    state.best_deployable_checkpoint_metric_value = float(best_record["score_mae"])
+    state.best_deployable_checkpoint_positions = int(best_record["positions_seen"])
 
 
 def _log_metrics(state: TrainState, metrics: dict[str, object]) -> None:
@@ -1085,10 +1204,10 @@ def _batch_size(batch) -> int:
 
 def _binpack_filter_options(config: TrainConfig, *, split_role: str = "all") -> dict[str, object]:
     return {
-        "skip_tactical_positions": config.smart_fen_skipping,
-        "skip_wdl_score_mismatch": config.wld_fen_skipping,
+        "skip_tactical_positions": config.skip_tactical_positions,
+        "skip_wdl_score_mismatch": config.skip_wdl_score_mismatch,
         "random_fen_skipping": config.random_fen_skipping if split_role == "train" else 0,
-        "max_abs_score": config.max_abs_score,
+        "max_abs_score": config.max_abs_score_cp,
         "split_role": split_role,
         "validation_split_fraction": config.validation_split_fraction,
     }
@@ -1112,6 +1231,10 @@ def _wdl_expectation_from_score(values, offset: float, scaling: float, torch):
 
 def _cp_to_score(value: float) -> float:
     return float(value) / _STOCKFISH_INTERNAL_TO_CP
+
+
+def _score_to_cp(value: float) -> float:
+    return float(value) * _STOCKFISH_INTERNAL_TO_CP
 
 
 def _wdl_bucket(values):

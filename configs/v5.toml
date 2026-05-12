@@ -1,12 +1,12 @@
-run_name = "v4"
-output_dir = "runs/v4"
+run_name = "v5"
+output_dir = "runs/v5"
 
 train_datasets = [
-  "../data/thrawn-nnue/data/nodes5000pv2_UHO.binpack",
+  "../data/farseerT74.binpack",
 ]
 
 validation_datasets = [
-  "../data/thrawn-nnue/data/nodes5000pv2_UHO.binpack",
+  "../data/farseerT74.binpack",
 ]
 validation_split_fraction = 0.01
 skip_tactical_positions = true
@@ -22,16 +22,17 @@ cuda_tf32 = true
 cuda_fused_optimizer = true
 batch_size = 16384
 
-total_train_positions = 10000000000
+total_train_positions = 20000000000
 epoch_positions = 100000000
+validation_interval_positions = 100000000
 validation_positions = 1000000
 
 checkpoint_every = 10000
 log_every = 250
 console_mode = "progress"
 
-learning_rate = 0.000875
-lr_gamma = 0.992
+learning_rate = 0.0004375
+lr_gamma = 0.995
 weight_decay = 0.0
 clip_grad_norm = 10.0
 amp = true
@@ -42,7 +43,7 @@ l2_size = 64
 
 nnue2score = 600.0
 wdl_lambda = 1.0
-wdl_lambda_end = 0.9
+wdl_lambda_end = 0.75
 wdl_in_offset = 270.0
 wdl_in_scaling = 340.0
 wdl_out_offset = 270.0
@@ -51,4 +52,4 @@ wdl_loss_power = 2.5
 
 export_ft_scale = 127.0
 export_dense_scale = 64.0
-export_description = "thrawn halfkp nnue stockfish raw nodes5000pv2 UHO"
+export_description = "thrawn halfkp nnue farseer T74 fine tune"

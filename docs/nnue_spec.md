@@ -278,3 +278,4 @@ Before turning the net on in search:
 equal_material < white_up_pawn < white_up_knight < white_up_rook < white_up_queen
 ```
 
+`verify-export` also reports material gaps in cp. Treat tiny gaps, especially queen-over-rook, as unstable because quantization can flip them even when checkpoint-side ordering barely passes.

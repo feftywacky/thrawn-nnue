@@ -25,9 +25,9 @@ class TrainConfig:
     validation_interval_positions: int = 0
     validation_positions: int = 0
     validation_split_fraction: float = 0.0
-    max_abs_score: float = 0.0
-    smart_fen_skipping: bool = False
-    wld_fen_skipping: bool = False
+    max_abs_score_cp: float = 0.0
+    skip_tactical_positions: bool = False
+    skip_wdl_score_mismatch: bool = False
     random_fen_skipping: int = 0
     checkpoint_every: int = 250
     log_every: int = 25
@@ -111,8 +111,8 @@ class TrainConfig:
             raise ValueError("validation_positions must be >= 0")
         if self.validation_split_fraction < 0.0 or self.validation_split_fraction >= 1.0:
             raise ValueError("validation_split_fraction must be >= 0 and < 1")
-        if self.max_abs_score < 0.0:
-            raise ValueError("max_abs_score must be >= 0")
+        if self.max_abs_score_cp < 0.0:
+            raise ValueError("max_abs_score_cp must be >= 0")
         if self.random_fen_skipping < 0:
             raise ValueError("random_fen_skipping must be >= 0")
         if self.wdl_lambda < 0.0 or self.wdl_lambda > 1.0:

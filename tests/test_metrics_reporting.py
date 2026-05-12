@@ -206,6 +206,129 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertIn("epoch_positions: 4096", text)
             self.assertIn("Suggestions", text)
 
+    def test_starting_position_sanity_failure_overrides_continue_suggestion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            _write_metrics(
+                run_dir / "metrics.jsonl",
+                [
+                    {
+                        "event": "train",
+                        "global_step": 1,
+                        "positions_seen": 1024,
+                        "epoch_index": 0,
+                        "loss": 0.3,
+                        "wdl_loss": 0.3,
+                        "lr": 0.001,
+                    },
+                    {
+                        "event": "validation",
+                        "global_step": 1,
+                        "positions_seen": 1024,
+                        "validation_loss": 0.2,
+                        "validation_wdl_loss": 0.2,
+                        "cp_corr": 0.9,
+                        "material_sanity": {
+                            "ordering_ok": False,
+                            "starting_position_near_zero": False,
+                        },
+                        "material_ordering_ok": False,
+                    },
+                    {
+                        "event": "validation",
+                        "global_step": 2,
+                        "positions_seen": 2048,
+                        "validation_loss": 0.20001,
+                        "validation_wdl_loss": 0.20001,
+                        "cp_corr": 0.9,
+                        "material_sanity": {
+                            "ordering_ok": False,
+                            "starting_position_near_zero": False,
+                        },
+                        "material_ordering_ok": False,
+                    },
+                ],
+            )
+            with patch(
+                "thrawn_nnue.metrics._checkpoint_diagnostics",
+                return_value={
+                    "best_validation_loss": 0.2,
+                    "best_validation_positions": 1024,
+                    "best_checkpoint_metric_name": None,
+                    "best_checkpoint_metric_value": None,
+                    "best_checkpoint_positions": None,
+                    "config": {
+                        "batch_size": 1024,
+                        "total_train_positions": 4096,
+                        "epoch_positions": 1024,
+                        "validation_interval_positions": 1024,
+                    },
+                    "global_step": 2,
+                    "positions_seen": 2048,
+                },
+            ):
+                summary = summarize_run(load_metrics_run(run_dir))
+
+            self.assertEqual(summary["resume_recommendation"], "continue-latest")
+            self.assertIn("Starting-position sanity is far from zero", summary["suggestions"][0])
+            self.assertFalse(any("resume from the latest" in suggestion for suggestion in summary["suggestions"]))
+
+    def test_moving_wdl_lambda_adds_loss_caveat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            _write_metrics(
+                run_dir / "metrics.jsonl",
+                [
+                    {
+                        "event": "train",
+                        "global_step": 1,
+                        "positions_seen": 1024,
+                        "epoch_index": 0,
+                        "loss": 0.3,
+                        "wdl_loss": 0.3,
+                        "wdl_lambda": 0.74,
+                        "lr": 0.001,
+                    },
+                    {
+                        "event": "validation",
+                        "global_step": 1,
+                        "positions_seen": 1024,
+                        "validation_loss": 0.2,
+                        "validation_wdl_loss": 0.2,
+                        "wdl_lambda": 0.74,
+                        "cp_corr": 0.9,
+                        "material_sanity": {"ordering_ok": True},
+                        "material_ordering_ok": True,
+                    },
+                ],
+            )
+            with patch(
+                "thrawn_nnue.metrics._checkpoint_diagnostics",
+                return_value={
+                    "best_validation_loss": 0.2,
+                    "best_validation_positions": 1024,
+                    "best_checkpoint_metric_name": None,
+                    "best_checkpoint_metric_value": None,
+                    "best_checkpoint_positions": None,
+                    "config": {
+                        "batch_size": 1024,
+                        "total_train_positions": 4096,
+                        "epoch_positions": 1024,
+                        "validation_interval_positions": 1024,
+                        "wdl_lambda": 0.75,
+                        "wdl_lambda_end": 0.5,
+                    },
+                    "global_step": 1,
+                    "positions_seen": 1024,
+                },
+            ):
+                summary = summarize_run(load_metrics_run(run_dir))
+                text = render_summary_text(summary)
+
+            self.assertIn("moving wdl_lambda", " ".join(summary["suggestions"]))
+            self.assertIn("wdl_lambda_end: 0.500000", text)
+            self.assertIn("latest_validation_wdl_lambda: 0.740000", text)
+
 
 @unittest.skipUnless(matplotlib is not None, "matplotlib is required for metrics plotting tests")
 class MetricsPlotTests(unittest.TestCase):

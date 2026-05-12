@@ -18,6 +18,7 @@ OUTPUT_PERSPECTIVE_STM = 1
 EXPECTED_NUM_FEATURES = 40960
 MAX_DESCRIPTION_BYTES = 1_000_000
 STOCKFISH_INTERNAL_TO_CP = 100.0 / 208.0
+MATERIAL_ORDER_MIN_GAP_CP = 20.0
 HEADER_PREFIX_STRUCT = struct.Struct("<8sI")
 HEADER_REST_STRUCT = struct.Struct("<16sIIIIIfffffI")
 DEFAULT_VERIFICATION_FENS = [
@@ -28,10 +29,10 @@ DEFAULT_VERIFICATION_FENS = [
 STARTING_POSITION_SANITY = ("starting_position", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1")
 MATERIAL_LADDER_POSITIONS = [
     ("equal_material", "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR w - - 0 3"),
-    ("white_up_pawn", "r1bqkbnr/1ppp1ppp/2n5/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR w - - 0 3"),
-    ("white_up_knight", "r1bqkbnr/pppp1ppp/8/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR w - - 0 3"),
-    ("white_up_rook", "2bqkbnr/pppp1ppp/2n5/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR w - - 0 3"),
-    ("white_up_queen", "r1b1kbnr/pppp1ppp/2n5/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR w - - 0 3"),
+    ("white_up_pawn", "r1bqkb1r/ppp2ppp/2p2n2/8/4P3/8/PPPP1PPP/RNBQKB1R w KQkq - 0 5"),
+    ("white_up_knight", "r1bqk1nr/pppp1ppp/2n5/4p3/4P3/2N3P1/PPPP1K1P/R1BQ1BNR w kq - 1 5"),
+    ("white_up_rook", "r3kb1N/ppp1q1pp/2npbn2/4p3/2B1P3/8/PPPP1PPP/RNBQK2R w KQq - 1 7"),
+    ("white_up_queen", "r4b1r/ppQ1p1p1/2n1bnkp/8/8/8/PPP2PPP/RNB1K2R w KQ - 1 10"),
 ]
 SANITY_POSITIONS = [STARTING_POSITION_SANITY, *MATERIAL_LADDER_POSITIONS]
 
@@ -289,12 +290,19 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
         )
     ]
     sanity_export_lookup = {item["name"]: float(item["exported_score"]) for item in sanity_positions}
+    sanity_checkpoint_lookup = {item["name"]: float(item["checkpoint_score"]) for item in sanity_positions}
     material_ordering_ok = (
         sanity_export_lookup["equal_material"]
         < sanity_export_lookup["white_up_pawn"]
         < sanity_export_lookup["white_up_knight"]
         < sanity_export_lookup["white_up_rook"]
         < sanity_export_lookup["white_up_queen"]
+    )
+    exported_material_gaps_cp = _material_gaps_cp(sanity_export_lookup)
+    checkpoint_material_gaps_cp = _material_gaps_cp(sanity_checkpoint_lookup)
+    material_margins_ok = bool(
+        material_ordering_ok
+        and all(gap >= MATERIAL_ORDER_MIN_GAP_CP for gap in exported_material_gaps_cp.values())
     )
 
     return {
@@ -318,6 +326,10 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
         "quantization": _export_quantization_diagnostics(exported),
         "sanity_positions": sanity_positions,
         "material_ordering_ok": bool(material_ordering_ok),
+        "material_margins_ok": material_margins_ok,
+        "material_min_gap_cp": MATERIAL_ORDER_MIN_GAP_CP,
+        "checkpoint_material_gaps_cp": checkpoint_material_gaps_cp,
+        "exported_material_gaps_cp": exported_material_gaps_cp,
         "starting_position_near_zero": abs(sanity_export_lookup["starting_position"]) <= _cp_to_score(50.0),
     }
 
@@ -357,6 +369,15 @@ def _score_to_cp(value: float) -> float:
 
 def _cp_to_score(value: float) -> float:
     return float(value) / STOCKFISH_INTERNAL_TO_CP
+
+
+def _material_gaps_cp(values: dict[str, float]) -> dict[str, float]:
+    return {
+        "pawn_over_equal": _score_to_cp(values["white_up_pawn"] - values["equal_material"]),
+        "knight_over_pawn": _score_to_cp(values["white_up_knight"] - values["white_up_pawn"]),
+        "rook_over_knight": _score_to_cp(values["white_up_rook"] - values["white_up_knight"]),
+        "queen_over_rook": _score_to_cp(values["white_up_queen"] - values["white_up_rook"]),
+    }
 
 
 def _coalesced_ft_weights_from_model(model) -> tuple[np.ndarray, np.ndarray]:
