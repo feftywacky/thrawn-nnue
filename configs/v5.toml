@@ -2,11 +2,11 @@ run_name = "v5"
 output_dir = "runs/v5"
 
 train_datasets = [
-  "../data/farseerT74.binpack",
+  "../data/T60T70wIsRightFarseer.binpack",
 ]
 
 validation_datasets = [
-  "../data/farseerT74.binpack",
+  "../data/T60T70wIsRightFarseer.binpack",
 ]
 validation_split_fraction = 0.01
 skip_tactical_positions = true
@@ -22,7 +22,7 @@ cuda_tf32 = true
 cuda_fused_optimizer = true
 batch_size = 16384
 
-total_train_positions = 10000000000
+total_train_positions = 20000000000
 epoch_positions = 100000000
 validation_interval_positions = 100000000
 validation_positions = 1000000
@@ -52,4 +52,4 @@ wdl_loss_power = 2.5
 
 export_ft_scale = 127.0
 export_dense_scale = 64.0
-export_description = "thrawn halfkp nnue farseer T74 fine tune"
+export_description = "thrawn halfkp nnue T60 T70 IsRight Farseer fine tune"
