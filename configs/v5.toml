@@ -2,11 +2,11 @@ run_name = "v5"
 output_dir = "runs/v5"
 
 train_datasets = [
-  "../data/T60T70wIsRightFarseer.binpack",
+  'C:\Users\Felix\OneDrive\Documents\thrawn-nnue\data\T60T70wIsRightFarseer.binpack',
 ]
 
 validation_datasets = [
-  "../data/T60T70wIsRightFarseer.binpack",
+  'C:\Users\Felix\OneDrive\Documents\thrawn-nnue\data\T60T70wIsRightFarseer.binpack',
 ]
 validation_split_fraction = 0.01
 skip_tactical_positions = true
@@ -24,7 +24,6 @@ batch_size = 16384
 
 total_train_positions = 20000000000
 epoch_positions = 100000000
-validation_interval_positions = 100000000
 validation_positions = 1000000
 
 checkpoint_every = 10000

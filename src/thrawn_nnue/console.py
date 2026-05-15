@@ -15,7 +15,6 @@ class ConsoleContext:
     initial_positions_seen: int
     batch_size: int
     epoch_positions: int
-    validation_interval_positions: int
     log_every: int
     nnue2score: float = 600.0
     prefetch_batches: int = 0
@@ -76,7 +75,7 @@ class TextReporter(_BaseReporter):
             "training stream:"
             " combined cyclic stream across all train_datasets;"
             f" epoch_positions={_format_count(context.epoch_positions)};"
-            f" validation_interval_positions={_format_count(context.validation_interval_positions)};"
+            " validation runs at epoch boundaries;"
             f" validation uses non-cyclic passes across {context.validation_shards} validation shard(s)"
         )
         print(_train_metric_legend_line())
@@ -176,7 +175,7 @@ class ProgressReporter(_BaseReporter):
             "training stream:"
             " combined cyclic stream across all train_datasets;"
             f" epoch_positions={_format_count(context.epoch_positions)};"
-            f" validation_interval_positions={_format_count(context.validation_interval_positions)};"
+            " validation runs at epoch boundaries;"
             f" validation uses non-cyclic passes across {context.validation_shards} validation shard(s)"
         )
         self._bar.write(_train_metric_legend_line())

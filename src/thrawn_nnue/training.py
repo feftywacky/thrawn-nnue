@@ -280,11 +280,10 @@ def _run_training_loop(state: TrainState) -> None:
     torch = _require_torch()
     autocast_enabled = _amp_enabled(torch, state.config, state.device)
     reporter = create_console_reporter(state.config.console_mode)
-    validation_interval_positions = _effective_validation_interval_positions(state.config)
     next_validation_positions = (
         None
         if not state.config.validation_datasets
-        else _next_validation_positions(state.positions_seen, validation_interval_positions)
+        else _next_validation_positions(state.positions_seen, state.config.epoch_positions)
     )
     last_validation_positions: int | None = None
 
@@ -298,7 +297,6 @@ def _run_training_loop(state: TrainState) -> None:
             initial_positions_seen=state.positions_seen,
             batch_size=state.config.batch_size,
             epoch_positions=state.config.epoch_positions,
-            validation_interval_positions=validation_interval_positions,
             log_every=state.config.log_every,
             nnue2score=state.config.nnue2score,
             prefetch_batches=state.config.prefetch_batches,
@@ -398,7 +396,7 @@ def _run_training_loop(state: TrainState) -> None:
                         last_validation_positions = state.positions_seen
                         next_validation_positions = _next_validation_positions(
                             state.positions_seen,
-                            validation_interval_positions,
+                            state.config.epoch_positions,
                         )
 
                     if state.global_step % state.config.checkpoint_every == 0:
@@ -1122,12 +1120,6 @@ def _create_grad_scaler(torch, config: TrainConfig, device: str):
     if device == "cuda" and hasattr(getattr(torch, "cuda", None), "amp"):
         return torch.cuda.amp.GradScaler(enabled=enabled)
     return _NullGradScaler()
-
-
-def _effective_validation_interval_positions(config: TrainConfig) -> int:
-    if config.validation_interval_positions > 0:
-        return config.validation_interval_positions
-    return config.epoch_positions
 
 
 def _next_validation_positions(current_positions: int, interval_positions: int) -> int:

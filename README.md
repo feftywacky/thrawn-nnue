@@ -184,11 +184,11 @@ That config currently points at:
 
 The current second-stage fine-tune config is:
 
-- [configs/v5.toml](configs/v5.toml): Stockfish-style Farseer/T74 retrain config after a stable `nodes5000pv2_UHO` baseline.
+- [configs/v5.toml](configs/v5.toml): Stockfish-style T60/T70 IsRight Farseer retrain config after a stable `nodes5000pv2_UHO` baseline.
 
 It starts from a v4 checkpoint and trains on:
 
-- `data/farseerT74.binpack`
+- `data/T60T70wIsRightFarseer.binpack`
 - output directories under `configs/runs/`
 
 Important config themes:

@@ -87,10 +87,6 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
     batch_size = _as_int(_config_value(run, "batch_size"))
     total_train_positions = _as_int(_config_value(run, "total_train_positions"))
     epoch_positions = _as_int(_config_value(run, "epoch_positions"))
-    configured_validation_interval = _as_int(_config_value(run, "validation_interval_positions"))
-    effective_validation_interval = configured_validation_interval
-    if effective_validation_interval in (None, 0):
-        effective_validation_interval = epoch_positions
     wdl_lambda = _as_float(_config_value(run, "wdl_lambda"))
     wdl_lambda_end = _as_float(_config_value(run, "wdl_lambda_end"))
     nnue2score = _as_float(_config_value(run, "nnue2score"))
@@ -111,7 +107,7 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
     initial_lr = _metric_value(run.train_records[0] if run.train_records else None, "lr")
 
     train_log_interval_steps = _infer_interval(run.train_records, "global_step", batch_size=batch_size)
-    validation_interval_positions = _infer_interval(
+    observed_validation_spacing_positions = _infer_interval(
         run.validation_records,
         "positions_seen",
         batch_size=batch_size,
@@ -222,10 +218,8 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "latest_position_fraction": latest_position_fraction,
         "batch_size": batch_size,
         "epoch_positions": epoch_positions,
-        "configured_validation_interval_positions": configured_validation_interval,
-        "effective_validation_interval_positions": effective_validation_interval,
         "train_log_interval_steps": train_log_interval_steps,
-        "validation_interval_positions": validation_interval_positions,
+        "observed_validation_spacing_positions": observed_validation_spacing_positions,
         "best_validation_gap": best_validation_gap,
         "positions_since_best": positions_since_best,
         "best_is_latest_validation": best_is_latest_validation,
@@ -338,11 +332,11 @@ def render_summary_text(summary: dict[str, object]) -> str:
     lines.append(f"latest_position_fraction: {_format_optional_fraction(summary['latest_position_fraction'])}")
     lines.append(f"batch_size: {_format_optional_int(summary['batch_size'])}")
     lines.append(f"epoch_positions: {_format_optional_int(summary['epoch_positions'])}")
-    lines.append(
-        f"effective_validation_interval_positions: {_format_optional_int(summary['effective_validation_interval_positions'])}"
-    )
     lines.append(f"train_log_interval_steps: {_format_optional_int(summary['train_log_interval_steps'])}")
-    lines.append(f"validation_interval_positions: {_format_optional_int(summary['validation_interval_positions'])}")
+    lines.append(
+        "observed_validation_spacing_positions: "
+        f"{_format_optional_int(summary['observed_validation_spacing_positions'])}"
+    )
     lines.append(f"latest_lr_fraction_of_initial: {_format_optional_float(summary['latest_lr_fraction_of_initial'])}")
     lines.append(f"lr_gamma: {_format_optional_float(summary['lr_gamma'])}")
     lines.append(f"lr_near_zero: {summary['lr_near_zero']}")
@@ -628,7 +622,7 @@ def _plot_overview(plt, formatter_factory, locator_factory, output_path: Path, r
 
     metadata = "\n".join(
         [
-            f"validation interval: {_format_optional_int(_effective_validation_interval(run))}",
+            f"validation epoch size: {_format_optional_int(_validation_epoch_positions(run))}",
             f"validation points: {len(run.validation_records)}",
             f"best checkpoint step: {_format_optional_int(run.checkpoint_global_step)}",
         ]
@@ -800,10 +794,7 @@ def _best_checkpoint_path(run_dir: Path) -> Path | None:
     return None
 
 
-def _effective_validation_interval(run: MetricsRun) -> int | None:
-    configured = _as_int(_config_value(run, "validation_interval_positions"))
-    if configured not in (None, 0):
-        return configured
+def _validation_epoch_positions(run: MetricsRun) -> int | None:
     return _as_int(_config_value(run, "epoch_positions"))
 
 

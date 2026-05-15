@@ -22,7 +22,6 @@ class TrainConfig:
     batch_size: int = 256
     total_train_positions: int = 0
     epoch_positions: int = 0
-    validation_interval_positions: int = 0
     validation_positions: int = 0
     validation_split_fraction: float = 0.0
     max_abs_score_cp: float = 0.0
@@ -105,8 +104,6 @@ class TrainConfig:
             raise ValueError("total_train_positions must be positive")
         if self.epoch_positions <= 0:
             raise ValueError("epoch_positions must be positive")
-        if self.validation_interval_positions < 0:
-            raise ValueError("validation_interval_positions must be >= 0")
         if self.validation_positions < 0:
             raise ValueError("validation_positions must be >= 0")
         if self.validation_split_fraction < 0.0 or self.validation_split_fraction >= 1.0:

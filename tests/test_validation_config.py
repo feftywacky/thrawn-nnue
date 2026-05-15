@@ -11,20 +11,18 @@ from thrawn_nnue.config import TrainConfig
 
 
 class ValidationConfigTests(unittest.TestCase):
-    def test_position_budget_fields_are_allowed_for_auto_interval_validation(self) -> None:
+    def test_position_budget_fields_are_allowed_for_epoch_validation(self) -> None:
         config = TrainConfig.from_dict(
             {
                 "train_datasets": ["/tmp/train.binpack"],
                 "validation_datasets": ["/tmp/valid.binpack"],
                 "total_train_positions": 10_000,
                 "epoch_positions": 2_000,
-                "validation_interval_positions": 0,
                 "validation_positions": 0,
             }
         )
         self.assertEqual(config.total_train_positions, 10_000)
         self.assertEqual(config.epoch_positions, 2_000)
-        self.assertEqual(config.validation_interval_positions, 0)
         self.assertEqual(config.validation_positions, 0)
         self.assertEqual(config.feature_set, "halfkp")
 
@@ -221,18 +219,18 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertTrue(config.cuda_fused_optimizer)
         self.assertEqual(config.validation_split_fraction, 0.01)
 
-    def test_v5_farseer_t74_finetune_config_uses_stockfish_second_stage_shape(self) -> None:
+    def test_v5_t60_t70_isright_farseer_finetune_config_uses_stockfish_second_stage_shape(self) -> None:
         config_path = Path(__file__).resolve().parents[1] / "configs" / "v5.toml"
         config = TrainConfig.from_toml(config_path)
 
         self.assertEqual(config.run_name, "v5")
-        self.assertIn("farseerT74.binpack", config.train_datasets[0])
+        self.assertIn("T60T70wIsRightFarseer.binpack", config.train_datasets[0])
         self.assertEqual(config.ft_size, 1024)
         self.assertEqual(config.l1_size, 256)
         self.assertEqual(config.l2_size, 64)
         self.assertEqual(config.batch_size, 16384)
         self.assertEqual(config.total_train_positions, 20_000_000_000)
-        self.assertEqual(config.validation_interval_positions, 100_000_000)
+        self.assertEqual(config.epoch_positions, 100_000_000)
         self.assertEqual(config.learning_rate, 0.0004375)
         self.assertEqual(config.lr_gamma, 0.995)
         self.assertEqual(config.random_fen_skipping, 3)

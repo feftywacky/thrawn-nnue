@@ -324,7 +324,6 @@ class ValidationTrainingTests(unittest.TestCase):
                     "validation_datasets": [str(valid_path)],
                     "total_train_positions": 4,
                     "epoch_positions": 2,
-                    "validation_interval_positions": 2,
                     "validation_positions": 2,
                     "batch_size": 2,
                     "checkpoint_every": 1,
