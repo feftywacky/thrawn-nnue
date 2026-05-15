@@ -2,11 +2,11 @@ run_name = "v4"
 output_dir = "runs/v4"
 
 train_datasets = [
-  "../data/thrawn-nnue/data/nodes5000pv2_UHO.binpack",
+  'C:\Users\Felix\OneDrive\Documents\thrawn-nnue\data\nodes5000pv2_UHO.binpack',
 ]
 
 validation_datasets = [
-  "../data/thrawn-nnue/data/nodes5000pv2_UHO.binpack",
+  'C:\Users\Felix\OneDrive\Documents\thrawn-nnue\data\nodes5000pv2_UHO.binpack',
 ]
 validation_split_fraction = 0.01
 skip_tactical_positions = true

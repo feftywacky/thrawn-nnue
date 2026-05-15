@@ -31,8 +31,8 @@ MATERIAL_LADDER_POSITIONS = [
     ("equal_material", "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR w - - 0 3"),
     ("white_up_pawn", "r1bqkb1r/ppp2ppp/2p2n2/8/4P3/8/PPPP1PPP/RNBQKB1R w KQkq - 0 5"),
     ("white_up_knight", "r1bqk1nr/pppp1ppp/2n5/4p3/4P3/2N3P1/PPPP1K1P/R1BQ1BNR w kq - 1 5"),
-    ("white_up_rook", "r3kb1N/ppp1q1pp/2npbn2/4p3/2B1P3/8/PPPP1PPP/RNBQK2R w KQq - 1 7"),
-    ("white_up_queen", "r4b1r/ppQ1p1p1/2n1bnkp/8/8/8/PPP2PPP/RNB1K2R w KQ - 1 10"),
+    ("white_up_rook", "r1bk1b1N/p1p1qBpp/1pnp1n2/4p3/4P3/8/PPPP1PPP/RNBQK2R w KQ - 2 8"),
+    ("white_up_queen", "2r2b1r/pQ2p1pk/4bn1p/8/3n4/2N5/PPP2PPP/R1B2RK1 w - - 5 13"),
 ]
 SANITY_POSITIONS = [STARTING_POSITION_SANITY, *MATERIAL_LADDER_POSITIONS]
 

@@ -254,6 +254,11 @@ def create_console_reporter(mode: str) -> _BaseReporter:
     if mode == "text":
         return TextReporter()
     try:
+        if not sys.stdout.isatty():
+            return TextReporter()
+    except Exception:
+        return TextReporter()
+    try:
         return ProgressReporter()
     except ModuleNotFoundError:
         return TextReporter()
