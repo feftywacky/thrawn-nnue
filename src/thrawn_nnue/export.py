@@ -8,19 +8,23 @@ from typing import Any
 import numpy as np
 
 from .board import BoardState
-from .features import HALFKP_FEATURES, active_feature_indices
+from .features import FEATURES, HALFKA_V2_HM_NUM_FEATURES, active_feature_indices
 
 
 MAGIC = b"THNNUE\x00\x01"
-VERSION = 7
-FEATURE_SET_ID = "halfkp_v1"
+VERSION = 8
+FEATURE_SET_ID = "HalfKAv2_hm"
 OUTPUT_PERSPECTIVE_STM = 1
-EXPECTED_NUM_FEATURES = 40960
+EXPECTED_NUM_FEATURES = HALFKA_V2_HM_NUM_FEATURES
+EXPECTED_FT_SIZE = 1024
+EXPECTED_HIDDEN_SIZE = 31
+EXPECTED_FORWARD_SIZE = 1
+EXPECTED_FC1_OUTPUT_SIZE = 32
 MAX_DESCRIPTION_BYTES = 1_000_000
 STOCKFISH_INTERNAL_TO_CP = 100.0 / 208.0
 MATERIAL_ORDER_MIN_GAP_CP = 20.0
 HEADER_PREFIX_STRUCT = struct.Struct("<8sI")
-HEADER_REST_STRUCT = struct.Struct("<16sIIIIIfffffI")
+HEADER_REST_STRUCT = struct.Struct("<16sIIIIIIIIfffffI")
 DEFAULT_VERIFICATION_FENS = [
     "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b - - 0 1",
     "r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/2P5/PP3PPP/RNBQKBNR b - - 0 3",
@@ -42,22 +46,31 @@ class ExportedNetwork:
     description: str
     num_features: int
     ft_size: int
-    l1_size: int
-    l2_size: int
+    hidden_size: int
+    forward_size: int
+    fc1_output_size: int
     ft_scale: float
-    l1_scale: float
-    l2_scale: float
-    out_scale: float
+    fc0_scale: float
+    fc1_scale: float
+    fc2_scale: float
     score_scale: float
     ft_bias: np.ndarray
     ft_weight: np.ndarray
-    l1_bias: np.ndarray
-    l1_weight: np.ndarray
-    l2_bias: np.ndarray
-    l2_weight: np.ndarray
-    out_bias: np.ndarray
-    out_weight: np.ndarray
+    fc0_bias: np.ndarray
+    fc0_weight: np.ndarray
+    fc1_bias: np.ndarray
+    fc1_weight: np.ndarray
+    fc2_bias: np.ndarray
+    fc2_weight: np.ndarray
     version: int = VERSION
+
+    @property
+    def fc0_output_size(self) -> int:
+        return self.hidden_size + self.forward_size
+
+    @property
+    def fc1_input_size(self) -> int:
+        return self.hidden_size * 2
 
 
 def _require_torch():
@@ -71,17 +84,16 @@ def _require_torch():
 def export_checkpoint(checkpoint_path: str | Path, output_path: str | Path) -> Path:
     from .checkpoint import load_checkpoint
     from .config import TrainConfig
-    from .model import HalfKPNNUE
+    from .model import HalfKAv2HmNNUE
 
     checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
     config = TrainConfig.from_dict(dict(checkpoint["config"]))
-    _require_halfkp_export(config)
-    model = HalfKPNNUE(
+    model = HalfKAv2HmNNUE(
         num_features=config.num_features,
-        num_factor_features=config.num_factor_features,
         ft_size=config.ft_size,
-        l1_size=config.l1_size,
-        l2_size=config.l2_size,
+        hidden_size=config.hidden_size,
+        forward_size=config.forward_size,
+        fc1_output_size=config.fc1_output_size,
     )
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
@@ -109,13 +121,16 @@ def load_export(path: str | Path) -> ExportedNetwork:
             feature_set,
             num_features,
             ft_size,
-            l1_size,
-            l2_size,
+            hidden_size,
+            forward_size,
+            fc0_output_size,
+            fc1_input_size,
+            fc1_output_size,
             output_perspective,
             ft_scale,
-            l1_scale,
-            l2_scale,
-            out_scale,
+            fc0_scale,
+            fc1_scale,
+            fc2_scale,
             score_scale,
             description_length,
         ) = HEADER_REST_STRUCT.unpack(raw_rest)
@@ -125,13 +140,16 @@ def load_export(path: str | Path) -> ExportedNetwork:
         _validate_export_header(
             num_features=num_features,
             ft_size=ft_size,
-            l1_size=l1_size,
-            l2_size=l2_size,
+            hidden_size=hidden_size,
+            forward_size=forward_size,
+            fc0_output_size=fc0_output_size,
+            fc1_input_size=fc1_input_size,
+            fc1_output_size=fc1_output_size,
             output_perspective=output_perspective,
             ft_scale=ft_scale,
-            l1_scale=l1_scale,
-            l2_scale=l2_scale,
-            out_scale=out_scale,
+            fc0_scale=fc0_scale,
+            fc1_scale=fc1_scale,
+            fc2_scale=fc2_scale,
             score_scale=score_scale,
             description_length=description_length,
         )
@@ -141,20 +159,19 @@ def load_export(path: str | Path) -> ExportedNetwork:
         ft_weight = np.frombuffer(
             _read_exact(handle, num_features * ft_size * 2, "ft_weight"),
             dtype="<i2",
-        ).copy()
-        ft_weight = ft_weight.reshape(num_features, ft_size)
-        l1_bias = np.frombuffer(_read_exact(handle, l1_size * 4, "l1_bias"), dtype="<i4").copy()
-        l1_weight = np.frombuffer(
-            _read_exact(handle, ft_size * 2 * l1_size, "l1_weight"),
+        ).copy().reshape(num_features, ft_size)
+        fc0_bias = np.frombuffer(_read_exact(handle, fc0_output_size * 4, "fc0_bias"), dtype="<i4").copy()
+        fc0_weight = np.frombuffer(
+            _read_exact(handle, ft_size * 2 * fc0_output_size, "fc0_weight"),
             dtype=np.int8,
-        ).copy().reshape(ft_size * 2, l1_size)
-        l2_bias = np.frombuffer(_read_exact(handle, l2_size * 4, "l2_bias"), dtype="<i4").copy()
-        l2_weight = np.frombuffer(
-            _read_exact(handle, l1_size * l2_size, "l2_weight"),
+        ).copy().reshape(ft_size * 2, fc0_output_size)
+        fc1_bias = np.frombuffer(_read_exact(handle, fc1_output_size * 4, "fc1_bias"), dtype="<i4").copy()
+        fc1_weight = np.frombuffer(
+            _read_exact(handle, fc1_input_size * fc1_output_size, "fc1_weight"),
             dtype=np.int8,
-        ).copy().reshape(l1_size, l2_size)
-        out_bias = np.frombuffer(_read_exact(handle, 4, "out_bias"), dtype="<i4").copy()
-        out_weight = np.frombuffer(_read_exact(handle, l2_size, "out_weight"), dtype=np.int8).copy()
+        ).copy().reshape(fc1_input_size, fc1_output_size)
+        fc2_bias = np.frombuffer(_read_exact(handle, 4, "fc2_bias"), dtype="<i4").copy()
+        fc2_weight = np.frombuffer(_read_exact(handle, fc1_output_size, "fc2_weight"), dtype=np.int8).copy()
         if handle.read(1):
             raise ValueError("Unexpected trailing data in .nnue export")
         return ExportedNetwork(
@@ -162,21 +179,22 @@ def load_export(path: str | Path) -> ExportedNetwork:
             version=version,
             num_features=num_features,
             ft_size=ft_size,
-            l1_size=l1_size,
-            l2_size=l2_size,
+            hidden_size=hidden_size,
+            forward_size=forward_size,
+            fc1_output_size=fc1_output_size,
             ft_scale=ft_scale,
-            l1_scale=l1_scale,
-            l2_scale=l2_scale,
-            out_scale=out_scale,
+            fc0_scale=fc0_scale,
+            fc1_scale=fc1_scale,
+            fc2_scale=fc2_scale,
             score_scale=score_scale,
             ft_bias=ft_bias,
             ft_weight=ft_weight,
-            l1_bias=l1_bias,
-            l1_weight=l1_weight,
-            l2_bias=l2_bias,
-            l2_weight=l2_weight,
-            out_bias=out_bias,
-            out_weight=out_weight,
+            fc0_bias=fc0_bias,
+            fc0_weight=fc0_weight,
+            fc1_bias=fc1_bias,
+            fc1_weight=fc1_weight,
+            fc2_bias=fc2_bias,
+            fc2_weight=fc2_weight,
         )
 
 
@@ -191,28 +209,47 @@ def _validate_export_header(
     *,
     num_features: int,
     ft_size: int,
-    l1_size: int,
-    l2_size: int,
+    hidden_size: int,
+    forward_size: int,
+    fc0_output_size: int,
+    fc1_input_size: int,
+    fc1_output_size: int,
     output_perspective: int,
     ft_scale: float,
-    l1_scale: float,
-    l2_scale: float,
-    out_scale: float,
+    fc0_scale: float,
+    fc1_scale: float,
+    fc2_scale: float,
     score_scale: float,
     description_length: int,
 ) -> None:
     if num_features != EXPECTED_NUM_FEATURES:
         raise ValueError(f"Unexpected num_features: {num_features}")
-    for name, size in (("ft_size", ft_size), ("l1_size", l1_size), ("l2_size", l2_size)):
-        if size <= 0:
-            raise ValueError(f"{name} must be positive")
+    expected_sizes = {
+        "ft_size": EXPECTED_FT_SIZE,
+        "hidden_size": EXPECTED_HIDDEN_SIZE,
+        "forward_size": EXPECTED_FORWARD_SIZE,
+        "fc1_output_size": EXPECTED_FC1_OUTPUT_SIZE,
+    }
+    actual_sizes = {
+        "ft_size": ft_size,
+        "hidden_size": hidden_size,
+        "forward_size": forward_size,
+        "fc1_output_size": fc1_output_size,
+    }
+    for name, expected in expected_sizes.items():
+        if actual_sizes[name] != expected:
+            raise ValueError(f"{name} must be {expected}")
+    if fc0_output_size != hidden_size + forward_size:
+        raise ValueError("fc0_output_size must equal hidden_size + forward_size")
+    if fc1_input_size != hidden_size * 2:
+        raise ValueError("fc1_input_size must equal hidden_size * 2")
     if output_perspective != OUTPUT_PERSPECTIVE_STM:
         raise ValueError("Only side-to-move exports are supported")
     for name, scale in (
         ("ft_scale", ft_scale),
-        ("l1_scale", l1_scale),
-        ("l2_scale", l2_scale),
-        ("out_scale", out_scale),
+        ("fc0_scale", fc0_scale),
+        ("fc1_scale", fc1_scale),
+        ("fc2_scale", fc2_scale),
         ("score_scale", score_scale),
     ):
         if not np.isfinite(scale) or scale <= 0.0:
@@ -225,17 +262,16 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
     torch = _require_torch()
     from .checkpoint import load_checkpoint
     from .config import TrainConfig
-    from .model import HalfKPNNUE
+    from .model import HalfKAv2HmNNUE
 
     checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
     config = TrainConfig.from_dict(dict(checkpoint["config"]))
-    _require_halfkp_export(config)
-    model = HalfKPNNUE(
+    model = HalfKAv2HmNNUE(
         num_features=config.num_features,
-        num_factor_features=config.num_factor_features,
         ft_size=config.ft_size,
-        l1_size=config.l1_size,
-        l2_size=config.l2_size,
+        hidden_size=config.hidden_size,
+        forward_size=config.forward_size,
+        fc1_output_size=config.fc1_output_size,
     )
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
@@ -244,7 +280,6 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
     with torch.no_grad():
         white_indices, black_indices, stm = _batch_arrays_from_fens(
             fens,
-            features=config.features,
             max_active_features=config.max_active_features,
         )
         predictions = model(
@@ -259,8 +294,9 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
     if (
         exported.num_features != config.num_features
         or exported.ft_size != config.ft_size
-        or exported.l1_size != config.l1_size
-        or exported.l2_size != config.l2_size
+        or exported.hidden_size != config.hidden_size
+        or exported.forward_size != config.forward_size
+        or exported.fc1_output_size != config.fc1_output_size
     ):
         raise ValueError("Export dimensions do not match checkpoint config")
     exported_predictions = evaluate_export(exported, fens)
@@ -270,7 +306,6 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
     with torch.no_grad():
         white_indices, black_indices, stm = _batch_arrays_from_fens(
             sanity_fens,
-            features=config.features,
             max_active_features=config.max_active_features,
         )
         sanity_checkpoint = model(
@@ -328,9 +363,9 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
         "score_units": "Stockfish internal score",
         "score_cp_formula": "score_cp = score * 100 / 208",
         "export_ft_scale": float(exported.ft_scale),
-        "export_l1_scale": float(exported.l1_scale),
-        "export_l2_scale": float(exported.l2_scale),
-        "export_out_scale": float(exported.out_scale),
+        "export_fc0_scale": float(exported.fc0_scale),
+        "export_fc1_scale": float(exported.fc1_scale),
+        "export_fc2_scale": float(exported.fc2_scale),
         "export_score_scale": float(exported.score_scale),
         "nnue2score": float(config.nnue2score),
         "quantization": _export_quantization_diagnostics(exported),
@@ -347,28 +382,32 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
 def evaluate_export(exported: ExportedNetwork, fens: list[str]) -> list[float]:
     ft_bias = exported.ft_bias.astype(np.float32) / exported.ft_scale
     ft_weight = exported.ft_weight.astype(np.float32) / exported.ft_scale
-    l1_bias = exported.l1_bias.astype(np.float32) / exported.l1_scale
-    l1_weight = exported.l1_weight.astype(np.float32) / exported.l1_scale
-    l2_bias = exported.l2_bias.astype(np.float32) / exported.l2_scale
-    l2_weight = exported.l2_weight.astype(np.float32) / exported.l2_scale
-    out_bias = exported.out_bias.astype(np.float32) / exported.out_scale
-    out_weight = exported.out_weight.astype(np.float32) / exported.out_scale
+    fc0_bias = exported.fc0_bias.astype(np.float32) / exported.fc0_scale
+    fc0_weight = exported.fc0_weight.astype(np.float32) / exported.fc0_scale
+    fc1_bias = exported.fc1_bias.astype(np.float32) / exported.fc1_scale
+    fc1_weight = exported.fc1_weight.astype(np.float32) / exported.fc1_scale
+    fc2_bias = exported.fc2_bias.astype(np.float32) / exported.fc2_scale
+    fc2_weight = exported.fc2_weight.astype(np.float32) / exported.fc2_scale
 
     results: list[float] = []
     for fen in fens:
         board = BoardState.from_fen(fen)
-        white_features = active_feature_indices(board, "white")
-        black_features = active_feature_indices(board, "black")
+        white_features = active_feature_indices(board, "white", features=FEATURES)
+        black_features = active_feature_indices(board, "black", features=FEATURES)
         white_acc = ft_bias + ft_weight[white_features].sum(axis=0)
         black_acc = ft_bias + ft_weight[black_features].sum(axis=0)
         if board.side_to_move == "w":
             combined = np.concatenate([white_acc, black_acc], axis=0)
         else:
             combined = np.concatenate([black_acc, white_acc], axis=0)
-        hidden1 = np.clip(combined, 0.0, 1.0)
-        hidden2 = np.clip(hidden1 @ l1_weight + l1_bias, 0.0, 1.0)
-        hidden3 = np.clip(hidden2 @ l2_weight + l2_bias, 0.0, 1.0)
-        output = (hidden3 @ out_weight + out_bias[0]) * exported.score_scale
+        fc0_out = combined @ fc0_weight + fc0_bias
+        hidden = fc0_out[: exported.hidden_size]
+        forward = fc0_out[exported.hidden_size : exported.fc0_output_size]
+        hidden_crelu = np.clip(hidden, 0.0, 1.0)
+        fc1_in = np.concatenate([hidden_crelu * hidden_crelu, hidden_crelu], axis=0)
+        fc1_out = np.clip(fc1_in @ fc1_weight + fc1_bias, 0.0, 1.0)
+        fc2_out = fc1_out @ fc2_weight + fc2_bias[0]
+        output = (fc2_out + forward[0]) * exported.score_scale
         results.append(float(output))
     return results
 
@@ -390,64 +429,44 @@ def _material_gaps_cp(values: dict[str, float]) -> dict[str, float]:
     }
 
 
-def _coalesced_ft_weights_from_model(model) -> tuple[np.ndarray, np.ndarray]:
-    if hasattr(model, "coalesced_feature_transform"):
-        ft_weight, ft_bias = model.coalesced_feature_transform()
-        return (
-            ft_weight.detach().cpu().numpy(),
-            ft_bias.detach().cpu().numpy(),
-        )
-
+def _exported_network_from_model(model, config) -> ExportedNetwork:
     ft_weight = model.ft.weight.detach().cpu().numpy()
     ft_bias = model.ft_bias.detach().cpu().numpy()
-    if hasattr(model, "ft_factor"):
-        factor_weight = model.ft_factor.weight.detach().cpu().numpy()
-        repeats = ft_weight.shape[0] // factor_weight.shape[0]
-        ft_weight = ft_weight + np.tile(factor_weight, (repeats, 1))
-    return ft_weight, ft_bias
-
-
-def _exported_network_from_model(model, config) -> ExportedNetwork:
-    ft_weight, ft_bias = _coalesced_ft_weights_from_model(model)
-    l1_weight = model.l1.weight.detach().cpu().numpy().T
-    l1_bias = model.l1.bias.detach().cpu().numpy()
-    l2_weight = model.l2.weight.detach().cpu().numpy().T
-    l2_bias = model.l2.bias.detach().cpu().numpy()
+    fc0_weight = model.fc0.weight.detach().cpu().numpy().T
+    fc0_bias = model.fc0.bias.detach().cpu().numpy()
+    fc1_weight = model.fc1.weight.detach().cpu().numpy().T
+    fc1_bias = model.fc1.bias.detach().cpu().numpy()
+    fc2_weight = model.fc2.weight.detach().cpu().numpy().reshape(-1)
+    fc2_bias = model.fc2.bias.detach().cpu().numpy()
     score_scale = float(config.nnue2score)
-    out_weight = model.output.weight.detach().cpu().numpy().reshape(-1)
-    out_bias = model.output.bias.detach().cpu().numpy()
 
     ft_scale = _fit_quantization_scale([ft_bias, ft_weight], config.export_ft_scale, np.int16)
-    l1_scale = _fit_quantization_scale([l1_weight], config.export_dense_scale, np.int8)
-    l2_scale = _fit_quantization_scale([l2_weight], config.export_dense_scale, np.int8)
-    out_scale = _fit_quantization_scale([out_weight], config.export_dense_scale, np.int8)
+    fc0_scale = _fit_quantization_scale([fc0_weight], config.export_dense_scale, np.int8)
+    fc1_scale = _fit_quantization_scale([fc1_weight], config.export_dense_scale, np.int8)
+    fc2_scale = _fit_quantization_scale([fc2_weight], config.export_dense_scale, np.int8)
 
     return ExportedNetwork(
         description=config.export_description,
         version=VERSION,
         num_features=config.num_features,
         ft_size=config.ft_size,
-        l1_size=config.l1_size,
-        l2_size=config.l2_size,
+        hidden_size=config.hidden_size,
+        forward_size=config.forward_size,
+        fc1_output_size=config.fc1_output_size,
         ft_scale=ft_scale,
-        l1_scale=l1_scale,
-        l2_scale=l2_scale,
-        out_scale=out_scale,
+        fc0_scale=fc0_scale,
+        fc1_scale=fc1_scale,
+        fc2_scale=fc2_scale,
         score_scale=score_scale,
         ft_bias=_quantize(ft_bias, ft_scale, np.int16),
         ft_weight=_quantize(ft_weight, ft_scale, np.int16),
-        l1_bias=_quantize(l1_bias, l1_scale, np.int32),
-        l1_weight=_quantize(l1_weight, l1_scale, np.int8),
-        l2_bias=_quantize(l2_bias, l2_scale, np.int32),
-        l2_weight=_quantize(l2_weight, l2_scale, np.int8),
-        out_bias=_quantize(out_bias, out_scale, np.int32),
-        out_weight=_quantize(out_weight, out_scale, np.int8),
+        fc0_bias=_quantize(fc0_bias, fc0_scale, np.int32),
+        fc0_weight=_quantize(fc0_weight, fc0_scale, np.int8),
+        fc1_bias=_quantize(fc1_bias, fc1_scale, np.int32),
+        fc1_weight=_quantize(fc1_weight, fc1_scale, np.int8),
+        fc2_bias=_quantize(fc2_bias, fc2_scale, np.int32),
+        fc2_weight=_quantize(fc2_weight, fc2_scale, np.int8),
     )
-
-
-def _require_halfkp_export(config) -> None:
-    if config.features != HALFKP_FEATURES:
-        raise ValueError("Export currently supports only features='HalfKP^'")
 
 
 def _quantize(values: np.ndarray, scale: float, dtype) -> np.ndarray:
@@ -471,12 +490,12 @@ def _export_quantization_diagnostics(exported: ExportedNetwork) -> dict[str, dic
     return {
         "ft_bias": _quantized_tensor_stats(exported.ft_bias),
         "ft_weight": _quantized_tensor_stats(exported.ft_weight),
-        "l1_bias": _quantized_tensor_stats(exported.l1_bias),
-        "l1_weight": _quantized_tensor_stats(exported.l1_weight),
-        "l2_bias": _quantized_tensor_stats(exported.l2_bias),
-        "l2_weight": _quantized_tensor_stats(exported.l2_weight),
-        "out_bias": _quantized_tensor_stats(exported.out_bias),
-        "out_weight": _quantized_tensor_stats(exported.out_weight),
+        "fc0_bias": _quantized_tensor_stats(exported.fc0_bias),
+        "fc0_weight": _quantized_tensor_stats(exported.fc0_weight),
+        "fc1_bias": _quantized_tensor_stats(exported.fc1_bias),
+        "fc1_weight": _quantized_tensor_stats(exported.fc1_weight),
+        "fc2_bias": _quantized_tensor_stats(exported.fc2_bias),
+        "fc2_weight": _quantized_tensor_stats(exported.fc2_weight),
     }
 
 
@@ -507,13 +526,16 @@ def _write_export(handle, exported: ExportedNetwork) -> None:
         feature_set_bytes,
         exported.num_features,
         exported.ft_size,
-        exported.l1_size,
-        exported.l2_size,
+        exported.hidden_size,
+        exported.forward_size,
+        exported.fc0_output_size,
+        exported.fc1_input_size,
+        exported.fc1_output_size,
         OUTPUT_PERSPECTIVE_STM,
         float(exported.ft_scale),
-        float(exported.l1_scale),
-        float(exported.l2_scale),
-        float(exported.out_scale),
+        float(exported.fc0_scale),
+        float(exported.fc1_scale),
+        float(exported.fc2_scale),
         float(exported.score_scale),
         len(description_bytes),
     )
@@ -521,27 +543,26 @@ def _write_export(handle, exported: ExportedNetwork) -> None:
     handle.write(description_bytes)
     handle.write(exported.ft_bias.astype("<i2").tobytes())
     handle.write(exported.ft_weight.astype("<i2").tobytes())
-    handle.write(exported.l1_bias.astype("<i4").tobytes())
-    handle.write(exported.l1_weight.astype(np.int8).tobytes())
-    handle.write(exported.l2_bias.astype("<i4").tobytes())
-    handle.write(exported.l2_weight.astype(np.int8).tobytes())
-    handle.write(exported.out_bias.astype("<i4").tobytes())
-    handle.write(exported.out_weight.astype(np.int8).tobytes())
+    handle.write(exported.fc0_bias.astype("<i4").tobytes())
+    handle.write(exported.fc0_weight.astype(np.int8).tobytes())
+    handle.write(exported.fc1_bias.astype("<i4").tobytes())
+    handle.write(exported.fc1_weight.astype(np.int8).tobytes())
+    handle.write(exported.fc2_bias.astype("<i4").tobytes())
+    handle.write(exported.fc2_weight.astype(np.int8).tobytes())
 
 
 def _batch_arrays_from_fens(
     fens: list[str],
     *,
-    features: str = HALFKP_FEATURES,
-    max_active_features: int = 30,
+    max_active_features: int = 32,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     white_indices = []
     black_indices = []
     stm = []
     for fen in fens:
         board = BoardState.from_fen(fen)
-        white = active_feature_indices(board, "white", features=features)
-        black = active_feature_indices(board, "black", features=features)
+        white = active_feature_indices(board, "white", features=FEATURES)
+        black = active_feature_indices(board, "black", features=FEATURES)
         white_indices.append(white + [-1] * (max_active_features - len(white)))
         black_indices.append(black + [-1] * (max_active_features - len(black)))
         stm.append(1.0 if board.side_to_move == "w" else 0.0)

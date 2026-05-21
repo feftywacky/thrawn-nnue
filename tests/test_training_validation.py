@@ -107,9 +107,9 @@ class ValidationTrainingTests(unittest.TestCase):
 
         class _Model:
             def __init__(self) -> None:
-                self.l1 = _Layer([[5.0, -5.0]])
-                self.l2 = _Layer([[4.0, -4.0]])
-                self.output = _Layer([[3.0, -3.0]])
+                self.fc0 = _Layer([[5.0, -5.0]])
+                self.fc1 = _Layer([[4.0, -4.0]])
+                self.fc2 = _Layer([[3.0, -3.0]])
 
         model = _Model()
         config = TrainConfig.from_dict(
@@ -124,9 +124,9 @@ class ValidationTrainingTests(unittest.TestCase):
         _clip_model_weights(model, config)
 
         expected_limit = torch.tensor((127.0 - 0.5) / 64.0, dtype=torch.float32)
-        self.assertLessEqual(float(model.l1.weight.abs().max()), float(expected_limit))
-        self.assertLessEqual(float(model.l2.weight.abs().max()), float(expected_limit))
-        self.assertLessEqual(float(model.output.weight.abs().max()), float(expected_limit))
+        self.assertLessEqual(float(model.fc0.weight.abs().max()), float(expected_limit))
+        self.assertLessEqual(float(model.fc1.weight.abs().max()), float(expected_limit))
+        self.assertLessEqual(float(model.fc2.weight.abs().max()), float(expected_limit))
 
     def test_create_scheduler_supports_stockfish_exponential_decay(self) -> None:
         base_lr = 0.000875
@@ -292,9 +292,6 @@ class ValidationTrainingTests(unittest.TestCase):
                     "accelerator": "cpu",
                     "filtered": False,
                     "wld_filtered": False,
-                    "ft_size": 4,
-                    "l1_size": 2,
-                    "l2_size": 2,
                 }
             )
             state = _create_state(config)
@@ -340,9 +337,6 @@ class ValidationTrainingTests(unittest.TestCase):
                     "amp": False,
                     "filtered": False,
                     "wld_filtered": False,
-                    "ft_size": 4,
-                    "l1_size": 2,
-                    "l2_size": 2,
                 }
             )
 

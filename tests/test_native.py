@@ -38,22 +38,13 @@ class NativeTests(unittest.TestCase):
                 batch = stream.next_batch(2)
                 self.assertIsNotNone(batch)
                 assert batch is not None
-                self.assertEqual(batch.white_indices.shape, (2, 30))
-                self.assertEqual(batch.black_indices.shape, (2, 30))
-                self.assertEqual(batch.stm.shape, (2,))
-                self.assertTrue(((batch.white_indices >= -1) & (batch.white_indices < 40960)).all())
-                self.assertTrue(((batch.black_indices >= -1) & (batch.black_indices < 40960)).all())
-                self.assertEqual(batch.score.shape, (2,))
-                self.assertTrue(set(float(score) for score in batch.score.tolist()).issubset({-12.0, 24.0, 31.0}))
-
-            with BinpackStream([path], num_threads=1, cyclic=False, feature_set="HalfKAv2_hm^") as stream:
-                batch = stream.next_batch(2)
-                self.assertIsNotNone(batch)
-                assert batch is not None
                 self.assertEqual(batch.white_indices.shape, (2, 32))
                 self.assertEqual(batch.black_indices.shape, (2, 32))
-                self.assertTrue(((batch.white_indices >= -1) & (batch.white_indices < 24576)).all())
-                self.assertTrue(((batch.black_indices >= -1) & (batch.black_indices < 24576)).all())
+                self.assertEqual(batch.stm.shape, (2,))
+                self.assertTrue(((batch.white_indices >= -1) & (batch.white_indices < 22528)).all())
+                self.assertTrue(((batch.black_indices >= -1) & (batch.black_indices < 22528)).all())
+                self.assertEqual(batch.score.shape, (2,))
+                self.assertTrue(set(float(score) for score in batch.score.tolist()).issubset({-12.0, 24.0, 31.0}))
 
             with BinpackStream([path], num_threads=1, cyclic=False, max_abs_score=10.0) as stream:
                 batch = stream.next_batch(3)

@@ -10,6 +10,8 @@ import subprocess
 
 import numpy as np
 
+from .features import FEATURES, HALFKA_V2_HM_MAX_ACTIVE_FEATURES, HALFKA_V2_HM_NUM_FEATURES, HALFKA_V2_HM_PS_NB
+
 
 class NativeError(RuntimeError):
     pass
@@ -167,14 +169,6 @@ _SPLIT_ROLE_IDS = {
     "train": 1,
     "validation": 2,
 }
-_FEATURE_SET_IDS = {
-    "HalfKP": 0,
-    "HalfKP^": 0,
-    "HalfKAv2_hm": 1,
-    "HalfKAv2_hm^": 1,
-}
-
-
 @dataclass(slots=True)
 class NativeBatch:
     white_indices: np.ndarray
@@ -509,7 +503,6 @@ class BinpackStream:
         max_abs_score: float = 0.0,
         split_role: str = "all",
         validation_split_fraction: float = 0.0,
-        feature_set: str = "HalfKP^",
     ):
         if not paths:
             raise ValueError("At least one dataset path is required")
@@ -522,10 +515,6 @@ class BinpackStream:
         if split_role not in _SPLIT_ROLE_IDS:
             allowed = ", ".join(sorted(_SPLIT_ROLE_IDS))
             raise ValueError(f"split_role must be one of: {allowed}")
-        if feature_set not in _FEATURE_SET_IDS:
-            allowed = ", ".join(sorted(_FEATURE_SET_IDS))
-            raise ValueError(f"feature_set must be one of: {allowed}")
-
         self._handle = None
         self._lib = _load_library()
         encoded_paths = [os.fsencode(Path(path).resolve()) for path in paths]
@@ -542,7 +531,6 @@ class BinpackStream:
             float(max_abs_score),
             _SPLIT_ROLE_IDS[split_role],
             float(validation_split_fraction),
-            _FEATURE_SET_IDS[feature_set],
         )
         if not self._handle:
             raise NativeError(_last_error(self._lib))
@@ -624,7 +612,6 @@ def _configure_library_symbols(lib: ctypes.CDLL) -> None:
         ctypes.c_double,
         ctypes.c_int32,
         ctypes.c_double,
-        ctypes.c_int32,
     ]
     lib.thrawn_binpack_open_many.restype = ctypes.c_void_p
     lib.thrawn_binpack_close.argtypes = [ctypes.c_void_p]
@@ -717,12 +704,12 @@ def _binpack_format_summary() -> dict[str, object]:
             "result_wdl_values": {"win": 1.0, "draw": 0.5, "loss": 0.0},
         },
         "features": {
-            "feature_set": "HalfKP",
-            "feature_count": 40960,
-            "factor_features": 640,
-            "max_active_features_per_perspective": 30,
+            "feature_set": FEATURES,
+            "feature_count": HALFKA_V2_HM_NUM_FEATURES,
+            "piece_square_features": HALFKA_V2_HM_PS_NB,
+            "max_active_features_per_perspective": HALFKA_V2_HM_MAX_ACTIVE_FEATURES,
             "perspectives": ["white", "black"],
-            "king_pieces_in_feature_lists": False,
+            "king_pieces_in_feature_lists": True,
         },
     }
 

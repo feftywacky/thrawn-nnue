@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 import tomllib
 
-from .features import canonical_feature_name, feature_shape
+from .features import FEATURES, canonical_feature_name, feature_shape
 
 
 @dataclass(slots=True)
@@ -34,13 +34,13 @@ class TrainConfig:
     save_last_network: bool = True
     console_mode: str = "progress"
 
-    features: str = "HalfKP^"
-    num_features: int = 40_960
-    num_factor_features: int = 640
-    max_active_features: int = 30
+    features: str = FEATURES
+    num_features: int = 22_528
+    max_active_features: int = 32
     ft_size: int = 1024
-    l1_size: int = 256
-    l2_size: int = 64
+    hidden_size: int = 31
+    forward_size: int = 1
+    fc1_output_size: int = 32
     output_perspective: str = "stm"
 
     filtered: bool = True
@@ -68,9 +68,9 @@ class TrainConfig:
     w2: float = 0.5
 
     network_testing_nodes_per_move: int = 0
-    export_ft_scale: float = 127.0
+    export_ft_scale: float = 255.0
     export_dense_scale: float = 64.0
-    export_description: str = "thrawn halfkp nnue"
+    export_description: str = "thrawn HalfKAv2_hm 1024x2 -> 31+1 -> 32 -> 1 nnue"
 
     @property
     def total_positions(self) -> int:
@@ -114,7 +114,6 @@ class TrainConfig:
         self.features = canonical_feature_name(self.features)
         shape = feature_shape(self.features)
         self.num_features = shape["num_features"]
-        self.num_factor_features = shape["num_factor_features"]
         self.max_active_features = shape["max_active_features"]
         if self.output_perspective != "stm":
             raise ValueError("Only output_perspective='stm' is supported")
@@ -150,8 +149,14 @@ class TrainConfig:
             raise ValueError("weight_decay must be >= 0")
         if self.clip_grad_norm <= 0.0:
             raise ValueError("clip_grad_norm must be positive")
-        if self.ft_size <= 0 or self.l1_size <= 0 or self.l2_size <= 0:
-            raise ValueError("network sizes must be positive")
+        if self.ft_size != 1024:
+            raise ValueError("ft_size must be 1024")
+        if self.hidden_size != 31:
+            raise ValueError("hidden_size must be 31")
+        if self.forward_size != 1:
+            raise ValueError("forward_size must be 1")
+        if self.fc1_output_size != 32:
+            raise ValueError("fc1_output_size must be 32")
         if self.accelerator not in {"auto", "cuda", "mps", "cpu"}:
             raise ValueError("accelerator must be one of: auto, cuda, mps, cpu")
         if self.console_mode not in {"progress", "text"}:
@@ -228,4 +233,3 @@ def _expand_dataset_value(base_dir: Path, value: str) -> list[str]:
 
 def _looks_like_glob(value: str) -> bool:
     return any(char in value for char in "*?[")
-

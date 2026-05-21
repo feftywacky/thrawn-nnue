@@ -136,16 +136,17 @@ class ValidationConfigTests(unittest.TestCase):
                 [str((valid_dir / "c.binpack").resolve())],
             )
 
-    def test_default_config_uses_current_large_halfkp_shape(self) -> None:
+    def test_default_config_uses_halfka_v2_hm_stockfish_tail_shape(self) -> None:
         config = TrainConfig(datasets=["/tmp/train.binpack"], max_epochs=1, epoch_size=1)
         config.validate()
 
-        self.assertEqual(config.features, "HalfKP^")
+        self.assertEqual(config.features, "HalfKAv2_hm")
         self.assertEqual(config.ft_size, 1024)
-        self.assertEqual(config.l1_size, 256)
-        self.assertEqual(config.l2_size, 64)
-        self.assertEqual(config.num_features, 40_960)
-        self.assertEqual(config.max_active_features, 30)
+        self.assertEqual(config.hidden_size, 31)
+        self.assertEqual(config.forward_size, 1)
+        self.assertEqual(config.fc1_output_size, 32)
+        self.assertEqual(config.num_features, 22_528)
+        self.assertEqual(config.max_active_features, 32)
 
     def test_halfka_v2_hm_shape_is_derived_from_feature_name(self) -> None:
         config = TrainConfig.from_dict(
@@ -153,13 +154,12 @@ class ValidationConfigTests(unittest.TestCase):
                 "datasets": ["/tmp/train.binpack"],
                 "max_epochs": 1,
                 "epoch_size": 1,
-                "features": "HalfKAv2_hm^",
+                "features": "HalfKAv2_hm",
             }
         )
 
-        self.assertEqual(config.features, "HalfKAv2_hm^")
-        self.assertEqual(config.num_features, 24_576)
-        self.assertEqual(config.num_factor_features, 768)
+        self.assertEqual(config.features, "HalfKAv2_hm")
+        self.assertEqual(config.num_features, 22_528)
         self.assertEqual(config.max_active_features, 32)
 
     def test_v4_reference_config_loads_stockfish_style_recipe(self) -> None:
@@ -175,10 +175,12 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.start_lambda, 1.0)
         self.assertEqual(config.end_lambda, 0.75)
         self.assertEqual(config.network_testing_nodes_per_move, 1000)
-        self.assertEqual(config.features, "HalfKAv2_hm^")
-        self.assertEqual(config.num_features, 24_576)
-        self.assertEqual(config.num_factor_features, 768)
+        self.assertEqual(config.features, "HalfKAv2_hm")
+        self.assertEqual(config.num_features, 22_528)
         self.assertEqual(config.max_active_features, 32)
+        self.assertEqual(config.hidden_size, 31)
+        self.assertEqual(config.forward_size, 1)
+        self.assertEqual(config.fc1_output_size, 32)
 
     def test_v5_and_v6_use_stockfish_epoch_config_names(self) -> None:
         root = Path(__file__).resolve().parents[1] / "configs"
@@ -191,7 +193,8 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(v5.gamma, 0.995)
         self.assertEqual(v5.start_lambda, 1.0)
         self.assertEqual(v5.end_lambda, 0.75)
-        self.assertEqual(v5.features, "HalfKAv2_hm^")
+        self.assertEqual(v5.features, "HalfKAv2_hm")
+        self.assertEqual(v5.num_features, 22_528)
 
         self.assertEqual(v6.max_epochs, 20)
         self.assertEqual(v6.epoch_size, 100_000_000)
@@ -199,7 +202,8 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(v6.gamma, 0.997)
         self.assertEqual(v6.start_lambda, 1.0)
         self.assertEqual(v6.end_lambda, 0.75)
-        self.assertEqual(v6.features, "HalfKAv2_hm^")
+        self.assertEqual(v6.features, "HalfKAv2_hm")
+        self.assertEqual(v6.num_features, 22_528)
 
 
 if __name__ == "__main__":

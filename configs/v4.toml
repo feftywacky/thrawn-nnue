@@ -27,13 +27,13 @@ network_save_period = 1
 save_last_network = true
 console_mode = "progress"
 
-features = "HalfKAv2_hm^"
-num_features = 24576
-num_factor_features = 768
+features = "HalfKAv2_hm"
+num_features = 22528
 max_active_features = 32
 ft_size = 1024
-l1_size = 256
-l2_size = 64
+hidden_size = 31
+forward_size = 1
+fc1_output_size = 32
 
 filtered = true
 wld_filtered = true
@@ -56,6 +56,6 @@ out_scaling = 380.0
 pow_exp = 2.5
 
 network_testing_nodes_per_move = 1000
-export_ft_scale = 127.0
+export_ft_scale = 255.0
 export_dense_scale = 64.0
-export_description = "thrawn halfka v2 hm nnue stockfish nodes5000pv2 UHO 10ep lambda1.0-0.75"
+export_description = "thrawn HalfKAv2_hm 1024x2 -> 31+1 -> 32 -> 1 nodes5000pv2 UHO 10ep lambda1.0-0.75"

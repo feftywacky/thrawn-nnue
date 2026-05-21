@@ -137,7 +137,7 @@ def resume_training(checkpoint_path: str | Path, *, console_mode: str | None = N
 
 def _create_state(config: TrainConfig) -> TrainState:
     torch = _require_torch()
-    from .model import HalfKPNNUE
+    from .model import HalfKAv2HmNNUE
 
     _resolve_runtime_config(config)
     _seed_torch(config, torch)
@@ -148,12 +148,12 @@ def _create_state(config: TrainConfig) -> TrainState:
     (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     metrics_path = run_dir / "metrics.jsonl"
 
-    model = HalfKPNNUE(
+    model = HalfKAv2HmNNUE(
         num_features=config.num_features,
-        num_factor_features=config.num_factor_features,
         ft_size=config.ft_size,
-        l1_size=config.l1_size,
-        l2_size=config.l2_size,
+        hidden_size=config.hidden_size,
+        forward_size=config.forward_size,
+        fc1_output_size=config.fc1_output_size,
     ).to(device)
     optimizer = _create_optimizer(config, model, torch)
     scheduler = _create_scheduler(config, optimizer, torch)
@@ -308,7 +308,6 @@ def _run_training_loop(state: TrainState) -> None:
             state.config.datasets,
             num_threads=state.config.num_workers,
             cyclic=True,
-            feature_set=state.config.features,
             **_binpack_filter_options(state.config, split_role="train"),
         ) as train_stream:
             remaining_positions = total_positions - state.positions_seen
@@ -616,9 +615,9 @@ def _clip_model_weights(model, config: TrainConfig) -> None:
     dense_limit = (127.0 - 0.5) / max(config.export_dense_scale, 1.0)
     torch = _require_torch()
     with torch.no_grad():
-        model.l1.weight.clamp_(-dense_limit, dense_limit)
-        model.l2.weight.clamp_(-dense_limit, dense_limit)
-        model.output.weight.clamp_(-dense_limit, dense_limit)
+        model.fc0.weight.clamp_(-dense_limit, dense_limit)
+        model.fc1.weight.clamp_(-dense_limit, dense_limit)
+        model.fc2.weight.clamp_(-dense_limit, dense_limit)
 
 
 def _stm_oriented_targets(score, result_wdl, stm, torch):
@@ -655,7 +654,6 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         _validation_datasets(state.config),
         num_threads=state.config.num_workers,
         cyclic=False,
-        feature_set=state.config.features,
         **_binpack_filter_options(state.config, split_role="validation"),
     ) as validation_stream:
         validation_budget = state.config.validation_size if state.config.validation_size > 0 else None

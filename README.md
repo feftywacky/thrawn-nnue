@@ -25,18 +25,22 @@ High-level layout:
 Current Stockfish-style training shape:
 
 ```text
-HalfKAv2_hm FT: 24576 -> 1024
+HalfKAv2_hm sparse features: 22528
+feature transformer: 22528 -> 1024 per perspective
 concat [us_acc | them_acc] -> 2048
-dense: 2048 -> 256
-dense: 256 -> 64
-dense: 64 -> 1
+fc0: 2048 -> 31 hidden lanes + 1 forward lane
+SCReLU(31) || CReLU(31) -> 62
+fc1: 62 -> 32
+CReLU
+fc2: 32 -> 1
+final output: fc2 + forward lane
 output perspective: side to move
 output unit: Stockfish internal score
 ```
 
-The trainer uses training-time factorization for the feature transform. The legacy Thrawn export path is still HalfKP-only and rejects `HalfKAv2_hm^` checkpoints until the engine-side feature transformer is upgraded too.
+The trainer, native `.binpack` bridge, and exporter use the same Stockfish-style `HalfKAv2_hm` feature order. There is no legacy compatibility path or factorized FT export path.
 
-For the exact exported file format, score units, HalfKP indexing, accumulator rules, and engine integration contract, see [docs/nnue_spec.md](docs/nnue_spec.md).
+For the exact exported file format, score units, `HalfKAv2_hm` indexing, accumulator rules, SIMD notes, and engine integration contract, see [docs/nnue_spec.md](docs/nnue_spec.md).
 
 ## Requirements
 
@@ -182,7 +186,7 @@ That config currently points at:
 - `data/nodes5000pv2_UHO.binpack`
 - output directory `configs/runs/v4`
 - Stockfish-style baseline schedule: `max_epochs = 10`, `epoch_size = 1,048,500`, `batch_size = 1024`
-- `HalfKAv2_hm^` features with the local 1024x256x64 topology
+- `HalfKAv2_hm` features with `1024x2 -> 31+1 -> 32 -> 1`
 - Lambda schedule: `start_lambda = 1.0` to `end_lambda = 0.75`
 - Engine-test metadata: `network_testing_nodes_per_move = 1000`
 
@@ -202,11 +206,23 @@ Important config themes:
 - device/runtime settings
 - training budget and checkpoint cadence
 - optimizer / LR schedule
-- feature set and network sizes
+- feature set and fixed Stockfish-style network constants
 - WDL target shaping
 - export quantization scales
 
 The exported runtime score contract is documented in [docs/nnue_spec.md](docs/nnue_spec.md), not duplicated here.
+
+## Engine Inference Notes
+
+The runtime path is designed around cache-local incremental accumulators and a compact dense tail:
+
+- Keep one 1024-lane `int16` accumulator per perspective, aligned to 64 bytes.
+- Refresh by streaming contiguous FT rows; patch by add/subtracting only changed feature rows.
+- Fully refresh the perspective whose own king moved; patch enemy king moves as normal feature deltas.
+- Keep `fc0`'s 32 outputs, the forward lane, the 62 activation values, `fc1`, and `fc2` in stack/register-local buffers.
+- AVX2 builds should target `-march=x86-64-v3` or `/arch:AVX2`; NEON dot-product builds should target `armv8.2-a+dotprod` when available and fall back to plain NEON.
+
+See [docs/nnue_spec.md](docs/nnue_spec.md) for exact SIMD, cache locality, and compiler-target details.
 
 ## `thrawn-nnue` CLI
 
@@ -253,7 +269,7 @@ thrawn-nnue resume --checkpoint configs/runs/v4/checkpoints/step_00010000.pt --c
 
 ### Export
 
-Export currently supports only HalfKP checkpoints because Thrawn's runtime feature transformer and file format are HalfKP-based. `HalfKAv2_hm^` training checkpoints should be evaluated or converted only after adding the matching engine-side feature support.
+Export writes the current `HalfKAv2_hm` v8 file format directly. The payload stores the coalesced 22528x1024 feature transformer plus `fc0`, `fc1`, `fc2`, and the forward lane contract documented in [docs/nnue_spec.md](docs/nnue_spec.md).
 
 Export a checkpoint to `.nnue`:
 

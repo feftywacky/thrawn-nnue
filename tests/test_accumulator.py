@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from thrawn_nnue.accumulator import apply_updates, feature_deltas, refresh_accumulator, requires_refresh
 from thrawn_nnue.board import BoardState
-from thrawn_nnue.features import NUM_FEATURES, active_feature_indices
+from thrawn_nnue.features import HALFKA_V2_HM_NUM_FEATURES, active_feature_indices
 
 
 TEST_CASES = [
@@ -24,7 +24,7 @@ class AccumulatorTests(unittest.TestCase):
         bias = [0.05 * i for i in range(8)]
         weights = [
             [((feature_index % 11) - 5) * 0.03125 + 0.01 * dim for dim in range(8)]
-            for feature_index in range(NUM_FEATURES)
+            for feature_index in range(HALFKA_V2_HM_NUM_FEATURES)
         ]
 
         for name, fen, move in TEST_CASES:
@@ -58,8 +58,8 @@ class AccumulatorTests(unittest.TestCase):
         self.assertFalse(requires_refresh(before, after, "black"))
 
         removed, added = feature_deltas(before, after, "black")
-        self.assertEqual(removed, [])
-        self.assertEqual(added, [])
+        self.assertGreater(len(removed), 0)
+        self.assertGreater(len(added), 0)
 
     def test_castling_requires_refresh_for_castling_side_only(self) -> None:
         before = BoardState.from_fen("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1")
