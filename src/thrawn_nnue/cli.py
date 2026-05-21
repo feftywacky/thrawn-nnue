@@ -69,11 +69,17 @@ def main() -> None:
     export_parser = subparsers.add_parser("export", help="Export a checkpoint to .nnue")
     export_parser.add_argument("--checkpoint", required=True)
     export_parser.add_argument("--out", required=True)
+    export_parser.add_argument("--verify", action="store_true", help="Verify exported .nnue parity with the checkpoint")
+    export_parser.add_argument("--fen", action="append", default=[], help="FEN to verify after export; repeat for multiple positions")
+    export_parser.add_argument("--sanity", action="store_true", help="Include the optional material sanity suite when verifying")
+    export_parser.add_argument("--json", action="store_true", help="Print export and verification results as JSON")
 
     verify_parser = subparsers.add_parser("verify-export", help="Compare checkpoint and exported .nnue outputs")
     verify_parser.add_argument("--checkpoint", required=True)
     verify_parser.add_argument("--nnue", required=True)
     verify_parser.add_argument("--fen", action="append", default=[])
+    verify_parser.add_argument("--sanity", action="store_true", help="Include the optional material sanity suite")
+    verify_parser.add_argument("--json", action="store_true", help="Print the full verification report as JSON")
 
     inspect_parser = subparsers.add_parser("inspect-binpack", help="Inspect a .binpack dataset")
     inspect_parser.add_argument("--path", required=True)
@@ -162,17 +168,43 @@ def main() -> None:
         return
 
     if args.command == "export":
-        from .export import export_checkpoint
+        from .export import export_checkpoint, render_verify_report, verify_export
 
         output = export_checkpoint(args.checkpoint, args.out)
-        print(str(output))
+        should_verify = args.verify or bool(args.fen) or args.sanity
+        if not should_verify:
+            if args.json:
+                print(json.dumps({"export": str(output)}, indent=2, sort_keys=True))
+            else:
+                print(str(output))
+            return
+
+        report = verify_export(
+            args.checkpoint,
+            output,
+            args.fen or None,
+            include_sanity=args.sanity,
+        )
+        if args.json:
+            print(json.dumps({"export": str(output), "verify": report}, indent=2, sort_keys=True))
+        else:
+            print(f"exported: {output}")
+            print(render_verify_report(report))
         return
 
     if args.command == "verify-export":
-        from .export import verify_export
+        from .export import render_verify_report, verify_export
 
-        results = verify_export(args.checkpoint, args.nnue, args.fen or None)
-        print(json.dumps(results, indent=2, sort_keys=True))
+        results = verify_export(
+            args.checkpoint,
+            args.nnue,
+            args.fen or None,
+            include_sanity=args.sanity,
+        )
+        if args.json:
+            print(json.dumps(results, indent=2, sort_keys=True))
+        else:
+            print(render_verify_report(results))
         return
 
     if args.command == "inspect-binpack":
@@ -206,7 +238,10 @@ def main() -> None:
     if args.command == "metrics":
         from .metrics import generate_run_plots, load_metrics_run, render_summary_text, summarize_run
 
-        run = load_metrics_run(args.run_dir)
+        try:
+            run = load_metrics_run(args.run_dir)
+        except FileNotFoundError as exc:
+            raise SystemExit(str(exc)) from None
         summary = summarize_run(run)
         plots = generate_run_plots(run)
         output = {

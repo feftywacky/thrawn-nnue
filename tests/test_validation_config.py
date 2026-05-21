@@ -20,7 +20,6 @@ class ValidationConfigTests(unittest.TestCase):
                 "epoch_size": 1_048_500,
                 "start_lambda": 1.0,
                 "end_lambda": 0.75,
-                "network_testing_nodes_per_move": 1000,
             }
         )
 
@@ -30,7 +29,6 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.num_batches_per_epoch, 1024)
         self.assertEqual(config.start_lambda, 1.0)
         self.assertEqual(config.end_lambda, 0.75)
-        self.assertEqual(config.network_testing_nodes_per_move, 1000)
 
     def test_lambda_key_maps_to_python_field(self) -> None:
         config = TrainConfig.from_dict(
@@ -63,7 +61,6 @@ class ValidationConfigTests(unittest.TestCase):
             ("data_loader_queue_size", -1),
             ("threads", -2),
             ("random_fen_skipping", -1),
-            ("network_testing_nodes_per_move", -1),
             ("lr", 0.0),
             ("gamma", 0.0),
             ("lambda", 1.1),
@@ -167,14 +164,13 @@ class ValidationConfigTests(unittest.TestCase):
 
         self.assertEqual(config.run_name, "v4")
         self.assertIn("nodes5000pv2_UHO.binpack", config.datasets[0])
-        self.assertEqual(config.batch_size, 1024)
-        self.assertEqual(config.max_epochs, 10)
-        self.assertEqual(config.epoch_size, 1_048_500)
-        self.assertEqual(config.total_positions, 10_485_000)
-        self.assertEqual(config.validation_size, 1_048_500)
+        self.assertEqual(config.batch_size, 16_384)
+        self.assertEqual(config.max_epochs, 400)
+        self.assertEqual(config.epoch_size, 100_000_000)
+        self.assertEqual(config.total_positions, 40_000_000_000)
+        self.assertEqual(config.validation_size, 1_000_000)
         self.assertEqual(config.start_lambda, 1.0)
         self.assertEqual(config.end_lambda, 0.75)
-        self.assertEqual(config.network_testing_nodes_per_move, 1000)
         self.assertEqual(config.features, "HalfKAv2_hm")
         self.assertEqual(config.num_features, 22_528)
         self.assertEqual(config.max_active_features, 32)
@@ -187,7 +183,7 @@ class ValidationConfigTests(unittest.TestCase):
         v5 = TrainConfig.from_toml(root / "v5.toml")
         v6 = TrainConfig.from_toml(root / "v6.toml")
 
-        self.assertEqual(v5.max_epochs, 40)
+        self.assertEqual(v5.max_epochs, 400)
         self.assertEqual(v5.epoch_size, 100_000_000)
         self.assertEqual(v5.lr, 0.0004375)
         self.assertEqual(v5.gamma, 0.995)
@@ -196,7 +192,7 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(v5.features, "HalfKAv2_hm")
         self.assertEqual(v5.num_features, 22_528)
 
-        self.assertEqual(v6.max_epochs, 20)
+        self.assertEqual(v6.max_epochs, 400)
         self.assertEqual(v6.epoch_size, 100_000_000)
         self.assertEqual(v6.lr, 0.00005)
         self.assertEqual(v6.gamma, 0.997)

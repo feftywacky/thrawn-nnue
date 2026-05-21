@@ -258,7 +258,13 @@ def _validate_export_header(
         raise ValueError(f"description_length is too large: {description_length}")
 
 
-def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list[str] | None = None) -> dict[str, Any]:
+def verify_export(
+    checkpoint_path: str | Path,
+    nnue_path: str | Path,
+    fens: list[str] | None = None,
+    *,
+    include_sanity: bool = False,
+) -> dict[str, Any]:
     torch = _require_torch()
     from .checkpoint import load_checkpoint
     from .config import TrainConfig
@@ -302,6 +308,64 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
     exported_predictions = evaluate_export(exported, fens)
     abs_errors = [abs(a - b) for a, b in zip(predictions, exported_predictions, strict=True)]
 
+    report: dict[str, Any] = {
+        "positions": len(fens),
+        "max_abs_error": max(abs_errors) if abs_errors else 0.0,
+        "mean_abs_error": (sum(abs_errors) / len(abs_errors)) if abs_errors else 0.0,
+        "checkpoint_predictions": predictions,
+        "exported_predictions": exported_predictions,
+        "checkpoint_predictions_cp": [_score_to_cp(value) for value in predictions],
+        "exported_predictions_cp": [_score_to_cp(value) for value in exported_predictions],
+        "abs_errors": abs_errors,
+        "abs_errors_cp": [_score_to_cp(value) for value in abs_errors],
+        "score_units": "Stockfish internal score",
+        "score_cp_formula": "score_cp = score * 100 / 208",
+        "export_ft_scale": float(exported.ft_scale),
+        "export_fc0_scale": float(exported.fc0_scale),
+        "export_fc1_scale": float(exported.fc1_scale),
+        "export_fc2_scale": float(exported.fc2_scale),
+        "export_score_scale": float(exported.score_scale),
+        "nnue2score": float(config.nnue2score),
+        "quantization": _export_quantization_diagnostics(exported),
+    }
+    if include_sanity:
+        report.update(_verify_material_sanity(model, exported, config, torch))
+    return report
+
+
+def render_verify_report(report: dict[str, Any]) -> str:
+    max_abs_error = float(report.get("max_abs_error", 0.0))
+    mean_abs_error = float(report.get("mean_abs_error", 0.0))
+    total_limit_hits, limit_hit_detail = _quantization_limit_hits(report.get("quantization", {}))
+    lines = [
+        "verify-export:",
+        f"positions: {int(report.get('positions', 0))}",
+        (
+            "error: "
+            f"max={max_abs_error:.6f} ({_score_to_cp(max_abs_error):.3f} cp) "
+            f"mean={mean_abs_error:.6f} ({_score_to_cp(mean_abs_error):.3f} cp)"
+        ),
+        (
+            "scales: "
+            f"ft={float(report.get('export_ft_scale', 0.0)):.6g} "
+            f"fc0={float(report.get('export_fc0_scale', 0.0)):.6g} "
+            f"fc1={float(report.get('export_fc1_scale', 0.0)):.6g} "
+            f"fc2={float(report.get('export_fc2_scale', 0.0)):.6g} "
+            f"score={float(report.get('export_score_scale', 0.0)):.6g}"
+        ),
+        _format_limit_hits(total_limit_hits, limit_hit_detail),
+    ]
+    if "material_ordering_ok" in report:
+        lines.append(
+            "sanity: "
+            f"ordering={_pass_fail(bool(report.get('material_ordering_ok')))} "
+            f"margins={_pass_fail(bool(report.get('material_margins_ok')))} "
+            f"start_zero={_pass_fail(bool(report.get('starting_position_near_zero')))}"
+        )
+    return "\n".join(lines)
+
+
+def _verify_material_sanity(model, exported: ExportedNetwork, config, torch) -> dict[str, Any]:
     sanity_fens = [fen for _, fen in SANITY_POSITIONS]
     with torch.no_grad():
         white_indices, black_indices, stm = _batch_arrays_from_fens(
@@ -349,26 +413,7 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
         material_ordering_ok
         and all(gap >= MATERIAL_ORDER_MIN_GAP_CP for gap in exported_material_gaps_cp.values())
     )
-
     return {
-        "positions": float(len(fens)),
-        "max_abs_error": max(abs_errors) if abs_errors else 0.0,
-        "mean_abs_error": (sum(abs_errors) / len(abs_errors)) if abs_errors else 0.0,
-        "checkpoint_predictions": predictions,
-        "exported_predictions": exported_predictions,
-        "checkpoint_predictions_cp": [_score_to_cp(value) for value in predictions],
-        "exported_predictions_cp": [_score_to_cp(value) for value in exported_predictions],
-        "abs_errors": abs_errors,
-        "abs_errors_cp": [_score_to_cp(value) for value in abs_errors],
-        "score_units": "Stockfish internal score",
-        "score_cp_formula": "score_cp = score * 100 / 208",
-        "export_ft_scale": float(exported.ft_scale),
-        "export_fc0_scale": float(exported.fc0_scale),
-        "export_fc1_scale": float(exported.fc1_scale),
-        "export_fc2_scale": float(exported.fc2_scale),
-        "export_score_scale": float(exported.score_scale),
-        "nnue2score": float(config.nnue2score),
-        "quantization": _export_quantization_diagnostics(exported),
         "sanity_positions": sanity_positions,
         "material_ordering_ok": bool(material_ordering_ok),
         "material_margins_ok": material_margins_ok,
@@ -497,6 +542,31 @@ def _export_quantization_diagnostics(exported: ExportedNetwork) -> dict[str, dic
         "fc2_bias": _quantized_tensor_stats(exported.fc2_bias),
         "fc2_weight": _quantized_tensor_stats(exported.fc2_weight),
     }
+
+
+def _quantization_limit_hits(quantization: object) -> tuple[int, list[str]]:
+    if not isinstance(quantization, dict):
+        return 0, []
+    total = 0
+    detail: list[str] = []
+    for name, stats in sorted(quantization.items()):
+        if not isinstance(stats, dict):
+            continue
+        hits = int(float(stats.get("positive_limit_hits", 0.0)) + float(stats.get("negative_limit_hits", 0.0)))
+        total += hits
+        if hits:
+            detail.append(f"{name}={hits}")
+    return total, detail
+
+
+def _format_limit_hits(total_limit_hits: int, detail: list[str]) -> str:
+    if total_limit_hits == 0:
+        return "quantization: limit_hits=0"
+    return f"quantization: limit_hits={total_limit_hits} ({', '.join(detail)})"
+
+
+def _pass_fail(value: bool) -> str:
+    return "pass" if value else "fail"
 
 
 def _quantized_tensor_stats(values: np.ndarray) -> dict[str, float]:

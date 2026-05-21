@@ -19,7 +19,6 @@ class ConsoleContext:
     log_every_n_steps: int
     nnue2score: float = 600.0
     data_loader_queue_size: int = 0
-    network_testing_nodes_per_move: int = 0
 
 
 class _BaseReporter:
@@ -74,8 +73,6 @@ class TextReporter(_BaseReporter):
             f" batch_size={_format_count(context.batch_size)}"
             f" nnue2score={context.nnue2score:g}"
             f" data_loader_queue_size={context.data_loader_queue_size}"
-            " network_testing_nodes_per_move="
-            f"{_format_optional_count(context.network_testing_nodes_per_move)}"
         )
         print(
             "training stream:"
@@ -178,8 +175,6 @@ class ProgressReporter(_BaseReporter):
             f" batch_size={_format_count(context.batch_size)}"
             f" nnue2score={context.nnue2score:g}"
             f" data_loader_queue_size={context.data_loader_queue_size}"
-            " network_testing_nodes_per_move="
-            f"{_format_optional_count(context.network_testing_nodes_per_move)}"
         )
         self._bar.write(
             "training stream:"
@@ -290,12 +285,6 @@ def _format_seconds(value: float) -> str:
 
 def _format_count(value: int) -> str:
     return f"{int(value):,}"
-
-
-def _format_optional_count(value: int) -> str:
-    if int(value) <= 0:
-        return "unset"
-    return _format_count(value)
 
 
 def _format_progress(current: int, total: int) -> str:

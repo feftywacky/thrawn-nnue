@@ -67,7 +67,6 @@ class TrainConfig:
     w1: float = 0.0
     w2: float = 0.5
 
-    network_testing_nodes_per_move: int = 0
     export_ft_scale: float = 255.0
     export_dense_scale: float = 64.0
     export_description: str = "thrawn HalfKAv2_hm 1024x2 -> 31+1 -> 32 -> 1 nnue"
@@ -137,8 +136,6 @@ class TrainConfig:
             raise ValueError("threads must be -1 or non-negative")
         if self.random_fen_skipping < 0:
             raise ValueError("random_fen_skipping must be >= 0")
-        if self.network_testing_nodes_per_move < 0:
-            raise ValueError("network_testing_nodes_per_move must be >= 0")
         if self.optimizer_name != "adamw":
             raise ValueError("Only optimizer_name='adamw' is supported by this trainer")
         if self.lr <= 0.0:

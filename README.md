@@ -185,10 +185,9 @@ That config currently points at:
 
 - `data/nodes5000pv2_UHO.binpack`
 - output directory `configs/runs/v4`
-- Stockfish-style baseline schedule: `max_epochs = 10`, `epoch_size = 1,048,500`, `batch_size = 1024`
+- Stockfish-style baseline schedule: `max_epochs = 400`, `epoch_size = 100,000,000`, `batch_size = 16,384`
 - `HalfKAv2_hm` features with `1024x2 -> 31+1 -> 32 -> 1`
 - Lambda schedule: `start_lambda = 1.0` to `end_lambda = 0.75`
-- Engine-test metadata: `network_testing_nodes_per_move = 1000`
 
 The current second-stage fine-tune config is:
 
@@ -277,6 +276,12 @@ Export a checkpoint to `.nnue`:
 thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/best.pt --out configs/runs/v4/model.nnue
 ```
 
+Export and immediately verify checkpoint/export parity:
+
+```bash
+thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/best.pt --out configs/runs/v4/model.nnue --verify
+```
+
 Checkpoint selection notes:
 
 - `best.pt` is the best checkpoint according to validation score metrics.
@@ -285,10 +290,16 @@ Checkpoint selection notes:
 
 ### Verify export
 
-Compare a PyTorch checkpoint against the exported `.nnue` file:
+Compare a PyTorch checkpoint against the exported `.nnue` file. The default output is a concise parity report; add `--json` for the full prediction and quantization diagnostics.
 
 ```bash
 thrawn-nnue verify-export --checkpoint configs/runs/v4/checkpoints/best.pt --nnue configs/runs/v4/model.nnue
+```
+
+The optional sanity suite checks a small set of fixed material positions in addition to checkpoint/export parity:
+
+```bash
+thrawn-nnue verify-export --checkpoint configs/runs/v4/checkpoints/best.pt --nnue configs/runs/v4/model.nnue --sanity
 ```
 
 You can also provide one or more custom FENs:
@@ -346,10 +357,8 @@ thrawn-nnue metrics --run-dir configs/runs/v4 --json
 Run artifacts typically include:
 
 - `metrics.jsonl`
-- `plots/loss_overview.png`
-- `plots/train_loss.png`
-- `plots/validation_loss.png`
-- `plots/lr.png`
+- `plots/loss.png`
+- `plots/validation_quality.png`
 
 ### Run tests
 
@@ -376,8 +385,8 @@ thrawn-nnue test --pattern "test_cli.py"
 5. Fine-tune with `thrawn-nnue fine-tune` when switching to better data.
 6. Resume if interrupted.
 7. Inspect `thrawn-nnue metrics`.
-8. Export `best.pt` or another chosen checkpoint.
-9. Run `verify-export`.
+8. Export `best.pt` or another chosen checkpoint with `--verify`.
+9. Optionally run `verify-export --sanity` for the fixed material-position smoke test.
 10. Integrate using [docs/nnue_spec.md](docs/nnue_spec.md).
 
 ## Tests

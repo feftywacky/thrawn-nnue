@@ -291,17 +291,17 @@ Do not mix mate scores into NNUE output. Mate bounds stay search-side.
 Before turning the net on in search:
 
 1. Verify loader/header parsing.
-2. Verify scalar parity against `thrawn-nnue verify-export`.
+2. Verify scalar parity against `thrawn-nnue verify-export`, or use `thrawn-nnue export --verify` when writing the file.
 3. Verify incremental accumulator patching against full refresh.
 4. Verify king moves, castling, promotions, en passant, captures.
 5. Verify side-to-move sign handling.
-6. Verify material sanity ordering:
+6. Optionally verify material sanity ordering with `thrawn-nnue verify-export --sanity`:
 
 ```text
 equal_material < white_up_pawn < white_up_knight < white_up_rook < white_up_queen
 ```
 
-`verify-export` also reports material gaps in cp. Treat tiny gaps, especially queen-over-rook, as unstable because quantization can flip them even when checkpoint-side ordering barely passes.
+`verify-export --sanity` also reports material gaps in cp. Treat tiny gaps, especially queen-over-rook, as unstable because quantization can flip them even when checkpoint-side ordering barely passes.
 
 ## Stockfish References
 

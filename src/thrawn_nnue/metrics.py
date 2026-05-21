@@ -6,6 +6,14 @@ import json
 import math
 
 
+LEGACY_PLOT_FILENAMES = (
+    "loss_overview.png",
+    "train_loss.png",
+    "validation_loss.png",
+    "lr.png",
+)
+
+
 @dataclass(slots=True)
 class MetricsRun:
     run_dir: Path
@@ -101,7 +109,6 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
     filtered = _config_value(run, "filtered")
     wld_filtered = _config_value(run, "wld_filtered")
     random_fen_skipping = _as_int(_config_value(run, "random_fen_skipping"))
-    network_testing_nodes_per_move = _as_int(_config_value(run, "network_testing_nodes_per_move"))
 
     latest_train_step = _record_step(latest_train)
     latest_train_positions = _record_positions(latest_train, batch_size)
@@ -245,136 +252,74 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "filtered": filtered,
         "wld_filtered": wld_filtered,
         "random_fen_skipping": random_fen_skipping,
-        "network_testing_nodes_per_move": network_testing_nodes_per_move,
     }
-    summary["suggestions"] = _build_suggestions(summary)
     return summary
 
 
 def render_summary_text(summary: dict[str, object]) -> str:
     lines = [
         f"run_dir: {summary['run_dir']}",
-        f"status: {summary['status']}",
-        f"train_records: {summary['train_records']}",
-        f"validation_records: {summary['validation_records']}",
+        f"status: {summary['status']}  train={summary['train_records']} validation={summary['validation_records']}",
+        (
+            "progress: "
+            f"{_format_optional_int(summary['positions_seen'])}/"
+            f"{_format_optional_int(summary['configured_total_positions'])}"
+            f" ({_format_optional_fraction(summary['latest_position_fraction'])}), "
+            f"epoch {_format_optional_int(summary['latest_epoch_index'])}/"
+            f"{_format_optional_int(summary['max_epochs'])}"
+        ),
+        (
+            "budget: "
+            f"batch={_format_optional_int(summary['batch_size'])} "
+            f"epoch_size={_format_optional_int(summary['epoch_size'])} "
+            f"lambda={_format_optional_float(summary['start_lambda'])}->{_format_optional_float(summary['end_lambda'])}"
+        ),
     ]
     if summary["latest_train_step"] is not None:
-        lines.extend(
-            [
-                f"latest_train_step: {summary['latest_train_step']}",
-                f"positions_seen: {_format_optional_int(summary['positions_seen'])}",
-                f"latest_epoch_index: {_format_optional_int(summary['latest_epoch_index'])}",
-                f"latest_train_loss: {_format_optional_float(summary['latest_train_loss'])}",
-                f"latest_train_wdl_loss: {_format_optional_float(summary['latest_train_wdl_loss'])}",
-                f"latest_train_result_wdl_loss: {_format_optional_float(summary['latest_train_result_wdl_loss'])}",
-                f"latest_train_output_reg_loss: {_format_optional_float(summary['latest_train_output_reg_loss'])}",
-                f"latest_lr: {_format_optional_float(summary['latest_lr'], precision=8)}",
-            ]
+        lines.append(
+            "train: "
+            f"step={summary['latest_train_step']} "
+            f"loss={_format_optional_float(summary['latest_train_loss'])} "
+            f"wdl={_format_optional_float(summary['latest_train_wdl_loss'])} "
+            f"result={_format_optional_float(summary['latest_train_result_wdl_loss'])} "
+            f"lr={_format_optional_float(summary['latest_lr'], precision=8)}"
         )
-    if summary["latest_validation_step"] is not None:
-        lines.extend(
-            [
-                f"latest_validation_step: {summary['latest_validation_step']}",
-                f"latest_validation_positions: {_format_optional_int(summary['latest_validation_positions'])}",
-                f"latest_validation_loss: {_format_optional_float(summary['latest_validation_loss'])}",
-                f"latest_validation_wdl_loss: {_format_optional_float(summary['latest_validation_wdl_loss'])}",
-                (
-                    "latest_validation_result_wdl_loss: "
-                    f"{_format_optional_float(summary['latest_validation_result_wdl_loss'])}"
-                ),
-                (
-                    "latest_validation_output_reg_loss: "
-                    f"{_format_optional_float(summary['latest_validation_output_reg_loss'])}"
-                ),
-                f"latest_validation_score_mae: {_format_optional_float(summary['latest_validation_score_mae'])}",
-                f"latest_validation_score_rmse: {_format_optional_float(summary['latest_validation_score_rmse'])}",
-                f"latest_validation_score_corr: {_format_optional_float(summary['latest_validation_score_corr'])}",
-                f"latest_validation_cp_mae: {_format_optional_float(summary['latest_validation_cp_mae'])}",
-                f"latest_validation_cp_rmse: {_format_optional_float(summary['latest_validation_cp_rmse'])}",
-                f"latest_validation_cp_corr: {_format_optional_float(summary['latest_validation_cp_corr'])}",
-                f"latest_validation_wdl_accuracy: {_format_optional_float(summary['latest_validation_wdl_accuracy'])}",
-                (
-                    "latest_validation_teacher_result_disagreement_rate: "
-                    f"{_format_optional_float(summary['latest_validation_teacher_result_disagreement_rate'])}"
-                ),
-                f"latest_validation_evaluated_positions: {_format_optional_int(summary['latest_validation_evaluated_positions'])}",
-                f"latest_material_ordering_ok: {summary['latest_material_ordering_ok']}",
-            ]
-        )
+    if summary["latest_validation_step"] is None:
+        lines.append("validation: none")
     else:
-        lines.append("latest_validation_step: none")
-
-    if summary["best_validation_loss"] is not None:
-        lines.extend(
-            [
-                f"best_validation_positions: {_format_optional_int(summary['best_validation_positions'])}",
-                f"best_validation_loss: {_format_optional_float(summary['best_validation_loss'])}",
-            ]
+        lines.append(
+            "validation: "
+            f"step={summary['latest_validation_step']} "
+            f"loss={_format_optional_float(summary['latest_validation_loss'])} "
+            f"wdl={_format_optional_float(summary['latest_validation_wdl_loss'])} "
+            f"score_mae={_format_optional_float(summary['latest_validation_score_mae'])} "
+            f"cp_mae={_format_optional_float(summary['latest_validation_cp_mae'])} "
+            f"cp_corr={_format_optional_float(summary['latest_validation_cp_corr'])} "
+            f"wdl_acc={_format_optional_float(summary['latest_validation_wdl_accuracy'])} "
+            f"positions={_format_optional_int(summary['latest_validation_evaluated_positions'])}"
         )
-    else:
-        lines.append("best_validation_positions: none")
-
-    lines.append(f"best_checkpoint_exists: {summary['best_checkpoint_exists']}")
+    lines.append(
+        "best: "
+        f"loss={_format_optional_float(summary['best_validation_loss'])} "
+        f"at={_format_optional_int(summary['best_validation_positions'])} "
+        f"gap={_format_optional_float(summary['best_validation_gap'])} "
+        f"checkpoint={summary['best_checkpoint_exists']} "
+        f"deployable={summary['best_deployable_checkpoint_exists']}"
+    )
     if summary["best_checkpoint_metric_name"] is not None:
         lines.append(
-            "best_checkpoint_metric: "
-            f"{summary['best_checkpoint_metric_name']}={_format_optional_float(summary['best_checkpoint_metric_value'])}"
+            "best_metric: "
+            f"{summary['best_checkpoint_metric_name']}="
+            f"{_format_optional_float(summary['best_checkpoint_metric_value'])} "
+            f"at={_format_optional_int(summary['best_checkpoint_positions'])}"
         )
-        lines.append(f"best_checkpoint_positions: {_format_optional_int(summary['best_checkpoint_positions'])}")
-    lines.append(f"best_deployable_checkpoint_exists: {summary['best_deployable_checkpoint_exists']}")
-    if summary["best_deployable_checkpoint_metric_name"] is not None:
-        lines.append(
-            "best_deployable_checkpoint_metric: "
-            f"{summary['best_deployable_checkpoint_metric_name']}="
-            f"{_format_optional_float(summary['best_deployable_checkpoint_metric_value'])}"
-        )
-        lines.append(
-            "best_deployable_checkpoint_positions: "
-            f"{_format_optional_int(summary['best_deployable_checkpoint_positions'])}"
-        )
-    lines.append("")
-    lines.append("Run Budget")
-    lines.append(f"configured_total_positions: {_format_optional_int(summary['configured_total_positions'])}")
-    lines.append(f"latest_position_fraction: {_format_optional_fraction(summary['latest_position_fraction'])}")
-    lines.append(f"batch_size: {_format_optional_int(summary['batch_size'])}")
-    lines.append(f"max_epochs: {_format_optional_int(summary['max_epochs'])}")
-    lines.append(f"epoch_size: {_format_optional_int(summary['epoch_size'])}")
-    lines.append(f"train_log_interval_steps: {_format_optional_int(summary['train_log_interval_steps'])}")
     lines.append(
-        "observed_validation_spacing_positions: "
-        f"{_format_optional_int(summary['observed_validation_spacing_positions'])}"
+        "data: "
+        f"filtered={summary['filtered']} "
+        f"wld_filtered={summary['wld_filtered']} "
+        f"random_fen_skipping={_format_optional_int(summary['random_fen_skipping'])}"
     )
-    lines.append(f"latest_lr_fraction_of_initial: {_format_optional_float(summary['latest_lr_fraction_of_initial'])}")
-    lines.append(f"gamma: {_format_optional_float(summary['gamma'])}")
-    lines.append(f"lr_near_zero: {summary['lr_near_zero']}")
-    lines.append(f"scheduler_exhausted: {summary['scheduler_exhausted']}")
-    lines.append(f"start_lambda: {_format_optional_float(summary['start_lambda'])}")
-    lines.append(f"end_lambda: {_format_optional_float(summary['end_lambda'])}")
-    lines.append(f"latest_train_lambda: {_format_optional_float(summary['latest_train_lambda'])}")
-    lines.append(f"latest_validation_lambda: {_format_optional_float(summary['latest_validation_lambda'])}")
-    lines.append(f"nnue2score: {_format_optional_float(summary['nnue2score'])}")
-    lines.append(f"in_scaling: {_format_optional_float(summary['in_scaling'])}")
-    lines.append(f"out_scaling: {_format_optional_float(summary['out_scaling'])}")
-    lines.append(f"filtered: {summary['filtered']}")
-    lines.append(f"wld_filtered: {summary['wld_filtered']}")
-    lines.append(f"random_fen_skipping: {_format_optional_int(summary['random_fen_skipping'])}")
-    lines.append(
-        "network_testing_nodes_per_move: "
-        f"{_format_optional_int(summary['network_testing_nodes_per_move'])}"
-    )
-    lines.append("")
-    lines.append("Generalization")
-    lines.append(f"best_validation_gap: {_format_optional_float(summary['best_validation_gap'])}")
-    lines.append(f"positions_since_best: {_format_optional_int(summary['positions_since_best'])}")
-    lines.append(f"best_is_latest_validation: {summary['best_is_latest_validation']}")
-    lines.append(f"resume_recommendation: {summary['resume_recommendation']}")
-    lines.append(f"train_validation_gap: {_format_optional_float(summary['train_validation_gap'])}")
-    lines.append(f"wdl_gap: {_format_optional_float(summary['wdl_gap'])}")
-    lines.append(f"result_wdl_gap: {_format_optional_float(summary['result_wdl_gap'])}")
-    lines.append("")
-    lines.append("Suggestions")
-    for suggestion in summary["suggestions"]:
-        lines.append(f"- {suggestion}")
+    lines.append(f"resume: {summary['resume_recommendation']}")
     return "\n".join(lines)
 
 
@@ -390,39 +335,29 @@ def generate_run_plots(run: MetricsRun) -> list[Path]:
 
     plots_dir = run.run_dir / "plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
+    for filename in LEGACY_PLOT_FILENAMES:
+        (plots_dir / filename).unlink(missing_ok=True)
     outputs: list[Path] = []
     batch_size = _as_int(_config_value(run, "batch_size"))
 
-    if run.train_records:
-        outputs.append(_plot_train_loss(plt, plots_dir / "train_loss.png", run, batch_size=batch_size))
+    if run.train_records or run.validation_records:
         outputs.append(
-            _plot_learning_rate(
+            _plot_loss_overview(
                 plt,
                 FuncFormatter,
                 MaxNLocator,
-                plots_dir / "lr.png",
-                run.train_records,
-                batch_size=batch_size,
-            )
-        )
-
-    if run.validation_records:
-        outputs.append(
-            _plot_validation_loss(
-                plt,
-                plots_dir / "validation_loss.png",
+                plots_dir / "loss.png",
                 run,
                 batch_size=batch_size,
             )
         )
-
-    if run.train_records and run.validation_records:
+    if run.validation_records:
         outputs.append(
-            _plot_overview(
+            _plot_validation_quality(
                 plt,
                 FuncFormatter,
                 MaxNLocator,
-                plots_dir / "loss_overview.png",
+                plots_dir / "validation_quality.png",
                 run,
                 batch_size=batch_size,
             )
@@ -431,181 +366,39 @@ def generate_run_plots(run: MetricsRun) -> list[Path]:
     return outputs
 
 
-def _plot_train_loss(plt, output_path: Path, run: MetricsRun, *, batch_size: int | None) -> Path:
-    figure, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True, height_ratios=[3, 2])
-    positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.train_records]
-    blended = [_required_metric(record, ("loss",)) for record in run.train_records]
-    wdl_loss = [_required_metric(record, ("wdl_loss",)) for record in run.train_records]
-    teacher_wdl_loss = [_metric_value(record, "teacher_wdl_loss") for record in run.train_records]
-    result_wdl_loss = [_metric_value(record, "result_wdl_loss") for record in run.train_records]
-    smoothed = _moving_average(blended, window=_smoothing_window(len(blended)))
+def _plot_loss_overview(plt, formatter_factory, locator_factory, output_path: Path, run: MetricsRun, *, batch_size: int | None) -> Path:
+    figure, axis = plt.subplots(figsize=(9, 5.5))
+    smoothed_train: list[float] = []
+    validation_positions: list[int] = []
+    validation_loss: list[float] = []
 
-    top_axis, bottom_axis = axes
-    top_axis.plot(positions, blended, label="total loss (raw)", alpha=0.14, linewidth=0.9, color="C0")
-    top_axis.plot(positions, smoothed, label="total loss (smoothed)", linewidth=2.2, color="C1")
-    top_axis.set_title("Train Loss")
-    top_axis.set_ylabel("Total Loss")
-    top_axis.grid(True, alpha=0.3)
-    top_axis.legend(loc="upper right")
-    _set_focus_ylim(top_axis, smoothed)
-
-    bottom_axis.plot(positions, wdl_loss, label="wdl objective loss", linewidth=1.8, color="C3")
-    finite_teacher = _complete_finite_series(teacher_wdl_loss, len(positions))
-    finite_result = _complete_finite_series(result_wdl_loss, len(positions))
-    if finite_teacher:
-        bottom_axis.plot(positions, finite_teacher, label="teacher wdl loss", linewidth=1.5, color="C2")
-    if finite_result:
-        bottom_axis.plot(positions, finite_result, label="result wdl loss", linewidth=1.5, color="C4")
-    bottom_axis.set_ylabel("Component Loss")
-    bottom_axis.grid(True, alpha=0.3)
-    bottom_axis.legend(loc="upper right")
-    _set_focus_ylim(bottom_axis, wdl_loss, finite_teacher, finite_result)
-    _style_positions_axis(bottom_axis)
-    bottom_axis.set_xlabel("Positions Seen (B)")
-    bottom_axis.text(
-        0.01,
-        0.04,
-        "total = WDL objective; raw score and cp-style metrics are reported separately",
-        transform=bottom_axis.transAxes,
-        fontsize=9,
-        alpha=0.75,
-        va="bottom",
-    )
-
-    figure.tight_layout()
-    figure.savefig(output_path)
-    plt.close(figure)
-    return output_path
-
-
-def _plot_validation_loss(plt, output_path: Path, run: MetricsRun, *, batch_size: int | None) -> Path:
-    figure, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True, height_ratios=[3, 2])
-    positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.validation_records]
-    blended = [_required_metric(record, ("validation_loss",)) for record in run.validation_records]
-    wdl_loss = [_required_metric(record, ("validation_wdl_loss",)) for record in run.validation_records]
-    teacher_wdl_loss = [_metric_value(record, "validation_teacher_wdl_loss") for record in run.validation_records]
-    result_wdl_loss = [_metric_value(record, "validation_result_wdl_loss") for record in run.validation_records]
-
-    top_axis, bottom_axis = axes
-    top_axis.plot(positions, blended, marker="o", markersize=4.0, linewidth=2.0, color="C0", label="total loss")
-    top_axis.set_title("Validation Loss")
-    top_axis.set_ylabel("Total Loss")
-    top_axis.grid(True, alpha=0.3)
-    top_axis.legend(loc="upper right")
-    _set_focus_ylim(top_axis, blended)
-
-    bottom_axis.plot(
-        positions,
-        wdl_loss,
-        marker="o",
-        markersize=4.0,
-        linewidth=1.8,
-        color="C3",
-        label="wdl objective loss",
-    )
-    finite_teacher = _complete_finite_series(teacher_wdl_loss, len(positions))
-    finite_result = _complete_finite_series(result_wdl_loss, len(positions))
-    if finite_teacher:
-        bottom_axis.plot(
-            positions,
-            finite_teacher,
+    if run.train_records:
+        train_positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.train_records]
+        train_loss = [_required_metric(record, ("loss",)) for record in run.train_records]
+        smoothed_train = _moving_average(train_loss, window=_smoothing_window(len(train_loss)))
+        axis.plot(
+            train_positions,
+            smoothed_train,
+            label="train loss (smoothed)",
+            linewidth=2.0,
+            color="C0",
+        )
+    if run.validation_records:
+        validation_positions = [
+            _record_axis(record, "positions_seen", batch_size=batch_size)
+            for record in run.validation_records
+        ]
+        validation_loss = [_required_metric(record, ("validation_loss",)) for record in run.validation_records]
+        axis.plot(
+            validation_positions,
+            validation_loss,
+            label="validation loss",
             marker="o",
             markersize=4.0,
-            linewidth=1.5,
-            color="C2",
-            label="teacher wdl loss",
+            linewidth=2.0,
+            color="C3",
         )
-    if finite_result:
-        bottom_axis.plot(
-            positions,
-            finite_result,
-            marker="o",
-            markersize=4.0,
-            linewidth=1.5,
-            color="C4",
-            label="result wdl loss",
-        )
-    bottom_axis.set_ylabel("Component Loss")
-    bottom_axis.grid(True, alpha=0.3)
-    bottom_axis.legend(loc="upper right")
-    _set_focus_ylim(bottom_axis, wdl_loss, finite_teacher, finite_result)
-    _style_positions_axis(bottom_axis)
-    bottom_axis.set_xlabel("Positions Seen (B)")
-    bottom_axis.text(
-        0.01,
-        0.04,
-        "validation also tracks raw score_mae and cp-style cp_mae/cp_corr in metrics.jsonl",
-        transform=bottom_axis.transAxes,
-        fontsize=9,
-        alpha=0.75,
-        va="bottom",
-    )
-
-    figure.tight_layout()
-    figure.savefig(output_path)
-    plt.close(figure)
-    return output_path
-
-
-def _plot_learning_rate(
-    plt,
-    formatter_factory,
-    locator_factory,
-    output_path: Path,
-    records: list[dict[str, object]],
-    *,
-    batch_size: int | None,
-) -> Path:
-    figure, axis = plt.subplots(figsize=(9, 5.5))
-    positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in records]
-    lr_values = [_required_metric(record, ("lr",)) for record in records]
-    positive_values = [value for value in lr_values if value > 0.0]
-    lr_floor = (min(positive_values) / 10.0) if positive_values else 1e-12
-    plotted_values = [value if value > 0.0 else lr_floor for value in lr_values]
-    axis.step(positions, plotted_values, where="post", linewidth=2.0, color="C0", label="learning rate")
-    axis.set_title("Learning Rate")
-    axis.set_xlabel("Positions Seen (B)")
-    axis.set_ylabel("Learning Rate")
-    axis.set_yscale("log")
-    axis.grid(True, alpha=0.3)
-    axis.grid(True, which="minor", alpha=0.15)
-    axis.legend(loc="upper right")
-    axis.xaxis.set_major_formatter(formatter_factory(_positions_billions_formatter))
-    axis.xaxis.set_major_locator(locator_factory(nbins=6))
-    figure.tight_layout()
-    figure.savefig(output_path)
-    plt.close(figure)
-    return output_path
-
-
-def _plot_overview(plt, formatter_factory, locator_factory, output_path: Path, run: MetricsRun, *, batch_size: int | None) -> Path:
-    figure, axis = plt.subplots(figsize=(9, 5.5))
-    train_positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.train_records]
-    train_loss = [_required_metric(record, ("loss",)) for record in run.train_records]
-    validation_positions = [
-        _record_axis(record, "positions_seen", batch_size=batch_size)
-        for record in run.validation_records
-    ]
-    validation_loss = [_required_metric(record, ("validation_loss",)) for record in run.validation_records]
-    smoothed_train = _moving_average(train_loss, window=_smoothing_window(len(train_loss)))
-
-    axis.plot(
-        train_positions,
-        smoothed_train,
-        label="train total (smoothed)",
-        linewidth=2.2,
-        color="C1",
-    )
-    axis.plot(
-        validation_positions,
-        validation_loss,
-        label="validation total",
-        marker="o",
-        markersize=4.0,
-        linewidth=2.0,
-        color="C2",
-    )
-    axis.set_title("Loss Overview")
+    axis.set_title("Loss")
     axis.set_xlabel("Positions Seen (B)")
     axis.set_ylabel("Loss")
     axis.grid(True, alpha=0.3)
@@ -615,7 +408,7 @@ def _plot_overview(plt, formatter_factory, locator_factory, output_path: Path, r
     _set_focus_ylim(axis, smoothed_train, validation_loss)
 
     best_index = _best_validation_index(run, batch_size=batch_size)
-    if best_index is not None:
+    if best_index is not None and validation_positions and validation_loss:
         best_position = validation_positions[best_index]
         best_loss = validation_loss[best_index]
         best_step = int(run.validation_records[best_index].get("global_step", 0))
@@ -630,13 +423,7 @@ def _plot_overview(plt, formatter_factory, locator_factory, output_path: Path, r
             arrowprops={"arrowstyle": "->", "alpha": 0.6},
         )
 
-    metadata = "\n".join(
-        [
-            f"validation epoch size: {_format_optional_int(_validation_epoch_size(run))}",
-            f"validation points: {len(run.validation_records)}",
-            f"best checkpoint step: {_format_optional_int(run.checkpoint_global_step)}",
-        ]
-    )
+    metadata = f"validation points: {len(run.validation_records)}"
     axis.text(
         0.015,
         0.97,
@@ -648,6 +435,59 @@ def _plot_overview(plt, formatter_factory, locator_factory, output_path: Path, r
         bbox={"boxstyle": "round,pad=0.3", "fc": "white", "alpha": 0.85},
     )
 
+    figure.tight_layout()
+    figure.savefig(output_path)
+    plt.close(figure)
+    return output_path
+
+
+def _plot_validation_quality(
+    plt,
+    formatter_factory,
+    locator_factory,
+    output_path: Path,
+    run: MetricsRun,
+    *,
+    batch_size: int | None,
+) -> Path:
+    figure, left_axis = plt.subplots(figsize=(9, 5.5))
+    positions = [_record_axis(record, "positions_seen", batch_size=batch_size) for record in run.validation_records]
+    cp_mae = _complete_finite_series([_metric_value(record, "cp_mae") for record in run.validation_records], len(positions))
+    score_mae = _complete_finite_series([_metric_value(record, "score_mae") for record in run.validation_records], len(positions))
+    cp_corr = _complete_finite_series([_metric_value(record, "cp_corr") for record in run.validation_records], len(positions))
+    wdl_accuracy = _complete_finite_series(
+        [_metric_value(record, "wdl_accuracy") for record in run.validation_records],
+        len(positions),
+    )
+
+    if cp_mae:
+        left_axis.plot(positions, cp_mae, marker="o", linewidth=2.0, color="C0", label="cp_mae")
+        left_axis.set_ylabel("Centipawns")
+        _set_focus_ylim(left_axis, cp_mae)
+    elif score_mae:
+        left_axis.plot(positions, score_mae, marker="o", linewidth=2.0, color="C0", label="score_mae")
+        left_axis.set_ylabel("Score")
+        _set_focus_ylim(left_axis, score_mae)
+    else:
+        left_axis.set_ylabel("Error")
+
+    right_axis = left_axis.twinx()
+    if cp_corr:
+        right_axis.plot(positions, cp_corr, marker="s", linewidth=1.8, color="C2", label="cp_corr")
+    if wdl_accuracy:
+        right_axis.plot(positions, wdl_accuracy, marker="^", linewidth=1.8, color="C4", label="wdl_accuracy")
+    right_axis.set_ylabel("Correlation / Accuracy")
+    right_axis.set_ylim(0.0, 1.0)
+
+    left_axis.set_title("Validation Quality")
+    left_axis.set_xlabel("Positions Seen (B)")
+    left_axis.grid(True, alpha=0.3)
+    left_axis.xaxis.set_major_formatter(formatter_factory(_positions_billions_formatter))
+    left_axis.xaxis.set_major_locator(locator_factory(nbins=6))
+    handles, labels = left_axis.get_legend_handles_labels()
+    right_handles, right_labels = right_axis.get_legend_handles_labels()
+    if handles or right_handles:
+        left_axis.legend(handles + right_handles, labels + right_labels, loc="best")
     figure.tight_layout()
     figure.savefig(output_path)
     plt.close(figure)
@@ -677,13 +517,6 @@ def _complete_finite_series(values: list[float | None], expected_length: int) ->
 
 def _smoothing_window(length: int) -> int:
     return max(5, min(401, length // 50))
-
-
-def _style_positions_axis(axis) -> None:
-    from matplotlib.ticker import FuncFormatter, MaxNLocator
-
-    axis.xaxis.set_major_formatter(FuncFormatter(_positions_billions_formatter))
-    axis.xaxis.set_major_locator(MaxNLocator(nbins=6))
 
 
 def _positions_billions_formatter(value: float, _position: int) -> str:
@@ -802,10 +635,6 @@ def _best_checkpoint_path(run_dir: Path) -> Path | None:
     if stamped_paths:
         return stamped_paths[-1]
     return None
-
-
-def _validation_epoch_size(run: MetricsRun) -> int | None:
-    return _as_int(_config_value(run, "epoch_size"))
 
 
 def _best_validation_index(run: MetricsRun, *, batch_size: int | None) -> int | None:
@@ -964,71 +793,6 @@ def _resume_recommendation(
     if positions_since_best <= 0 or gap <= 5e-4:
         return "continue-latest"
     return "export-best"
-
-
-def _build_suggestions(summary: dict[str, object]) -> list[str]:
-    suggestions: list[str] = []
-    material_sanity = summary.get("latest_material_sanity")
-    starting_position_near_zero = (
-        material_sanity.get("starting_position_near_zero")
-        if isinstance(material_sanity, dict)
-        else None
-    )
-    if starting_position_near_zero is False:
-        suggestions.append(
-            "Starting-position sanity is far from zero; stop this run and restart from the previous checkpoint with a filtered/lower-LR fine-tune config."
-        )
-    elif summary["resume_recommendation"] == "continue-latest":
-        suggestions.append(
-            "Validation is still near its best point; resume from the latest checkpoint and extend max_epochs."
-        )
-    elif summary["resume_recommendation"] == "export-best":
-        suggestions.append("Best validation is materially earlier than the end; export best.pt and start the next experiment from there.")
-    else:
-        suggestions.append("There are too few validation points to judge continuation confidently yet.")
-
-    start_lambda = summary["start_lambda"]
-    end_lambda = summary["end_lambda"]
-    if (
-        start_lambda is not None
-        and end_lambda is not None
-        and abs(float(start_lambda) - float(end_lambda)) > 1e-12
-    ):
-        suggestions.append(
-            "Total loss uses a moving lambda, so compare score_mae and teacher_wdl_loss before treating an upward total-loss curve as divergence."
-        )
-
-    cp_corr = summary["latest_validation_cp_corr"]
-    if cp_corr is not None and cp_corr < 0.4:
-        suggestions.append("CP correlation is still weak; raw outputs likely are not yet stable enough for pruning thresholds.")
-    material_ok = summary["latest_material_ordering_ok"]
-    material_margins_ok = (
-        material_sanity.get("material_margins_ok")
-        if isinstance(material_sanity, dict)
-        else None
-    )
-    if material_ok is False:
-        suggestions.append("Material ladder sanity is out of order; revisit data exposure, WDL calibration, or loss weighting before shipping.")
-    elif material_margins_ok is False:
-        suggestions.append(
-            "Material ladder is barely ordered; prefer best_deployable.pt when available, or continue/retrain until the material gaps clear the deployable margin."
-        )
-    in_scaling = summary["in_scaling"]
-    out_scaling = summary["out_scaling"]
-    if (
-        (in_scaling is not None and in_scaling >= 2000.0)
-        or (out_scaling is not None and out_scaling >= 2000.0)
-    ):
-        suggestions.append(
-            "WDL scaling is very flat for a filtered stream; inspect with the same filters as training and prefer a Stockfish-like scale near 400-600 unless the filtered data is still saturated."
-        )
-    if summary["scheduler_exhausted"]:
-        suggestions.append("Learning rate is effectively exhausted; if validation is still improving, continue by increasing the position budget.")
-    if summary["positions_seen"] is not None and summary["positions_seen"] < 500_000_000:
-        suggestions.append("The position budget is still modest for a sparse NNUE feature transformer; the run may simply need more data exposure.")
-    if not suggestions:
-        suggestions.append("No obvious red flags; compare this run against engine testing and nearby hyperparameter variants.")
-    return suggestions
 
 
 def _as_int(value: object | None) -> int | None:

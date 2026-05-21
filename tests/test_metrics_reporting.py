@@ -109,7 +109,7 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertEqual(summary["latest_epoch_index"], 0)
             self.assertIsNone(summary["latest_validation_positions"])
             self.assertEqual(summary["resume_recommendation"], "insufficient-validation")
-            self.assertIn("configured_total_positions", render_summary_text(summary))
+            self.assertIn("progress: 4096/10000", render_summary_text(summary))
 
     def test_validation_summary_prefers_best_validation_positions_and_material_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -201,10 +201,10 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertAlmostEqual(summary["latest_validation_wdl_accuracy"], 0.62)
             self.assertTrue(summary["latest_material_ordering_ok"])
             text = render_summary_text(summary)
-            self.assertIn("best_validation_positions: 4096", text)
-            self.assertIn("best_checkpoint_metric: validation_score_mae=80.000000", text)
-            self.assertIn("epoch_size: 4096", text)
-            self.assertIn("Suggestions", text)
+            self.assertIn("best: loss=0.300000 at=4096", text)
+            self.assertIn("best_metric: validation_score_mae=80.000000", text)
+            self.assertIn("budget: batch=1024 epoch_size=4096", text)
+            self.assertNotIn("Suggestions", text)
 
     def test_starting_position_sanity_failure_overrides_continue_suggestion(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -269,8 +269,8 @@ class MetricsSummaryTests(unittest.TestCase):
                 summary = summarize_run(load_metrics_run(run_dir))
 
             self.assertEqual(summary["resume_recommendation"], "continue-latest")
-            self.assertIn("Starting-position sanity is far from zero", summary["suggestions"][0])
-            self.assertFalse(any("resume from the latest" in suggestion for suggestion in summary["suggestions"]))
+            self.assertNotIn("suggestions", summary)
+            self.assertFalse(summary["latest_material_ordering_ok"])
 
     def test_moving_lambda_adds_loss_caveat(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -323,9 +323,9 @@ class MetricsSummaryTests(unittest.TestCase):
                 summary = summarize_run(load_metrics_run(run_dir))
                 text = render_summary_text(summary)
 
-            self.assertIn("moving lambda", " ".join(summary["suggestions"]))
-            self.assertIn("end_lambda: 0.500000", text)
-            self.assertIn("latest_validation_lambda: 0.740000", text)
+            self.assertNotIn("suggestions", summary)
+            self.assertIn("lambda=0.750000->0.500000", text)
+            self.assertAlmostEqual(summary["latest_validation_lambda"], 0.74)
 
 
 @unittest.skipUnless(matplotlib is not None, "matplotlib is required for metrics plotting tests")
@@ -389,12 +389,13 @@ class MetricsPlotTests(unittest.TestCase):
                 },
             ):
                 run = load_metrics_run(run_dir)
+            old_plot = run_dir / "plots" / "train_loss.png"
+            old_plot.parent.mkdir(parents=True, exist_ok=True)
+            old_plot.write_bytes(b"stale")
             outputs = generate_run_plots(run)
             names = {path.name for path in outputs}
-            self.assertIn("train_loss.png", names)
-            self.assertIn("validation_loss.png", names)
-            self.assertIn("lr.png", names)
-            self.assertIn("loss_overview.png", names)
+            self.assertEqual(names, {"loss.png", "validation_quality.png"})
+            self.assertFalse(old_plot.exists())
             for output in outputs:
                 self.assertTrue(output.exists())
 

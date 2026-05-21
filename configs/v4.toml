@@ -8,21 +8,21 @@ datasets = [
 validation_datasets = [
   'C:\Users\Felix\OneDrive\Documents\thrawn-nnue\data\nodes5000pv2_UHO.binpack',
 ]
-validation_size = 1048500
+validation_size = 1000000
 check_val_every_n_epoch = 1
 
 accelerator = "cuda"
 num_workers = 4
 threads = 2
-batch_size = 1024
+batch_size = 16384
 pin_memory = true
 data_loader_queue_size = 8
 tf32 = true
 fused_optimizer = true
 seed = 42
 
-max_epochs = 10
-epoch_size = 1048500
+max_epochs = 200
+epoch_size = 100000000
 network_save_period = 1
 save_last_network = true
 console_mode = "progress"
@@ -48,14 +48,13 @@ amp = true
 
 nnue2score = 600.0
 start_lambda = 1.0
-end_lambda = 0.75
+end_lambda = 1.0
 in_offset = 270.0
 in_scaling = 340.0
 out_offset = 270.0
 out_scaling = 380.0
 pow_exp = 2.5
 
-network_testing_nodes_per_move = 1000
 export_ft_scale = 255.0
 export_dense_scale = 64.0
-export_description = "thrawn HalfKAv2_hm 1024x2 -> 31+1 -> 32 -> 1 nodes5000pv2 UHO 10ep lambda1.0-0.75"
+export_description = "thrawn HalfKAv2_hm 1024x2 -> 31+1 -> 32 -> 1 nodes5000pv2 UHO 400ep lambda1.0-0.75"

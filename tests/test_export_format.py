@@ -307,12 +307,14 @@ class VerifyExportTests(unittest.TestCase):
             )
             export_checkpoint(checkpoint_path, nnue_path)
             report = verify_export(checkpoint_path, nnue_path)
+            sanity_report = verify_export(checkpoint_path, nnue_path, include_sanity=True)
             diagnostics = _export_quantization_diagnostics(load_export(nnue_path))
 
-        self.assertIn("sanity_positions", report)
-        self.assertEqual(len(report["sanity_positions"]), 6)
-        self.assertIn("material_ordering_ok", report)
-        self.assertIn("starting_position_near_zero", report)
+        self.assertNotIn("sanity_positions", report)
+        self.assertIn("sanity_positions", sanity_report)
+        self.assertEqual(len(sanity_report["sanity_positions"]), 6)
+        self.assertIn("material_ordering_ok", sanity_report)
+        self.assertIn("starting_position_near_zero", sanity_report)
         self.assertIn("export_fc0_scale", report)
         self.assertIn("fc0_weight", diagnostics)
 

@@ -65,6 +65,75 @@ class CliTests(unittest.TestCase):
         )
         print_mock.assert_called_once_with("out.pt")
 
+    def test_export_command_can_verify_after_writing_nnue(self) -> None:
+        argv = sys.argv
+        fen = "8/8/8/8/8/8/5K2/6k1 w - - 0 1"
+        report = {"positions": 1, "max_abs_error": 0.0, "mean_abs_error": 0.0}
+        try:
+            sys.argv = [
+                "thrawn-nnue",
+                "export",
+                "--checkpoint",
+                "checkpoint.pt",
+                "--out",
+                "model.nnue",
+                "--verify",
+                "--sanity",
+                "--fen",
+                fen,
+            ]
+            with (
+                patch("thrawn_nnue.export.export_checkpoint", return_value=Path("model.nnue")) as export_checkpoint,
+                patch("thrawn_nnue.export.verify_export", return_value=report) as verify_export,
+                patch("thrawn_nnue.export.render_verify_report", return_value="verify text") as render_verify_report,
+                patch("builtins.print") as print_mock,
+            ):
+                main()
+        finally:
+            sys.argv = argv
+
+        export_checkpoint.assert_called_once_with("checkpoint.pt", "model.nnue")
+        verify_export.assert_called_once_with(
+            "checkpoint.pt",
+            Path("model.nnue"),
+            [fen],
+            include_sanity=True,
+        )
+        render_verify_report.assert_called_once_with(report)
+        print_mock.assert_any_call("exported: model.nnue")
+        print_mock.assert_any_call("verify text")
+
+    def test_verify_export_command_prints_concise_report_by_default(self) -> None:
+        argv = sys.argv
+        report = {"positions": 3, "max_abs_error": 0.0, "mean_abs_error": 0.0}
+        try:
+            sys.argv = [
+                "thrawn-nnue",
+                "verify-export",
+                "--checkpoint",
+                "checkpoint.pt",
+                "--nnue",
+                "model.nnue",
+                "--sanity",
+            ]
+            with (
+                patch("thrawn_nnue.export.verify_export", return_value=report) as verify_export,
+                patch("thrawn_nnue.export.render_verify_report", return_value="verify text") as render_verify_report,
+                patch("builtins.print") as print_mock,
+            ):
+                main()
+        finally:
+            sys.argv = argv
+
+        verify_export.assert_called_once_with(
+            "checkpoint.pt",
+            "model.nnue",
+            None,
+            include_sanity=True,
+        )
+        render_verify_report.assert_called_once_with(report)
+        print_mock.assert_called_once_with("verify text")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -299,7 +299,6 @@ def _run_training_loop(state: TrainState) -> None:
             log_every_n_steps=log_every_n_steps,
             nnue2score=state.config.nnue2score,
             data_loader_queue_size=state.config.data_loader_queue_size,
-            network_testing_nodes_per_move=state.config.network_testing_nodes_per_move,
         )
     )
 
@@ -387,7 +386,6 @@ def _run_training_loop(state: TrainState) -> None:
                                 "random_fen_skipping": state.config.random_fen_skipping,
                                 "max_epochs": state.config.max_epochs,
                                 "epoch_size": state.config.epoch_size,
-                                "network_testing_nodes_per_move": state.config.network_testing_nodes_per_move,
                                 "lr": current_lr,
                                 "step_seconds": step_seconds,
                                 "train_positions_per_second": train_positions_per_second,
@@ -802,7 +800,6 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         "random_fen_skipping": state.config.random_fen_skipping,
         "max_epochs": state.config.max_epochs,
         "epoch_size": state.config.epoch_size,
-        "network_testing_nodes_per_move": state.config.network_testing_nodes_per_move,
     }
 
 
