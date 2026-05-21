@@ -329,9 +329,9 @@ class VerifyExportTests(unittest.TestCase):
                 scaler=scaler,
                 config={
                     "run_name": "test",
-                    "train_datasets": ["/tmp/train.binpack"],
-                    "total_train_positions": 1000,
-                    "epoch_positions": 100,
+                    "datasets": ["/tmp/train.binpack"],
+                    "max_epochs": 10,
+                    "epoch_size": 100,
                     "ft_size": 4,
                     "l1_size": 2,
                     "l2_size": 2,

@@ -6,66 +6,90 @@ from pathlib import Path
 from typing import Any
 import tomllib
 
+from .features import canonical_feature_name, feature_shape
+
 
 @dataclass(slots=True)
 class TrainConfig:
     run_name: str = "default"
-    output_dir: str = "runs/default"
-    train_datasets: list[str] = field(default_factory=list)
+    default_root_dir: str = "runs/default"
+    datasets: list[str] = field(default_factory=list)
     validation_datasets: list[str] = field(default_factory=list)
-    device: str = "auto"
-    num_loader_threads: int = 2
-    prefetch_batches: int = 0
-    cuda_pin_memory: bool = True
-    cuda_tf32: bool = True
-    cuda_fused_optimizer: bool = True
-    batch_size: int = 256
-    total_train_positions: int = 0
-    epoch_positions: int = 0
-    validation_positions: int = 0
-    validation_split_fraction: float = 0.0
-    max_abs_score_cp: float = 0.0
-    skip_tactical_positions: bool = False
-    skip_wdl_score_mismatch: bool = False
-    random_fen_skipping: int = 0
-    checkpoint_every: int = 250
-    log_every: int = 25
+    validation_size: int = 0
+    check_val_every_n_epoch: int = 1
+
+    accelerator: str = "auto"
+    num_workers: int = 2
+    batch_size: int = 16_384
+    pin_memory: bool = True
+    data_loader_queue_size: int = 8
+    threads: int = -1
+    tf32: bool = True
+    fused_optimizer: bool = True
+    seed: int = 42
+
+    max_epochs: int = 800
+    epoch_size: int = 100_000_000
+    network_save_period: int = 20
+    save_last_network: bool = True
     console_mode: str = "progress"
-    learning_rate: float = 1e-3
-    weight_decay: float = 1e-5
-    clip_grad_norm: float = 1.0
-    amp: bool = True
-    feature_set: str = "halfkp"
-    num_features: int = 40960
+
+    features: str = "HalfKP^"
+    num_features: int = 40_960
     num_factor_features: int = 640
     max_active_features: int = 30
     ft_size: int = 1024
     l1_size: int = 256
     l2_size: int = 64
     output_perspective: str = "stm"
+
+    filtered: bool = True
+    wld_filtered: bool = True
+    random_fen_skipping: int = 0
+
+    optimizer_name: str = "adamw"
+    lr: float = 8.75e-4
+    gamma: float = 0.992
+    weight_decay: float = 0.0
+    clip_grad_norm: float = 10.0
+    amp: bool = True
+
     nnue2score: float = 600.0
-    wdl_lambda: float = 1.0
-    wdl_lambda_end: float | None = None
-    wdl_in_offset: float = 270.0
-    wdl_out_offset: float = 270.0
-    wdl_in_scaling: float = 340.0
-    wdl_out_scaling: float = 380.0
-    wdl_loss_power: float = 2.5
-    lr_gamma: float = 0.992
+    lambda_: float = 1.0
+    start_lambda: float | None = None
+    end_lambda: float | None = None
+    in_offset: float = 270.0
+    in_scaling: float = 340.0
+    out_offset: float = 270.0
+    out_scaling: float = 380.0
+    pow_exp: float = 2.5
+    qp_asymmetry: float = 0.0
+    w1: float = 0.0
+    w2: float = 0.5
+
+    network_testing_nodes_per_move: int = 0
     export_ft_scale: float = 127.0
     export_dense_scale: float = 64.0
     export_description: str = "thrawn halfkp nnue"
 
-    def resolved_output_dir(self, root: Path | None = None) -> Path:
+    @property
+    def total_positions(self) -> int:
+        return self.max_epochs * self.epoch_size
+
+    @property
+    def num_batches_per_epoch(self) -> int:
+        return max(1, (self.epoch_size + self.batch_size - 1) // self.batch_size)
+
+    def resolved_root_dir(self, root: Path | None = None) -> Path:
         base = root or Path.cwd()
-        return (base / self.output_dir).resolve()
+        return (base / self.default_root_dir).resolve()
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], *, base_dir: Path | None = None) -> "TrainConfig":
-        data = _normalize_legacy_config_keys(data)
+        data = _normalize_config_keys(data)
         known = {field.name for field in cls.__dataclass_fields__.values()}
         extras = sorted(set(data) - known)
         if extras:
@@ -73,9 +97,9 @@ class TrainConfig:
 
         cfg = cls(**data)
         if base_dir is not None:
-            cfg.train_datasets = _resolve_dataset_list(base_dir, cfg.train_datasets)
+            cfg.datasets = _resolve_dataset_list(base_dir, cfg.datasets)
             cfg.validation_datasets = _resolve_dataset_list(base_dir, cfg.validation_datasets)
-            cfg.output_dir = str((base_dir / cfg.output_dir).resolve())
+            cfg.default_root_dir = str((base_dir / cfg.default_root_dir).resolve())
         cfg.validate()
         return cfg
 
@@ -87,79 +111,87 @@ class TrainConfig:
         return cls.from_dict(raw, base_dir=config_path.parent)
 
     def validate(self) -> None:
-        self.feature_set = _canonical_feature_set(self.feature_set)
-        if self.num_features != 40960:
-            raise ValueError("HalfKP requires num_features=40960")
-        if self.num_factor_features != 640:
-            raise ValueError("HalfKP P factorization requires num_factor_features=640")
-        if self.max_active_features != 30:
-            raise ValueError("Chess HalfKP expects max_active_features=30")
+        self.features = canonical_feature_name(self.features)
+        shape = feature_shape(self.features)
+        self.num_features = shape["num_features"]
+        self.num_factor_features = shape["num_factor_features"]
+        self.max_active_features = shape["max_active_features"]
         if self.output_perspective != "stm":
             raise ValueError("Only output_perspective='stm' is supported")
-        if self.nnue2score <= 0.0:
-            raise ValueError("nnue2score must be positive")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
-        if self.total_train_positions <= 0:
-            raise ValueError("total_train_positions must be positive")
-        if self.epoch_positions <= 0:
-            raise ValueError("epoch_positions must be positive")
-        if self.validation_positions < 0:
-            raise ValueError("validation_positions must be >= 0")
-        if self.validation_split_fraction < 0.0 or self.validation_split_fraction >= 1.0:
-            raise ValueError("validation_split_fraction must be >= 0 and < 1")
-        if self.max_abs_score_cp < 0.0:
-            raise ValueError("max_abs_score_cp must be >= 0")
+        if self.max_epochs <= 0:
+            raise ValueError("max_epochs must be positive")
+        if self.epoch_size <= 0:
+            raise ValueError("epoch_size must be positive")
+        if self.validation_size < 0:
+            raise ValueError("validation_size must be >= 0")
+        if self.check_val_every_n_epoch < 1:
+            raise ValueError("check_val_every_n_epoch must be >= 1")
+        if self.network_save_period < 0:
+            raise ValueError("network_save_period must be >= 0")
+        if self.num_workers <= 0:
+            raise ValueError("num_workers must be positive")
+        if self.data_loader_queue_size < 0:
+            raise ValueError("data_loader_queue_size must be >= 0")
+        if self.threads < -1:
+            raise ValueError("threads must be -1 or non-negative")
         if self.random_fen_skipping < 0:
             raise ValueError("random_fen_skipping must be >= 0")
-        if self.wdl_lambda < 0.0 or self.wdl_lambda > 1.0:
-            raise ValueError("wdl_lambda must be between 0 and 1")
-        if self.wdl_lambda_end is not None and (self.wdl_lambda_end < 0.0 or self.wdl_lambda_end > 1.0):
-            raise ValueError("wdl_lambda_end must be between 0 and 1")
-        if self.wdl_in_scaling <= 0.0 or self.wdl_out_scaling <= 0.0:
-            raise ValueError("wdl scaling values must be positive")
-        if self.wdl_loss_power <= 0.0:
-            raise ValueError("wdl_loss_power must be positive")
-        if self.lr_gamma <= 0.0 or self.lr_gamma > 1.0:
-            raise ValueError("lr_gamma must be > 0 and <= 1")
-        if self.export_ft_scale <= 0.0 or self.export_dense_scale <= 0.0:
-            raise ValueError("export scales must be > 0")
-        if self.num_loader_threads <= 0:
-            raise ValueError("num_loader_threads must be positive")
-        if self.prefetch_batches < 0:
-            raise ValueError("prefetch_batches must be >= 0")
-        if self.checkpoint_every <= 0:
-            raise ValueError("checkpoint_every must be positive")
-        if self.log_every <= 0:
-            raise ValueError("log_every must be positive")
-        if self.learning_rate <= 0.0:
-            raise ValueError("learning_rate must be positive")
+        if self.network_testing_nodes_per_move < 0:
+            raise ValueError("network_testing_nodes_per_move must be >= 0")
+        if self.optimizer_name != "adamw":
+            raise ValueError("Only optimizer_name='adamw' is supported by this trainer")
+        if self.lr <= 0.0:
+            raise ValueError("lr must be positive")
+        if self.gamma <= 0.0 or self.gamma > 1.0:
+            raise ValueError("gamma must be > 0 and <= 1")
         if self.weight_decay < 0.0:
             raise ValueError("weight_decay must be >= 0")
         if self.clip_grad_norm <= 0.0:
             raise ValueError("clip_grad_norm must be positive")
         if self.ft_size <= 0 or self.l1_size <= 0 or self.l2_size <= 0:
             raise ValueError("network sizes must be positive")
-        if self.device not in {"auto", "cuda", "mps", "cpu"}:
-            raise ValueError("device must be one of: auto, cuda, mps, cpu")
+        if self.accelerator not in {"auto", "cuda", "mps", "cpu"}:
+            raise ValueError("accelerator must be one of: auto, cuda, mps, cpu")
         if self.console_mode not in {"progress", "text"}:
             raise ValueError("console_mode must be one of: progress, text")
-
-        overlap = _dataset_overlap(self.train_datasets, self.validation_datasets)
-        if overlap and self.validation_split_fraction <= 0.0:
-            overlap_list = ", ".join(overlap)
-            raise ValueError(
-                "train_datasets and validation_datasets overlap without validation_split_fraction: "
-                f"{overlap_list}"
-            )
+        if self.nnue2score <= 0.0:
+            raise ValueError("nnue2score must be positive")
+        if self.start_lambda is None and self.end_lambda is None:
+            self.start_lambda = self.lambda_
+            self.end_lambda = self.lambda_
+        elif self.start_lambda is None or self.end_lambda is None:
+            raise ValueError("Either both or none of start_lambda and end_lambda must be specified")
+        for name, value in (
+            ("lambda", self.lambda_),
+            ("start_lambda", self.start_lambda),
+            ("end_lambda", self.end_lambda),
+        ):
+            if value is None or value < 0.0 or value > 1.0:
+                raise ValueError(f"{name} must be between 0 and 1")
+        if self.in_scaling <= 0.0 or self.out_scaling <= 0.0:
+            raise ValueError("WDL scaling values must be positive")
+        if self.pow_exp <= 0.0:
+            raise ValueError("pow_exp must be positive")
+        if self.qp_asymmetry < 0.0:
+            raise ValueError("qp_asymmetry must be >= 0")
+        if self.export_ft_scale <= 0.0 or self.export_dense_scale <= 0.0:
+            raise ValueError("export scales must be > 0")
 
 
 def load_config(path: str | Path) -> TrainConfig:
     return TrainConfig.from_toml(path)
 
 
-def _normalize_legacy_config_keys(data: dict[str, Any]) -> dict[str, Any]:
-    return dict(data)
+def _normalize_config_keys(data: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(data)
+    if "lambda" in normalized:
+        value = normalized.pop("lambda")
+        if "lambda_" in normalized and normalized["lambda_"] != value:
+            raise ValueError("Conflicting config keys: lambda and lambda_")
+        normalized["lambda_"] = value
+    return normalized
 
 
 def _resolve_dataset_list(base_dir: Path, values: list[str]) -> list[str]:
@@ -197,18 +229,3 @@ def _expand_dataset_value(base_dir: Path, value: str) -> list[str]:
 def _looks_like_glob(value: str) -> bool:
     return any(char in value for char in "*?[")
 
-
-def _canonical_feature_set(value: str) -> str:
-    if value == "halfkp":
-        return "halfkp"
-    raise ValueError("Only feature_set='halfkp' is supported")
-
-
-def _dataset_overlap(train_datasets: list[str], validation_datasets: list[str]) -> list[str]:
-    train_paths = _resolved_dataset_path_set(train_datasets)
-    validation_paths = _resolved_dataset_path_set(validation_datasets)
-    return sorted(train_paths & validation_paths)
-
-
-def _resolved_dataset_path_set(values: list[str]) -> set[str]:
-    return {str(Path(value).resolve()) for value in values}

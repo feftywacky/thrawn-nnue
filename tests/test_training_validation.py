@@ -76,12 +76,15 @@ class ValidationTrainingTests(unittest.TestCase):
             prediction,
             target,
             result,
-            wdl_eval_weight=0.9,
-            wdl_in_offset=270.0,
-            wdl_out_offset=270.0,
-            wdl_in_scaling=4000.0,
-            wdl_out_scaling=4000.0,
-            wdl_loss_power=2.5,
+            lambda_weight=0.9,
+            in_offset=270.0,
+            out_offset=270.0,
+            in_scaling=4000.0,
+            out_scaling=4000.0,
+            pow_exp=2.5,
+            qp_asymmetry=0.0,
+            w1=0.0,
+            w2=0.5,
             torch=torch,
         )
 
@@ -111,9 +114,9 @@ class ValidationTrainingTests(unittest.TestCase):
         model = _Model()
         config = TrainConfig.from_dict(
             {
-                "train_datasets": ["/tmp/train.binpack"],
-                "total_train_positions": 10_000,
-                "epoch_positions": 1_000,
+                "datasets": ["/tmp/train.binpack"],
+                "max_epochs": 10,
+                "epoch_size": 1_000,
                 "export_dense_scale": 64.0,
             }
         )
@@ -126,18 +129,18 @@ class ValidationTrainingTests(unittest.TestCase):
         self.assertLessEqual(float(model.output.weight.abs().max()), float(expected_limit))
 
     def test_create_scheduler_supports_stockfish_exponential_decay(self) -> None:
-        learning_rate = 0.000875
+        base_lr = 0.000875
         optimizer = torch.optim.AdamW(
             [torch.nn.Parameter(torch.tensor([1.0], dtype=torch.float32))],
-            lr=learning_rate,
+            lr=base_lr,
         )
         config = TrainConfig.from_dict(
             {
-                "train_datasets": ["/tmp/train.binpack"],
-                "total_train_positions": 10_000,
-                "epoch_positions": 1_000,
-                "learning_rate": learning_rate,
-                "lr_gamma": 0.992,
+                "datasets": ["/tmp/train.binpack"],
+                "max_epochs": 10,
+                "epoch_size": 1_000,
+                "lr": base_lr,
+                "gamma": 0.992,
             }
         )
 
@@ -152,11 +155,11 @@ class ValidationTrainingTests(unittest.TestCase):
         )
         config = TrainConfig.from_dict(
             {
-                "train_datasets": ["/tmp/train.binpack"],
-                "total_train_positions": 10_000,
-                "epoch_positions": 1_000,
-                "learning_rate": 0.000875,
-                "lr_gamma": 0.992,
+                "datasets": ["/tmp/train.binpack"],
+                "max_epochs": 10,
+                "epoch_size": 1_000,
+                "lr": 0.000875,
+                "gamma": 0.992,
             }
         )
         scheduler = _create_scheduler(config, optimizer, torch)
@@ -172,18 +175,18 @@ class ValidationTrainingTests(unittest.TestCase):
         self.assertAlmostEqual(optimizer.param_groups[0]["lr"], 0.000875)
 
     def test_epoch_scheduler_steps_once_on_single_boundary(self) -> None:
-        learning_rate = 0.000875
+        base_lr = 0.000875
         optimizer = torch.optim.AdamW(
             [torch.nn.Parameter(torch.tensor([1.0], dtype=torch.float32))],
-            lr=learning_rate,
+            lr=base_lr,
         )
         config = TrainConfig.from_dict(
             {
-                "train_datasets": ["/tmp/train.binpack"],
-                "total_train_positions": 10_000,
-                "epoch_positions": 1_000,
-                "learning_rate": learning_rate,
-                "lr_gamma": 0.992,
+                "datasets": ["/tmp/train.binpack"],
+                "max_epochs": 10,
+                "epoch_size": 1_000,
+                "lr": base_lr,
+                "gamma": 0.992,
             }
         )
         scheduler = _create_scheduler(config, optimizer, torch)
@@ -196,22 +199,22 @@ class ValidationTrainingTests(unittest.TestCase):
             positions_after_step=1_100,
         )
 
-        expected = self._exponential_epoch_lr(learning_rate, 0.992, epoch_step=1)
+        expected = self._exponential_epoch_lr(base_lr, 0.992, epoch_step=1)
         self.assertAlmostEqual(optimizer.param_groups[0]["lr"], expected)
 
     def test_epoch_scheduler_steps_multiple_times_when_batch_crosses_multiple_epochs(self) -> None:
-        learning_rate = 0.000875
+        base_lr = 0.000875
         optimizer = torch.optim.AdamW(
             [torch.nn.Parameter(torch.tensor([1.0], dtype=torch.float32))],
-            lr=learning_rate,
+            lr=base_lr,
         )
         config = TrainConfig.from_dict(
             {
-                "train_datasets": ["/tmp/train.binpack"],
-                "total_train_positions": 10_000,
-                "epoch_positions": 1_000,
-                "learning_rate": learning_rate,
-                "lr_gamma": 0.992,
+                "datasets": ["/tmp/train.binpack"],
+                "max_epochs": 10,
+                "epoch_size": 1_000,
+                "lr": base_lr,
+                "gamma": 0.992,
             }
         )
         scheduler = _create_scheduler(config, optimizer, torch)
@@ -224,7 +227,7 @@ class ValidationTrainingTests(unittest.TestCase):
             positions_after_step=3_100,
         )
 
-        expected = self._exponential_epoch_lr(learning_rate, 0.992, epoch_step=3)
+        expected = self._exponential_epoch_lr(base_lr, 0.992, epoch_step=3)
         self.assertAlmostEqual(optimizer.param_groups[0]["lr"], expected)
 
     def test_prefetched_batches_match_synchronous_order(self) -> None:
@@ -235,7 +238,7 @@ class ValidationTrainingTests(unittest.TestCase):
             sync_stream,
             batch_size=2,
             total_positions=None,
-            prefetch_batches=0,
+            queue_size=0,
             pin_memory=False,
             torch=torch,
         ) as sync_source:
@@ -246,7 +249,7 @@ class ValidationTrainingTests(unittest.TestCase):
             prefetched_stream,
             batch_size=2,
             total_positions=None,
-            prefetch_batches=2,
+            queue_size=2,
             pin_memory=False,
             torch=torch,
         ) as prefetched_source:
@@ -261,7 +264,7 @@ class ValidationTrainingTests(unittest.TestCase):
             stream,
             batch_size=2,
             total_positions=None,
-            prefetch_batches=2,
+            queue_size=2,
             pin_memory=False,
             torch=torch,
         ) as source:
@@ -280,13 +283,18 @@ class ValidationTrainingTests(unittest.TestCase):
 
             config = TrainConfig.from_dict(
                 {
-                    "train_datasets": [str(train_path)],
+                    "datasets": [str(train_path)],
                     "validation_datasets": [str(valid_path)],
-                    "validation_positions": 2,
-                    "total_train_positions": 10_000,
-                    "epoch_positions": 1_000,
-                    "output_dir": str(tmp / "run"),
-                    "device": "cpu",
+                    "validation_size": 2,
+                    "max_epochs": 10,
+                    "epoch_size": 1_000,
+                    "default_root_dir": str(tmp / "run"),
+                    "accelerator": "cpu",
+                    "filtered": False,
+                    "wld_filtered": False,
+                    "ft_size": 4,
+                    "l1_size": 2,
+                    "l2_size": 2,
                 }
             )
             state = _create_state(config)
@@ -320,24 +328,28 @@ class ValidationTrainingTests(unittest.TestCase):
             config = TrainConfig.from_dict(
                 {
                     "run_name": "tiny",
-                    "train_datasets": [str(train_path)],
+                    "datasets": [str(train_path)],
                     "validation_datasets": [str(valid_path)],
-                    "total_train_positions": 4,
-                    "epoch_positions": 2,
-                    "validation_positions": 2,
+                    "max_epochs": 2,
+                    "epoch_size": 2,
+                    "validation_size": 2,
                     "batch_size": 2,
-                    "checkpoint_every": 1,
-                    "log_every": 1,
-                    "output_dir": str(tmp / "run"),
-                    "device": "cpu",
+                    "network_save_period": 1,
+                    "default_root_dir": str(tmp / "run"),
+                    "accelerator": "cpu",
                     "amp": False,
+                    "filtered": False,
+                    "wld_filtered": False,
+                    "ft_size": 4,
+                    "l1_size": 2,
+                    "l2_size": 2,
                 }
             )
 
             checkpoint_path = train_from_config(config, console_mode="text")
 
             self.assertTrue(checkpoint_path.exists())
-            metrics_path = Path(config.output_dir) / "metrics.jsonl"
+            metrics_path = Path(config.default_root_dir) / "metrics.jsonl"
             records = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
             train_records = [record for record in records if record["event"] == "train"]
             validation_records = [record for record in records if record["event"] == "validation"]

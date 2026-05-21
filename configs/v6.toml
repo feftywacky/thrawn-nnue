@@ -1,29 +1,29 @@
-run_name = "v4"
-default_root_dir = "runs/v4"
+run_name = "v6"
+default_root_dir = "runs/v6"
 
 datasets = [
-  'C:\Users\Felix\OneDrive\Documents\thrawn-nnue\data\nodes5000pv2_UHO.binpack',
+  'C:\Users\Felix\OneDrive\Documents\thrawn-nnue\data\test80-2023-01-jan-16tb7p.v6-sk20.min.binpack',
 ]
 
 validation_datasets = [
-  'C:\Users\Felix\OneDrive\Documents\thrawn-nnue\data\nodes5000pv2_UHO.binpack',
+  'C:\Users\Felix\OneDrive\Documents\thrawn-nnue\data\test80-2023-01-jan-16tb7p.v6-sk20.min.binpack',
 ]
-validation_size = 1048500
+validation_size = 1000000
 check_val_every_n_epoch = 1
 
 accelerator = "cuda"
 num_workers = 4
 threads = 2
-batch_size = 1024
+batch_size = 16384
 pin_memory = true
 data_loader_queue_size = 8
 tf32 = true
 fused_optimizer = true
 seed = 42
 
-max_epochs = 10
-epoch_size = 1048500
-network_save_period = 1
+max_epochs = 20
+epoch_size = 100000000
+network_save_period = 10
 save_last_network = true
 console_mode = "progress"
 
@@ -40,8 +40,8 @@ wld_filtered = true
 random_fen_skipping = 3
 
 optimizer_name = "adamw"
-lr = 0.000875
-gamma = 0.992
+lr = 0.00005
+gamma = 0.997
 weight_decay = 0.0
 clip_grad_norm = 10.0
 amp = true
@@ -55,7 +55,7 @@ out_offset = 270.0
 out_scaling = 380.0
 pow_exp = 2.5
 
-network_testing_nodes_per_move = 1000
+network_testing_nodes_per_move = 20000
 export_ft_scale = 127.0
 export_dense_scale = 64.0
-export_description = "thrawn halfka v2 hm nnue stockfish nodes5000pv2 UHO 10ep lambda1.0-0.75"
+export_description = "thrawn halfka v2 hm nnue Test80 Jan 2023 sk20 polish fine tune"

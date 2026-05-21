@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from .board import BoardState
-from .features import active_feature_indices
+from .features import HALFKP_FEATURES, active_feature_indices
 
 
 MAGIC = b"THNNUE\x00\x01"
@@ -75,6 +75,7 @@ def export_checkpoint(checkpoint_path: str | Path, output_path: str | Path) -> P
 
     checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
     config = TrainConfig.from_dict(dict(checkpoint["config"]))
+    _require_halfkp_export(config)
     model = HalfKPNNUE(
         num_features=config.num_features,
         num_factor_features=config.num_factor_features,
@@ -228,6 +229,7 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
 
     checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
     config = TrainConfig.from_dict(dict(checkpoint["config"]))
+    _require_halfkp_export(config)
     model = HalfKPNNUE(
         num_features=config.num_features,
         num_factor_features=config.num_factor_features,
@@ -240,7 +242,11 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
 
     fens = fens or DEFAULT_VERIFICATION_FENS
     with torch.no_grad():
-        white_indices, black_indices, stm = _batch_arrays_from_fens(fens)
+        white_indices, black_indices, stm = _batch_arrays_from_fens(
+            fens,
+            features=config.features,
+            max_active_features=config.max_active_features,
+        )
         predictions = model(
             torch.from_numpy(white_indices).long(),
             torch.from_numpy(black_indices).long(),
@@ -262,7 +268,11 @@ def verify_export(checkpoint_path: str | Path, nnue_path: str | Path, fens: list
 
     sanity_fens = [fen for _, fen in SANITY_POSITIONS]
     with torch.no_grad():
-        white_indices, black_indices, stm = _batch_arrays_from_fens(sanity_fens)
+        white_indices, black_indices, stm = _batch_arrays_from_fens(
+            sanity_fens,
+            features=config.features,
+            max_active_features=config.max_active_features,
+        )
         sanity_checkpoint = model(
             torch.from_numpy(white_indices).long(),
             torch.from_numpy(black_indices).long(),
@@ -435,6 +445,11 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
     )
 
 
+def _require_halfkp_export(config) -> None:
+    if config.features != HALFKP_FEATURES:
+        raise ValueError("Export currently supports only features='HalfKP^'")
+
+
 def _quantize(values: np.ndarray, scale: float, dtype) -> np.ndarray:
     info = np.iinfo(dtype)
     quantized = np.rint(values * scale)
@@ -516,16 +531,19 @@ def _write_export(handle, exported: ExportedNetwork) -> None:
 
 def _batch_arrays_from_fens(
     fens: list[str],
+    *,
+    features: str = HALFKP_FEATURES,
+    max_active_features: int = 30,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     white_indices = []
     black_indices = []
     stm = []
     for fen in fens:
         board = BoardState.from_fen(fen)
-        white = active_feature_indices(board, "white")
-        black = active_feature_indices(board, "black")
-        white_indices.append(white + [-1] * (30 - len(white)))
-        black_indices.append(black + [-1] * (30 - len(black)))
+        white = active_feature_indices(board, "white", features=features)
+        black = active_feature_indices(board, "black", features=features)
+        white_indices.append(white + [-1] * (max_active_features - len(white)))
+        black_indices.append(black + [-1] * (max_active_features - len(black)))
         stm.append(1.0 if board.side_to_move == "w" else 0.0)
     return (
         np.asarray(white_indices, dtype=np.int32),

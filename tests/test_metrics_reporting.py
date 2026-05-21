@@ -90,9 +90,10 @@ class MetricsSummaryTests(unittest.TestCase):
                     "best_checkpoint_positions": None,
                     "config": {
                         "batch_size": 2048,
-                        "total_train_positions": 10_000,
-                        "epoch_positions": 5_000,
-                        "wdl_lambda": 0.1,
+                        "max_epochs": 2,
+                        "epoch_size": 5_000,
+                        "start_lambda": 0.1,
+                        "end_lambda": 0.1,
                     },
                     "global_step": 2,
                     "positions_seen": 4096,
@@ -104,7 +105,7 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertEqual(summary["train_records"], 2)
             self.assertEqual(summary["validation_records"], 0)
             self.assertEqual(summary["positions_seen"], 4096)
-            self.assertEqual(summary["epoch_positions"], 5_000)
+            self.assertEqual(summary["epoch_size"], 5_000)
             self.assertEqual(summary["latest_epoch_index"], 0)
             self.assertIsNone(summary["latest_validation_positions"])
             self.assertEqual(summary["resume_recommendation"], "insufficient-validation")
@@ -176,9 +177,10 @@ class MetricsSummaryTests(unittest.TestCase):
                     "best_checkpoint_positions": 4096,
                     "config": {
                         "batch_size": 1024,
-                        "total_train_positions": 8192,
-                        "epoch_positions": 4096,
-                        "wdl_lambda": 0.1,
+                        "max_epochs": 2,
+                        "epoch_size": 4096,
+                        "start_lambda": 0.1,
+                        "end_lambda": 0.1,
                     },
                     "global_step": 4,
                     "positions_seen": 4096,
@@ -193,7 +195,7 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertAlmostEqual(summary["best_checkpoint_metric_value"], 80.0)
             self.assertEqual(summary["resume_recommendation"], "continue-latest")
             self.assertTrue(summary["best_is_latest_validation"])
-            self.assertEqual(summary["epoch_positions"], 4096)
+            self.assertEqual(summary["epoch_size"], 4096)
             self.assertEqual(summary["latest_epoch_index"], 1)
             self.assertAlmostEqual(summary["train_validation_gap"], -0.1)
             self.assertAlmostEqual(summary["latest_validation_wdl_accuracy"], 0.62)
@@ -201,7 +203,7 @@ class MetricsSummaryTests(unittest.TestCase):
             text = render_summary_text(summary)
             self.assertIn("best_validation_positions: 4096", text)
             self.assertIn("best_checkpoint_metric: validation_score_mae=80.000000", text)
-            self.assertIn("epoch_positions: 4096", text)
+            self.assertIn("epoch_size: 4096", text)
             self.assertIn("Suggestions", text)
 
     def test_starting_position_sanity_failure_overrides_continue_suggestion(self) -> None:
@@ -257,8 +259,8 @@ class MetricsSummaryTests(unittest.TestCase):
                     "best_checkpoint_positions": None,
                     "config": {
                         "batch_size": 1024,
-                        "total_train_positions": 4096,
-                        "epoch_positions": 1024,
+                        "max_epochs": 4,
+                        "epoch_size": 1024,
                     },
                     "global_step": 2,
                     "positions_seen": 2048,
@@ -270,7 +272,7 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertIn("Starting-position sanity is far from zero", summary["suggestions"][0])
             self.assertFalse(any("resume from the latest" in suggestion for suggestion in summary["suggestions"]))
 
-    def test_moving_wdl_lambda_adds_loss_caveat(self) -> None:
+    def test_moving_lambda_adds_loss_caveat(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
             _write_metrics(
@@ -283,7 +285,7 @@ class MetricsSummaryTests(unittest.TestCase):
                         "epoch_index": 0,
                         "loss": 0.3,
                         "wdl_loss": 0.3,
-                        "wdl_lambda": 0.74,
+                        "lambda": 0.74,
                         "lr": 0.001,
                     },
                     {
@@ -292,7 +294,7 @@ class MetricsSummaryTests(unittest.TestCase):
                         "positions_seen": 1024,
                         "validation_loss": 0.2,
                         "validation_wdl_loss": 0.2,
-                        "wdl_lambda": 0.74,
+                        "lambda": 0.74,
                         "cp_corr": 0.9,
                         "material_sanity": {"ordering_ok": True},
                         "material_ordering_ok": True,
@@ -309,10 +311,10 @@ class MetricsSummaryTests(unittest.TestCase):
                     "best_checkpoint_positions": None,
                     "config": {
                         "batch_size": 1024,
-                        "total_train_positions": 4096,
-                        "epoch_positions": 1024,
-                        "wdl_lambda": 0.75,
-                        "wdl_lambda_end": 0.5,
+                        "max_epochs": 4,
+                        "epoch_size": 1024,
+                        "start_lambda": 0.75,
+                        "end_lambda": 0.5,
                     },
                     "global_step": 1,
                     "positions_seen": 1024,
@@ -321,9 +323,9 @@ class MetricsSummaryTests(unittest.TestCase):
                 summary = summarize_run(load_metrics_run(run_dir))
                 text = render_summary_text(summary)
 
-            self.assertIn("moving wdl_lambda", " ".join(summary["suggestions"]))
-            self.assertIn("wdl_lambda_end: 0.500000", text)
-            self.assertIn("latest_validation_wdl_lambda: 0.740000", text)
+            self.assertIn("moving lambda", " ".join(summary["suggestions"]))
+            self.assertIn("end_lambda: 0.500000", text)
+            self.assertIn("latest_validation_lambda: 0.740000", text)
 
 
 @unittest.skipUnless(matplotlib is not None, "matplotlib is required for metrics plotting tests")
@@ -379,8 +381,8 @@ class MetricsPlotTests(unittest.TestCase):
                     "best_checkpoint_positions": None,
                     "config": {
                         "batch_size": 1024,
-                        "total_train_positions": 4096,
-                        "epoch_positions": 2048,
+                        "max_epochs": 2,
+                        "epoch_size": 2048,
                     },
                     "global_step": 2,
                     "positions_seen": 2048,

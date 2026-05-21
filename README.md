@@ -1,6 +1,6 @@
 # thrawn-nnue
 
-`thrawn-nnue` is a HalfKP NNUE trainer, exporter, and dataset inspection tool for [Thrawn](https://github.com/feftywacky/thrawn).
+`thrawn-nnue` is an NNUE trainer, exporter, and dataset inspection tool for [Thrawn](https://github.com/feftywacky/thrawn).
 
 It has two main pieces:
 
@@ -22,10 +22,10 @@ High-level layout:
 - `tests/`
   - unit and regression tests
 
-Current production network shape:
+Current Stockfish-style training shape:
 
 ```text
-HalfKP FT: 40960 -> 1024
+HalfKAv2_hm FT: 24576 -> 1024
 concat [us_acc | them_acc] -> 2048
 dense: 2048 -> 256
 dense: 256 -> 64
@@ -34,7 +34,7 @@ output perspective: side to move
 output unit: Stockfish internal score
 ```
 
-The trainer uses training-time factorization for the feature transform. Exported `.nnue` files contain coalesced HalfKP weights only.
+The trainer uses training-time factorization for the feature transform. The legacy Thrawn export path is still HalfKP-only and rejects `HalfKAv2_hm^` checkpoints until the engine-side feature transformer is upgraded too.
 
 For the exact exported file format, score units, HalfKP indexing, accumulator rules, and engine integration contract, see [docs/nnue_spec.md](docs/nnue_spec.md).
 
@@ -137,8 +137,8 @@ python -c "import torch; print(torch.__version__); print('cuda_available=', torc
 
 Notes:
 
-- `device = "cuda"` in your TOML requires a CUDA-capable Torch build.
-- `amp = true`, `cuda_tf32 = true`, `cuda_pin_memory = true`, and `cuda_fused_optimizer = true` are CUDA-only optimizations.
+- `accelerator = "cuda"` in your TOML requires a CUDA-capable Torch build.
+- `amp = true`, `tf32 = true`, `pin_memory = true`, and `fused_optimizer = true` are CUDA-oriented optimizations.
 - CPU training works, but it is much slower.
 
 ## Building the Native `.binpack` Bridge
@@ -181,6 +181,10 @@ That config currently points at:
 
 - `data/nodes5000pv2_UHO.binpack`
 - output directory `configs/runs/v4`
+- Stockfish-style baseline schedule: `max_epochs = 10`, `epoch_size = 1,048,500`, `batch_size = 1024`
+- `HalfKAv2_hm^` features with the local 1024x256x64 topology
+- Lambda schedule: `start_lambda = 1.0` to `end_lambda = 0.75`
+- Engine-test metadata: `network_testing_nodes_per_move = 1000`
 
 The current second-stage fine-tune config is:
 
@@ -193,11 +197,12 @@ It starts from a v4 checkpoint and trains on:
 
 Important config themes:
 
-- dataset paths and validation split
+- dataset paths and validation size
+- epoch-derived position budgets
 - device/runtime settings
 - training budget and checkpoint cadence
 - optimizer / LR schedule
-- network sizes
+- feature set and network sizes
 - WDL target shaping
 - export quantization scales
 
@@ -247,6 +252,8 @@ thrawn-nnue resume --checkpoint configs/runs/v4/checkpoints/step_00010000.pt --c
 ```
 
 ### Export
+
+Export currently supports only HalfKP checkpoints because Thrawn's runtime feature transformer and file format are HalfKP-based. `HalfKAv2_hm^` training checkpoints should be evaluated or converted only after adding the matching engine-side feature support.
 
 Export a checkpoint to `.nnue`:
 

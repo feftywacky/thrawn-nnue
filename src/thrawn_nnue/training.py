@@ -73,8 +73,8 @@ def train_from_config(
     console_mode: str | None = None,
     init_checkpoint: str | Path | None = None,
 ) -> Path:
-    if not config.train_datasets:
-        raise ValueError("train_datasets must not be empty")
+    if not config.datasets:
+        raise ValueError("datasets must not be empty")
 
     if console_mode is not None:
         config.console_mode = console_mode
@@ -140,9 +140,10 @@ def _create_state(config: TrainConfig) -> TrainState:
     from .model import HalfKPNNUE
 
     _resolve_runtime_config(config)
-    device = _select_device(config.device, torch)
+    _seed_torch(config, torch)
+    device = _select_device(config.accelerator, torch)
     _configure_torch_backend(config, device, torch)
-    run_dir = Path(config.output_dir).resolve()
+    run_dir = Path(config.default_root_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
     metrics_path = run_dir / "metrics.jsonl"
@@ -183,14 +184,14 @@ class _PreparedBatchSource:
         *,
         batch_size: int,
         total_positions: int | None,
-        prefetch_batches: int,
+        queue_size: int,
         pin_memory: bool,
         torch,
     ) -> None:
         self._stream = stream
         self._batch_size = batch_size
         self._remaining_positions = total_positions
-        self._prefetch_batches = prefetch_batches
+        self._queue_size = queue_size
         self._pin_memory = pin_memory
         self._torch = torch
         self._queue: Queue[object] | None = None
@@ -199,8 +200,8 @@ class _PreparedBatchSource:
         self._closed = False
 
     def __enter__(self) -> "_PreparedBatchSource":
-        if self._prefetch_batches > 0:
-            self._queue = Queue(maxsize=self._prefetch_batches)
+        if self._queue_size > 0:
+            self._queue = Queue(maxsize=self._queue_size)
             self._thread = Thread(target=self._run_producer, name="thrawn-batch-prefetch", daemon=True)
             self._thread.start()
         return self
@@ -212,7 +213,7 @@ class _PreparedBatchSource:
         return self
 
     def __next__(self) -> _PreparedBatch:
-        if self._prefetch_batches <= 0:
+        if self._queue_size <= 0:
             return self._next_sync()
         return self._next_prefetched()
 
@@ -280,46 +281,46 @@ def _run_training_loop(state: TrainState) -> None:
     torch = _require_torch()
     autocast_enabled = _amp_enabled(torch, state.config, state.device)
     reporter = create_console_reporter(state.config.console_mode)
-    next_validation_positions = (
-        None
-        if not state.config.validation_datasets
-        else _next_validation_positions(state.positions_seen, state.config.epoch_positions)
-    )
-    last_validation_positions: int | None = None
+    total_positions = state.config.total_positions
+    log_every_n_steps = _log_every_n_steps(state.config)
+    last_validation_epoch: int | None = None
 
     reporter.startup(
         ConsoleContext(
             run_name=state.config.run_name,
-            device=state.device,
-            train_shards=len(state.config.train_datasets),
-            validation_shards=len(state.config.validation_datasets),
-            total_train_positions=state.config.total_train_positions,
+            accelerator=state.device,
+            train_shards=len(state.config.datasets),
+            validation_shards=len(_validation_datasets(state.config)),
+            max_epochs=state.config.max_epochs,
+            epoch_size=state.config.epoch_size,
+            total_positions=total_positions,
             initial_positions_seen=state.positions_seen,
             batch_size=state.config.batch_size,
-            epoch_positions=state.config.epoch_positions,
-            log_every=state.config.log_every,
+            log_every_n_steps=log_every_n_steps,
             nnue2score=state.config.nnue2score,
-            prefetch_batches=state.config.prefetch_batches,
+            data_loader_queue_size=state.config.data_loader_queue_size,
+            network_testing_nodes_per_move=state.config.network_testing_nodes_per_move,
         )
     )
 
     try:
         with BinpackStream(
-            state.config.train_datasets,
-            num_threads=state.config.num_loader_threads,
+            state.config.datasets,
+            num_threads=state.config.num_workers,
             cyclic=True,
+            feature_set=state.config.features,
             **_binpack_filter_options(state.config, split_role="train"),
         ) as train_stream:
-            remaining_positions = state.config.total_train_positions - state.positions_seen
+            remaining_positions = total_positions - state.positions_seen
             with _PreparedBatchSource(
                 train_stream,
                 batch_size=state.config.batch_size,
                 total_positions=remaining_positions,
-                prefetch_batches=state.config.prefetch_batches,
+                queue_size=state.config.data_loader_queue_size,
                 pin_memory=_pin_memory_enabled(state),
                 torch=torch,
             ) as train_batches:
-                while state.positions_seen < state.config.total_train_positions:
+                while state.positions_seen < total_positions:
                     step_started_at = time.monotonic()
                     try:
                         prepared_batch = next(train_batches)
@@ -328,6 +329,7 @@ def _run_training_loop(state: TrainState) -> None:
 
                     batch_positions = prepared_batch.batch_positions
                     positions_before_step = state.positions_seen
+                    epoch_before_step = _epoch_index(positions_before_step, state.config.epoch_size)
                     losses = _run_train_step(
                         state,
                         prepared_batch.tensors,
@@ -336,7 +338,7 @@ def _run_training_loop(state: TrainState) -> None:
                     )
                     state.global_step += 1
                     state.positions_seen += batch_positions
-                    state.epoch_index = _epoch_index(state.positions_seen, state.config.epoch_positions)
+                    state.epoch_index = _epoch_index(state.positions_seen, state.config.epoch_size)
                     _advance_scheduler_for_epoch_boundaries(
                         state,
                         positions_before_step=positions_before_step,
@@ -358,8 +360,8 @@ def _run_training_loop(state: TrainState) -> None:
                         train_positions_per_second=train_positions_per_second,
                     )
 
-                    if state.global_step % state.config.log_every == 0:
-                        wdl_eval_weight = _current_wdl_lambda(state.config, state.positions_seen)
+                    if state.global_step % log_every_n_steps == 0:
+                        lambda_weight = _current_lambda(state.config, epoch_before_step)
                         _log_metrics(
                             state,
                             {
@@ -373,38 +375,45 @@ def _run_training_loop(state: TrainState) -> None:
                                 "teacher_wdl_loss": float(losses["teacher_wdl_loss"].detach().cpu().item()),
                                 "result_wdl_loss": float(losses["result_wdl_loss"].detach().cpu().item()),
                                 "output_reg_loss": float(losses["output_reg_loss"].detach().cpu().item()),
-                                "wdl_lambda": wdl_eval_weight,
-                                "wdl_lambda_start": state.config.wdl_lambda,
-                                "wdl_lambda_end": state.config.wdl_lambda_end,
+                                "lambda": lambda_weight,
+                                "start_lambda": state.config.start_lambda,
+                                "end_lambda": state.config.end_lambda,
                                 "nnue2score": state.config.nnue2score,
-                                "wdl_in_offset": state.config.wdl_in_offset,
-                                "wdl_in_scaling": state.config.wdl_in_scaling,
-                                "wdl_out_offset": state.config.wdl_out_offset,
-                                "wdl_out_scaling": state.config.wdl_out_scaling,
-                                "max_abs_score_cp": state.config.max_abs_score_cp,
-                                "skip_tactical_positions": state.config.skip_tactical_positions,
-                                "skip_wdl_score_mismatch": state.config.skip_wdl_score_mismatch,
+                                "in_offset": state.config.in_offset,
+                                "in_scaling": state.config.in_scaling,
+                                "out_offset": state.config.out_offset,
+                                "out_scaling": state.config.out_scaling,
+                                "filtered": state.config.filtered,
+                                "wld_filtered": state.config.wld_filtered,
                                 "random_fen_skipping": state.config.random_fen_skipping,
+                                "max_epochs": state.config.max_epochs,
+                                "epoch_size": state.config.epoch_size,
+                                "network_testing_nodes_per_move": state.config.network_testing_nodes_per_move,
                                 "lr": current_lr,
                                 "step_seconds": step_seconds,
                                 "train_positions_per_second": train_positions_per_second,
                             },
                         )
 
-                    if next_validation_positions is not None and state.positions_seen >= next_validation_positions:
-                        _run_validation_and_report(state, reporter)
-                        last_validation_positions = state.positions_seen
-                        next_validation_positions = _next_validation_positions(
-                            state.positions_seen,
-                            state.config.epoch_positions,
-                        )
+                    for completed_epoch in range(epoch_before_step + 1, state.epoch_index + 1):
+                        if _should_validate_epoch(state.config, completed_epoch):
+                            _run_validation_and_report(state, reporter)
+                            last_validation_epoch = completed_epoch
+                        if _should_checkpoint_epoch(state.config, completed_epoch):
+                            checkpoint_path = _epoch_checkpoint_path(
+                                state.run_dir,
+                                completed_epoch,
+                                state.global_step,
+                            )
+                            _save_training_checkpoint(state, checkpoint_path)
+                            reporter.checkpoint_saved(str(checkpoint_path), is_best=False)
 
-                    if state.global_step % state.config.checkpoint_every == 0:
-                        checkpoint_path = state.run_dir / "checkpoints" / f"step_{state.global_step:08d}.pt"
-                        _save_training_checkpoint(state, checkpoint_path)
-                        reporter.checkpoint_saved(str(checkpoint_path), is_best=False)
-
-        if state.config.validation_datasets and last_validation_positions != state.positions_seen:
+        if (
+            state.config.save_last_network
+            and state.config.validation_size > 0
+            and _should_validate_epoch(state.config, state.epoch_index)
+            and last_validation_epoch != state.epoch_index
+        ):
             _run_validation_and_report(state, reporter)
     finally:
         reporter.close()
@@ -438,17 +447,26 @@ def _resolve_runtime_config(config: TrainConfig) -> None:
     config.validate()
 
 
+def _seed_torch(config: TrainConfig, torch) -> None:
+    torch.manual_seed(config.seed)
+    if hasattr(torch, "cuda"):
+        try:
+            torch.cuda.manual_seed_all(config.seed)
+        except Exception:
+            pass
+
+
 def _create_scheduler(config: TrainConfig, optimizer, torch):
-    return torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=config.lr_gamma)
+    return torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=config.gamma)
 
 
 def _create_optimizer(config: TrainConfig, model, torch):
     kwargs = {
-        "lr": config.learning_rate,
+        "lr": config.lr,
         "weight_decay": config.weight_decay,
     }
     if _model_device_type(model) == "cuda":
-        if config.cuda_fused_optimizer:
+        if config.fused_optimizer:
             try:
                 return torch.optim.AdamW(model.parameters(), **kwargs, fused=True)
             except (RuntimeError, TypeError):
@@ -461,16 +479,16 @@ def _configure_torch_backend(config: TrainConfig, device: str, torch) -> None:
     if device != "cuda":
         return
     if hasattr(torch, "set_float32_matmul_precision"):
-        torch.set_float32_matmul_precision("high" if config.cuda_tf32 else "highest")
+        torch.set_float32_matmul_precision("high" if config.tf32 else "highest")
 
     cuda_backend = getattr(getattr(torch, "backends", None), "cuda", None)
     matmul_backend = getattr(cuda_backend, "matmul", None)
     if matmul_backend is not None and hasattr(matmul_backend, "allow_tf32"):
-        matmul_backend.allow_tf32 = bool(config.cuda_tf32)
+        matmul_backend.allow_tf32 = bool(config.tf32)
 
     cudnn_backend = getattr(getattr(torch, "backends", None), "cudnn", None)
     if cudnn_backend is not None and hasattr(cudnn_backend, "allow_tf32"):
-        cudnn_backend.allow_tf32 = bool(config.cuda_tf32)
+        cudnn_backend.allow_tf32 = bool(config.tf32)
 
 
 def _model_device_type(model) -> str:
@@ -491,7 +509,10 @@ def _run_train_step(state: TrainState, tensors, torch, *, autocast_enabled: bool
     )
     state.model.train()
     state.optimizer.zero_grad(set_to_none=True)
-    wdl_eval_weight = _current_wdl_lambda(state.config, state.positions_seen)
+    lambda_weight = _current_lambda(
+        state.config,
+        _epoch_index(state.positions_seen, state.config.epoch_size),
+    )
     with _autocast_context(torch, state.device, autocast_enabled):
         prediction_raw = state.model(
             tensors["white_indices"],
@@ -503,12 +524,15 @@ def _run_train_step(state: TrainState, tensors, torch, *, autocast_enabled: bool
             prediction_score,
             score_stm,
             result_wdl_stm,
-            wdl_eval_weight=wdl_eval_weight,
-            wdl_in_offset=state.config.wdl_in_offset,
-            wdl_out_offset=state.config.wdl_out_offset,
-            wdl_in_scaling=state.config.wdl_in_scaling,
-            wdl_out_scaling=state.config.wdl_out_scaling,
-            wdl_loss_power=state.config.wdl_loss_power,
+            lambda_weight=lambda_weight,
+            in_offset=state.config.in_offset,
+            out_offset=state.config.out_offset,
+            in_scaling=state.config.in_scaling,
+            out_scaling=state.config.out_scaling,
+            pow_exp=state.config.pow_exp,
+            qp_asymmetry=state.config.qp_asymmetry,
+            w1=state.config.w1,
+            w2=state.config.w2,
             torch=torch,
         )
 
@@ -546,22 +570,32 @@ def _scalar_head_loss(
     target_score,
     result_wdl,
     *,
-    wdl_eval_weight: float,
-    wdl_in_offset: float,
-    wdl_out_offset: float,
-    wdl_in_scaling: float,
-    wdl_out_scaling: float,
-    wdl_loss_power: float,
+    lambda_weight: float,
+    in_offset: float,
+    out_offset: float,
+    in_scaling: float,
+    out_scaling: float,
+    pow_exp: float,
+    qp_asymmetry: float,
+    w1: float,
+    w2: float,
     torch,
 ):
     # Match Stockfish nnue-pytorch naming: "in" applies to the network score,
     # "out" applies to the search-score target read from the training data.
-    pred_wdl = _wdl_expectation_from_score(prediction_score, wdl_in_offset, wdl_in_scaling, torch)
-    target_wdl = _wdl_expectation_from_score(target_score, wdl_out_offset, wdl_out_scaling, torch)
-    blended_target = wdl_eval_weight * target_wdl + (1.0 - wdl_eval_weight) * result_wdl
-    wdl_loss = torch.mean((pred_wdl - blended_target).abs().pow(wdl_loss_power))
-    teacher_wdl_loss = torch.mean((pred_wdl - target_wdl).abs().pow(wdl_loss_power))
-    result_wdl_loss = torch.mean((pred_wdl - result_wdl).abs().pow(wdl_loss_power))
+    pred_wdl = _wdl_expectation_from_score(prediction_score, in_offset, in_scaling, torch)
+    target_wdl = _wdl_expectation_from_score(target_score, out_offset, out_scaling, torch)
+    blended_target = lambda_weight * target_wdl + (1.0 - lambda_weight) * result_wdl
+    per_sample_loss = (pred_wdl - blended_target).abs().pow(pow_exp)
+    if qp_asymmetry != 0.0:
+        per_sample_loss = per_sample_loss * ((pred_wdl > blended_target) * qp_asymmetry + 1.0)
+    weights = 1.0 + (2.0**w1 - 1.0) * torch.pow(
+        (target_wdl - 0.5).square() * target_wdl * (1.0 - target_wdl),
+        w2,
+    )
+    wdl_loss = (per_sample_loss * weights).sum() / weights.sum()
+    teacher_wdl_loss = torch.mean((pred_wdl - target_wdl).abs().pow(pow_exp))
+    result_wdl_loss = torch.mean((pred_wdl - result_wdl).abs().pow(pow_exp))
     output_reg_loss = torch.mean(prediction_score.square())
     return {
         "loss": wdl_loss,
@@ -613,22 +647,23 @@ def _run_validation(state: TrainState) -> dict[str, object]:
     corr_sum_y2 = 0.0
     corr_sum_xy = 0.0
     batches = 0
-    wdl_eval_weight = _current_wdl_lambda(state.config, state.positions_seen)
+    lambda_weight = _current_lambda(state.config, state.epoch_index)
 
     was_training = state.model.training
     state.model.eval()
     with BinpackStream(
-        state.config.validation_datasets,
-        num_threads=state.config.num_loader_threads,
+        _validation_datasets(state.config),
+        num_threads=state.config.num_workers,
         cyclic=False,
+        feature_set=state.config.features,
         **_binpack_filter_options(state.config, split_role="validation"),
     ) as validation_stream:
-        validation_budget = state.config.validation_positions if state.config.validation_positions > 0 else None
+        validation_budget = state.config.validation_size if state.config.validation_size > 0 else None
         with _PreparedBatchSource(
             validation_stream,
             batch_size=state.config.batch_size,
             total_positions=validation_budget,
-            prefetch_batches=state.config.prefetch_batches,
+            queue_size=state.config.data_loader_queue_size,
             pin_memory=_pin_memory_enabled(state),
             torch=torch,
         ) as validation_batches:
@@ -657,20 +692,23 @@ def _run_validation(state: TrainState) -> dict[str, object]:
                             prediction_score,
                             score_stm,
                             result_wdl_stm,
-                            wdl_eval_weight=wdl_eval_weight,
-                            wdl_in_offset=state.config.wdl_in_offset,
-                            wdl_out_offset=state.config.wdl_out_offset,
-                            wdl_in_scaling=state.config.wdl_in_scaling,
-                            wdl_out_scaling=state.config.wdl_out_scaling,
-                            wdl_loss_power=state.config.wdl_loss_power,
+                            lambda_weight=lambda_weight,
+                            in_offset=state.config.in_offset,
+                            out_offset=state.config.out_offset,
+                            in_scaling=state.config.in_scaling,
+                            out_scaling=state.config.out_scaling,
+                            pow_exp=state.config.pow_exp,
+                            qp_asymmetry=state.config.qp_asymmetry,
+                            w1=state.config.w1,
+                            w2=state.config.w2,
                             torch=torch,
                         )
 
                     pred_wdl = losses["predicted_wdl"]
                     target_wdl = _wdl_expectation_from_score(
                         score_stm,
-                        state.config.wdl_out_offset,
-                        state.config.wdl_out_scaling,
+                        state.config.out_offset,
+                        state.config.out_scaling,
                         torch,
                     )
                     result_bucket = _wdl_bucket(result_wdl_stm)
@@ -753,18 +791,20 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         "validation_positions_per_second": validation_positions_per_second,
         "material_sanity": material_sanity,
         "material_ordering_ok": bool(material_sanity["ordering_ok"]),
-        "wdl_lambda": wdl_eval_weight,
-        "wdl_lambda_start": state.config.wdl_lambda,
-        "wdl_lambda_end": state.config.wdl_lambda_end,
+        "lambda": lambda_weight,
+        "start_lambda": state.config.start_lambda,
+        "end_lambda": state.config.end_lambda,
         "nnue2score": state.config.nnue2score,
-        "wdl_in_offset": state.config.wdl_in_offset,
-        "wdl_in_scaling": state.config.wdl_in_scaling,
-        "wdl_out_offset": state.config.wdl_out_offset,
-        "wdl_out_scaling": state.config.wdl_out_scaling,
-        "max_abs_score_cp": state.config.max_abs_score_cp,
-        "skip_tactical_positions": state.config.skip_tactical_positions,
-        "skip_wdl_score_mismatch": state.config.skip_wdl_score_mismatch,
+        "in_offset": state.config.in_offset,
+        "in_scaling": state.config.in_scaling,
+        "out_offset": state.config.out_offset,
+        "out_scaling": state.config.out_scaling,
+        "filtered": state.config.filtered,
+        "wld_filtered": state.config.wld_filtered,
         "random_fen_skipping": state.config.random_fen_skipping,
+        "max_epochs": state.config.max_epochs,
+        "epoch_size": state.config.epoch_size,
+        "network_testing_nodes_per_move": state.config.network_testing_nodes_per_move,
     }
 
 
@@ -778,8 +818,8 @@ def _material_sanity_snapshot(state: TrainState) -> dict[str, object]:
     stm: list[float] = []
     for _, fen in SANITY_POSITIONS:
         board = BoardState.from_fen(fen)
-        white = active_feature_indices(board, "white")
-        black = active_feature_indices(board, "black")
+        white = active_feature_indices(board, "white", features=state.config.features)
+        black = active_feature_indices(board, "black", features=state.config.features)
         white_indices.append(white + [-1] * (state.config.max_active_features - len(white)))
         black_indices.append(black + [-1] * (state.config.max_active_features - len(black)))
         stm.append(1.0 if board.side_to_move == "w" else 0.0)
@@ -1122,12 +1162,8 @@ def _create_grad_scaler(torch, config: TrainConfig, device: str):
     return _NullGradScaler()
 
 
-def _next_validation_positions(current_positions: int, interval_positions: int) -> int:
-    return ((current_positions // interval_positions) + 1) * interval_positions
-
-
-def _epoch_index(positions_seen: int, epoch_positions: int) -> int:
-    return positions_seen // epoch_positions
+def _epoch_index(positions_seen: int, epoch_size: int) -> int:
+    return positions_seen // epoch_size
 
 
 def _advance_scheduler_for_epoch_boundaries(
@@ -1138,8 +1174,8 @@ def _advance_scheduler_for_epoch_boundaries(
 ) -> None:
     if state.scheduler is None:
         return
-    previous_epoch_index = _epoch_index(positions_before_step, state.config.epoch_positions)
-    new_epoch_index = _epoch_index(positions_after_step, state.config.epoch_positions)
+    previous_epoch_index = _epoch_index(positions_before_step, state.config.epoch_size)
+    new_epoch_index = _epoch_index(positions_after_step, state.config.epoch_size)
     completed_epochs = max(0, new_epoch_index - previous_epoch_index)
     for _ in range(completed_epochs):
         state.scheduler.step()
@@ -1187,7 +1223,7 @@ def _move_tensors_to_device(
 
 
 def _pin_memory_enabled(state: TrainState) -> bool:
-    return state.device == "cuda" and state.config.cuda_pin_memory
+    return state.device == "cuda" and state.config.pin_memory
 
 
 def _batch_size(batch) -> int:
@@ -1196,22 +1232,45 @@ def _batch_size(batch) -> int:
 
 def _binpack_filter_options(config: TrainConfig, *, split_role: str = "all") -> dict[str, object]:
     return {
-        "skip_tactical_positions": config.skip_tactical_positions,
-        "skip_wdl_score_mismatch": config.skip_wdl_score_mismatch,
+        "skip_tactical_positions": config.filtered,
+        "skip_wdl_score_mismatch": config.wld_filtered,
         "random_fen_skipping": config.random_fen_skipping if split_role == "train" else 0,
-        "max_abs_score": config.max_abs_score_cp,
+        "max_abs_score": 0.0,
         "split_role": split_role,
-        "validation_split_fraction": config.validation_split_fraction,
+        "validation_split_fraction": 0.0,
     }
 
 
-def _current_wdl_lambda(config: TrainConfig, positions_seen: int) -> float:
-    if config.wdl_lambda_end is None:
-        return float(config.wdl_lambda)
-    if config.total_train_positions <= 0:
-        return float(config.wdl_lambda)
-    progress = max(0.0, min(1.0, positions_seen / float(config.total_train_positions)))
-    return float(config.wdl_lambda + (config.wdl_lambda_end - config.wdl_lambda) * progress)
+def _current_lambda(config: TrainConfig, current_epoch: int) -> float:
+    start_lambda = float(config.start_lambda if config.start_lambda is not None else config.lambda_)
+    end_lambda = float(config.end_lambda if config.end_lambda is not None else config.lambda_)
+    progress = max(0.0, min(1.0, float(current_epoch) / float(config.max_epochs)))
+    return float(start_lambda + (end_lambda - start_lambda) * progress)
+
+
+def _validation_datasets(config: TrainConfig) -> list[str]:
+    return config.validation_datasets or config.datasets
+
+
+def _should_validate_epoch(config: TrainConfig, epoch_index: int) -> bool:
+    return (
+        config.validation_size > 0
+        and bool(_validation_datasets(config))
+        and epoch_index > 0
+        and epoch_index % config.check_val_every_n_epoch == 0
+    )
+
+
+def _should_checkpoint_epoch(config: TrainConfig, epoch_index: int) -> bool:
+    return config.network_save_period > 0 and epoch_index > 0 and epoch_index % config.network_save_period == 0
+
+
+def _log_every_n_steps(config: TrainConfig) -> int:
+    return max(1, (config.num_batches_per_epoch + 4) // 5)
+
+
+def _epoch_checkpoint_path(run_dir: Path, epoch_index: int, global_step: int) -> Path:
+    return run_dir / "checkpoints" / f"epoch_{epoch_index:04d}_step_{global_step:08d}.pt"
 
 
 def _wdl_expectation_from_score(values, offset: float, scaling: float, torch):

@@ -11,138 +11,94 @@ from thrawn_nnue.config import TrainConfig
 
 
 class ValidationConfigTests(unittest.TestCase):
-    def test_position_budget_fields_are_allowed_for_epoch_validation(self) -> None:
+    def test_stockfish_epoch_budget_is_primary(self) -> None:
         config = TrainConfig.from_dict(
             {
-                "train_datasets": ["/tmp/train.binpack"],
-                "validation_datasets": ["/tmp/valid.binpack"],
-                "total_train_positions": 10_000,
-                "epoch_positions": 2_000,
-                "validation_positions": 0,
+                "datasets": ["/tmp/train.binpack"],
+                "batch_size": 1024,
+                "max_epochs": 10,
+                "epoch_size": 1_048_500,
+                "start_lambda": 1.0,
+                "end_lambda": 0.75,
+                "network_testing_nodes_per_move": 1000,
             }
         )
-        self.assertEqual(config.total_train_positions, 10_000)
-        self.assertEqual(config.epoch_positions, 2_000)
-        self.assertEqual(config.validation_positions, 0)
-        self.assertEqual(config.feature_set, "halfkp")
 
-    def test_stockfish_wdl_fields_are_validated(self) -> None:
+        self.assertEqual(config.max_epochs, 10)
+        self.assertEqual(config.epoch_size, 1_048_500)
+        self.assertEqual(config.total_positions, 10_485_000)
+        self.assertEqual(config.num_batches_per_epoch, 1024)
+        self.assertEqual(config.start_lambda, 1.0)
+        self.assertEqual(config.end_lambda, 0.75)
+        self.assertEqual(config.network_testing_nodes_per_move, 1000)
+
+    def test_lambda_key_maps_to_python_field(self) -> None:
+        config = TrainConfig.from_dict(
+            {
+                "datasets": ["/tmp/train.binpack"],
+                "max_epochs": 1,
+                "epoch_size": 1,
+                "lambda": 0.5,
+            }
+        )
+
+        self.assertEqual(config.lambda_, 0.5)
+        self.assertEqual(config.start_lambda, 0.5)
+        self.assertEqual(config.end_lambda, 0.5)
+
+    def test_stockfish_style_fields_are_validated(self) -> None:
         valid = {
-            "train_datasets": ["/tmp/train.binpack"],
-            "total_train_positions": 10_000,
-            "epoch_positions": 1_000,
+            "datasets": ["/tmp/train.binpack"],
+            "max_epochs": 10,
+            "epoch_size": 1_000,
         }
         for key, value in (
-            ("wdl_lambda", 1.1),
-            ("wdl_lambda_end", -0.1),
-            ("wdl_in_scaling", 0.0),
-            ("wdl_out_scaling", 0.0),
-            ("wdl_loss_power", 0.0),
-            ("nnue2score", 0.0),
-            ("max_abs_score_cp", -1.0),
-            ("validation_split_fraction", 1.0),
+            ("max_epochs", 0),
+            ("epoch_size", 0),
+            ("validation_size", -1),
+            ("check_val_every_n_epoch", 0),
+            ("network_save_period", -1),
+            ("batch_size", 0),
+            ("num_workers", 0),
+            ("data_loader_queue_size", -1),
+            ("threads", -2),
             ("random_fen_skipping", -1),
-            ("lr_gamma", 0.0),
+            ("network_testing_nodes_per_move", -1),
+            ("lr", 0.0),
+            ("gamma", 0.0),
+            ("lambda", 1.1),
+            ("start_lambda", -0.1),
+            ("in_scaling", 0.0),
+            ("out_scaling", 0.0),
+            ("pow_exp", 0.0),
+            ("qp_asymmetry", -1.0),
+            ("nnue2score", 0.0),
         ):
-            with self.assertRaises(ValueError):
-                TrainConfig.from_dict({**valid, key: value})
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError):
+                    TrainConfig.from_dict({**valid, key: value})
 
-    def test_prefetch_batches_accepts_zero_and_rejects_negative_values(self) -> None:
-        config = TrainConfig.from_dict(
-            {
-                "train_datasets": ["/tmp/train.binpack"],
-                "total_train_positions": 10_000,
-                "epoch_positions": 1_000,
-                "prefetch_batches": 0,
-            }
-        )
-        self.assertEqual(config.prefetch_batches, 0)
-
-        with self.assertRaises(ValueError):
+    def test_start_and_end_lambda_must_be_specified_together(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Either both or none"):
             TrainConfig.from_dict(
                 {
-                    "train_datasets": ["/tmp/train.binpack"],
-                    "total_train_positions": 10_000,
-                    "epoch_positions": 1_000,
-                    "prefetch_batches": -1,
+                    "datasets": ["/tmp/train.binpack"],
+                    "max_epochs": 10,
+                    "epoch_size": 1_000,
+                    "start_lambda": 1.0,
                 }
             )
 
-    def test_console_mode_is_validated(self) -> None:
-        with self.assertRaises(ValueError):
-            TrainConfig.from_dict(
-                {
-                    "train_datasets": ["/tmp/train.binpack"],
-                    "total_train_positions": 10_000,
-                    "epoch_positions": 1_000,
-                    "console_mode": "json",
-                }
-            )
-
-    def test_feature_set_must_be_halfkp_and_legacy_keys_are_rejected(self) -> None:
-        with self.assertRaises(ValueError):
-            TrainConfig.from_dict(
-                {
-                    "train_datasets": ["/tmp/train.binpack"],
-                    "total_train_positions": 10_000,
-                    "epoch_positions": 1_000,
-                    "feature_set": "a768",
-                }
-            )
+    def test_unknown_config_keys_are_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unknown config keys"):
             TrainConfig.from_dict(
                 {
-                    "train_datasets": ["/tmp/train.binpack"],
-                    "total_train_positions": 10_000,
-                    "epoch_positions": 1_000,
-                    "score_scale": 1.0,
-                    "output_buckets": 8,
-                    "eval_lambda": 0.7,
+                    "datasets": ["/tmp/train.binpack"],
+                    "max_epochs": 10,
+                    "epoch_size": 1_000,
+                    "unknown_budget_knob": 10_000,
                 }
             )
-
-    def test_removed_scheduler_and_superbatch_keys_are_rejected(self) -> None:
-        for key, value in (
-            ("superbatch_positions", 1_000),
-            ("lr_schedule", "exponential"),
-            ("lr_drop_fractions", [0.8, 0.95]),
-            ("lr_drop_factor", 0.1),
-        ):
-            with self.assertRaisesRegex(ValueError, "Unknown config keys"):
-                TrainConfig.from_dict(
-                    {
-                        "train_datasets": ["/tmp/train.binpack"],
-                        "total_train_positions": 10_000,
-                        "epoch_positions": 1_000,
-                        key: value,
-                    }
-                )
-
-    def test_position_budget_fields_are_required(self) -> None:
-        with self.assertRaises(ValueError):
-            TrainConfig.from_dict({"train_datasets": ["/tmp/train.binpack"]})
-
-    def test_overlap_between_train_and_validation_requires_split_fraction(self) -> None:
-        with self.assertRaises(ValueError):
-            TrainConfig.from_dict(
-                {
-                    "train_datasets": ["/tmp/shared.binpack"],
-                    "validation_datasets": ["/tmp/shared.binpack"],
-                    "total_train_positions": 10_000,
-                    "epoch_positions": 1_000,
-                }
-            )
-
-        config = TrainConfig.from_dict(
-            {
-                "train_datasets": ["/tmp/shared.binpack"],
-                "validation_datasets": ["/tmp/shared.binpack"],
-                "total_train_positions": 10_000,
-                "epoch_positions": 1_000,
-                "validation_split_fraction": 0.1,
-            }
-        )
-        self.assertEqual(config.validation_split_fraction, 0.1)
 
     def test_dataset_directories_and_globs_expand_to_binpack_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -160,16 +116,16 @@ class ValidationConfigTests(unittest.TestCase):
 
             config = TrainConfig.from_dict(
                 {
-                    "train_datasets": ["train"],
+                    "datasets": ["train"],
                     "validation_datasets": ["valid/*.binpack"],
-                    "total_train_positions": 10_000,
-                    "epoch_positions": 1_000,
+                    "max_epochs": 10,
+                    "epoch_size": 1_000,
                 },
                 base_dir=root,
             )
 
             self.assertEqual(
-                config.train_datasets,
+                config.datasets,
                 [
                     str((train_dir / "a.binpack").resolve()),
                     str((nested_dir / "b.binpack").resolve()),
@@ -181,64 +137,69 @@ class ValidationConfigTests(unittest.TestCase):
             )
 
     def test_default_config_uses_current_large_halfkp_shape(self) -> None:
-        config = TrainConfig(
-            train_datasets=["/tmp/train.binpack"],
-            total_train_positions=1,
-            epoch_positions=1,
-        )
+        config = TrainConfig(datasets=["/tmp/train.binpack"], max_epochs=1, epoch_size=1)
         config.validate()
 
+        self.assertEqual(config.features, "HalfKP^")
         self.assertEqual(config.ft_size, 1024)
         self.assertEqual(config.l1_size, 256)
         self.assertEqual(config.l2_size, 64)
         self.assertEqual(config.num_features, 40_960)
         self.assertEqual(config.max_active_features, 30)
 
-    def test_v4_reference_config_loads_with_current_halfkp_shape(self) -> None:
-        config_path = Path(__file__).resolve().parents[1] / "configs" / "v4.toml"
-        config = TrainConfig.from_toml(config_path)
+    def test_halfka_v2_hm_shape_is_derived_from_feature_name(self) -> None:
+        config = TrainConfig.from_dict(
+            {
+                "datasets": ["/tmp/train.binpack"],
+                "max_epochs": 1,
+                "epoch_size": 1,
+                "features": "HalfKAv2_hm^",
+            }
+        )
 
-        self.assertTrue(config.run_name)
-        self.assertEqual(config.ft_size, 1024)
-        self.assertEqual(config.l1_size, 256)
-        self.assertEqual(config.l2_size, 64)
-        self.assertEqual(config.num_features, 40_960)
-        self.assertEqual(config.wdl_lambda, 1.0)
-        self.assertEqual(config.wdl_lambda_end, 0.75)
-        self.assertEqual(config.nnue2score, 600.0)
-        self.assertEqual(config.wdl_in_offset, 270.0)
-        self.assertEqual(config.wdl_in_scaling, 340.0)
-        self.assertEqual(config.wdl_out_offset, 270.0)
-        self.assertEqual(config.wdl_out_scaling, 380.0)
-        self.assertEqual(config.learning_rate, 0.000875)
-        self.assertEqual(config.lr_gamma, 0.992)
-        self.assertEqual(config.random_fen_skipping, 3)
-        self.assertTrue(config.skip_tactical_positions)
-        self.assertTrue(config.skip_wdl_score_mismatch)
-        self.assertTrue(config.cuda_tf32)
-        self.assertTrue(config.cuda_fused_optimizer)
-        self.assertEqual(config.validation_split_fraction, 0.01)
+        self.assertEqual(config.features, "HalfKAv2_hm^")
+        self.assertEqual(config.num_features, 24_576)
+        self.assertEqual(config.num_factor_features, 768)
+        self.assertEqual(config.max_active_features, 32)
 
-    def test_v5_t60_t70_isright_farseer_finetune_config_uses_stockfish_second_stage_shape(self) -> None:
-        config_path = Path(__file__).resolve().parents[1] / "configs" / "v5.toml"
-        config = TrainConfig.from_toml(config_path)
+    def test_v4_reference_config_loads_stockfish_style_recipe(self) -> None:
+        config = TrainConfig.from_toml(Path(__file__).resolve().parents[1] / "configs" / "v4.toml")
 
-        self.assertEqual(config.run_name, "v5")
-        self.assertIn("T60T70wIsRightFarseer.binpack", config.train_datasets[0])
-        self.assertEqual(config.ft_size, 1024)
-        self.assertEqual(config.l1_size, 256)
-        self.assertEqual(config.l2_size, 64)
-        self.assertEqual(config.batch_size, 16384)
-        self.assertEqual(config.total_train_positions, 20_000_000_000)
-        self.assertEqual(config.epoch_positions, 100_000_000)
-        self.assertEqual(config.learning_rate, 0.0004375)
-        self.assertEqual(config.lr_gamma, 0.995)
-        self.assertEqual(config.random_fen_skipping, 3)
-        self.assertTrue(config.skip_tactical_positions)
-        self.assertTrue(config.skip_wdl_score_mismatch)
-        self.assertEqual(config.wdl_lambda, 1.0)
-        self.assertEqual(config.wdl_lambda_end, 0.75)
-        self.assertEqual(config.max_abs_score_cp, 0.0)
+        self.assertEqual(config.run_name, "v4")
+        self.assertIn("nodes5000pv2_UHO.binpack", config.datasets[0])
+        self.assertEqual(config.batch_size, 1024)
+        self.assertEqual(config.max_epochs, 10)
+        self.assertEqual(config.epoch_size, 1_048_500)
+        self.assertEqual(config.total_positions, 10_485_000)
+        self.assertEqual(config.validation_size, 1_048_500)
+        self.assertEqual(config.start_lambda, 1.0)
+        self.assertEqual(config.end_lambda, 0.75)
+        self.assertEqual(config.network_testing_nodes_per_move, 1000)
+        self.assertEqual(config.features, "HalfKAv2_hm^")
+        self.assertEqual(config.num_features, 24_576)
+        self.assertEqual(config.num_factor_features, 768)
+        self.assertEqual(config.max_active_features, 32)
+
+    def test_v5_and_v6_use_stockfish_epoch_config_names(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "configs"
+        v5 = TrainConfig.from_toml(root / "v5.toml")
+        v6 = TrainConfig.from_toml(root / "v6.toml")
+
+        self.assertEqual(v5.max_epochs, 40)
+        self.assertEqual(v5.epoch_size, 100_000_000)
+        self.assertEqual(v5.lr, 0.0004375)
+        self.assertEqual(v5.gamma, 0.995)
+        self.assertEqual(v5.start_lambda, 1.0)
+        self.assertEqual(v5.end_lambda, 0.75)
+        self.assertEqual(v5.features, "HalfKAv2_hm^")
+
+        self.assertEqual(v6.max_epochs, 20)
+        self.assertEqual(v6.epoch_size, 100_000_000)
+        self.assertEqual(v6.lr, 0.00005)
+        self.assertEqual(v6.gamma, 0.997)
+        self.assertEqual(v6.start_lambda, 1.0)
+        self.assertEqual(v6.end_lambda, 0.75)
+        self.assertEqual(v6.features, "HalfKAv2_hm^")
 
 
 if __name__ == "__main__":

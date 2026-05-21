@@ -85,18 +85,23 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         status = "missing-metrics"
 
     batch_size = _as_int(_config_value(run, "batch_size"))
-    total_train_positions = _as_int(_config_value(run, "total_train_positions"))
-    epoch_positions = _as_int(_config_value(run, "epoch_positions"))
-    wdl_lambda = _as_float(_config_value(run, "wdl_lambda"))
-    wdl_lambda_end = _as_float(_config_value(run, "wdl_lambda_end"))
+    max_epochs = _as_int(_config_value(run, "max_epochs"))
+    epoch_size = _as_int(_config_value(run, "epoch_size"))
+    configured_total_positions = (
+        None
+        if max_epochs is None or epoch_size is None
+        else max_epochs * epoch_size
+    )
+    start_lambda = _as_float(_config_value(run, "start_lambda", "lambda_"))
+    end_lambda = _as_float(_config_value(run, "end_lambda", "lambda_"))
     nnue2score = _as_float(_config_value(run, "nnue2score"))
-    wdl_in_scaling = _as_float(_config_value(run, "wdl_in_scaling"))
-    wdl_out_scaling = _as_float(_config_value(run, "wdl_out_scaling"))
-    max_abs_score_cp = _as_float(_config_value(run, "max_abs_score_cp", "max_abs_score"))
-    lr_gamma = _as_float(_config_value(run, "lr_gamma"))
-    skip_tactical_positions = _config_value(run, "skip_tactical_positions", "smart_fen_skipping")
-    skip_wdl_score_mismatch = _config_value(run, "skip_wdl_score_mismatch", "wld_fen_skipping")
+    in_scaling = _as_float(_config_value(run, "in_scaling"))
+    out_scaling = _as_float(_config_value(run, "out_scaling"))
+    gamma = _as_float(_config_value(run, "gamma"))
+    filtered = _config_value(run, "filtered")
+    wld_filtered = _config_value(run, "wld_filtered")
     random_fen_skipping = _as_int(_config_value(run, "random_fen_skipping"))
+    network_testing_nodes_per_move = _as_int(_config_value(run, "network_testing_nodes_per_move"))
 
     latest_train_step = _record_step(latest_train)
     latest_train_positions = _record_positions(latest_train, batch_size)
@@ -141,8 +146,8 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
     )
 
     latest_position_fraction = None
-    if total_train_positions is not None and total_train_positions > 0 and latest_train_positions is not None:
-        latest_position_fraction = latest_train_positions / total_train_positions
+    if configured_total_positions is not None and configured_total_positions > 0 and latest_train_positions is not None:
+        latest_position_fraction = latest_train_positions / configured_total_positions
 
     latest_lr_fraction_of_initial = None
     if latest_lr is not None and initial_lr is not None and initial_lr > 0.0:
@@ -173,7 +178,7 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "latest_epoch_index": latest_epoch_index,
         "latest_train_loss": _metric_value(latest_train, "loss"),
         "latest_train_wdl_loss": _metric_value(latest_train, "wdl_loss"),
-        "latest_train_wdl_lambda": _metric_value(latest_train, "wdl_lambda"),
+        "latest_train_lambda": _metric_value(latest_train, "lambda"),
         "latest_train_teacher_wdl_loss": _metric_value(latest_train, "teacher_wdl_loss"),
         "latest_train_result_wdl_loss": _metric_value(latest_train, "result_wdl_loss", "wdl_loss"),
         "latest_train_output_reg_loss": _metric_value(latest_train, "output_reg_loss"),
@@ -182,7 +187,7 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "latest_validation_positions": latest_validation_positions,
         "latest_validation_loss": _metric_value(latest_validation, "validation_loss"),
         "latest_validation_wdl_loss": _metric_value(latest_validation, "validation_wdl_loss"),
-        "latest_validation_wdl_lambda": _metric_value(latest_validation, "wdl_lambda"),
+        "latest_validation_lambda": _metric_value(latest_validation, "lambda"),
         "latest_validation_teacher_wdl_loss": _metric_value(latest_validation, "validation_teacher_wdl_loss"),
         "latest_validation_result_wdl_loss": _metric_value(
             latest_validation,
@@ -214,10 +219,11 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "best_deployable_checkpoint_metric_name": run.best_deployable_checkpoint_metric_name,
         "best_deployable_checkpoint_metric_value": run.best_deployable_checkpoint_metric_value,
         "best_deployable_checkpoint_positions": run.best_deployable_checkpoint_positions,
-        "configured_total_positions": total_train_positions,
+        "configured_total_positions": configured_total_positions,
         "latest_position_fraction": latest_position_fraction,
         "batch_size": batch_size,
-        "epoch_positions": epoch_positions,
+        "max_epochs": max_epochs,
+        "epoch_size": epoch_size,
         "train_log_interval_steps": train_log_interval_steps,
         "observed_validation_spacing_positions": observed_validation_spacing_positions,
         "best_validation_gap": best_validation_gap,
@@ -230,16 +236,16 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "latest_lr_fraction_of_initial": latest_lr_fraction_of_initial,
         "lr_near_zero": lr_near_zero,
         "scheduler_exhausted": scheduler_exhausted,
-        "wdl_lambda": wdl_lambda,
-        "wdl_lambda_end": wdl_lambda_end,
+        "start_lambda": start_lambda,
+        "end_lambda": end_lambda,
         "nnue2score": nnue2score,
-        "wdl_in_scaling": wdl_in_scaling,
-        "wdl_out_scaling": wdl_out_scaling,
-        "max_abs_score_cp": max_abs_score_cp,
-        "lr_gamma": lr_gamma,
-        "skip_tactical_positions": skip_tactical_positions,
-        "skip_wdl_score_mismatch": skip_wdl_score_mismatch,
+        "in_scaling": in_scaling,
+        "out_scaling": out_scaling,
+        "gamma": gamma,
+        "filtered": filtered,
+        "wld_filtered": wld_filtered,
         "random_fen_skipping": random_fen_skipping,
+        "network_testing_nodes_per_move": network_testing_nodes_per_move,
     }
     summary["suggestions"] = _build_suggestions(summary)
     return summary
@@ -331,27 +337,31 @@ def render_summary_text(summary: dict[str, object]) -> str:
     lines.append(f"configured_total_positions: {_format_optional_int(summary['configured_total_positions'])}")
     lines.append(f"latest_position_fraction: {_format_optional_fraction(summary['latest_position_fraction'])}")
     lines.append(f"batch_size: {_format_optional_int(summary['batch_size'])}")
-    lines.append(f"epoch_positions: {_format_optional_int(summary['epoch_positions'])}")
+    lines.append(f"max_epochs: {_format_optional_int(summary['max_epochs'])}")
+    lines.append(f"epoch_size: {_format_optional_int(summary['epoch_size'])}")
     lines.append(f"train_log_interval_steps: {_format_optional_int(summary['train_log_interval_steps'])}")
     lines.append(
         "observed_validation_spacing_positions: "
         f"{_format_optional_int(summary['observed_validation_spacing_positions'])}"
     )
     lines.append(f"latest_lr_fraction_of_initial: {_format_optional_float(summary['latest_lr_fraction_of_initial'])}")
-    lines.append(f"lr_gamma: {_format_optional_float(summary['lr_gamma'])}")
+    lines.append(f"gamma: {_format_optional_float(summary['gamma'])}")
     lines.append(f"lr_near_zero: {summary['lr_near_zero']}")
     lines.append(f"scheduler_exhausted: {summary['scheduler_exhausted']}")
-    lines.append(f"wdl_lambda: {_format_optional_float(summary['wdl_lambda'])}")
-    lines.append(f"wdl_lambda_end: {_format_optional_float(summary['wdl_lambda_end'])}")
-    lines.append(f"latest_train_wdl_lambda: {_format_optional_float(summary['latest_train_wdl_lambda'])}")
-    lines.append(f"latest_validation_wdl_lambda: {_format_optional_float(summary['latest_validation_wdl_lambda'])}")
+    lines.append(f"start_lambda: {_format_optional_float(summary['start_lambda'])}")
+    lines.append(f"end_lambda: {_format_optional_float(summary['end_lambda'])}")
+    lines.append(f"latest_train_lambda: {_format_optional_float(summary['latest_train_lambda'])}")
+    lines.append(f"latest_validation_lambda: {_format_optional_float(summary['latest_validation_lambda'])}")
     lines.append(f"nnue2score: {_format_optional_float(summary['nnue2score'])}")
-    lines.append(f"wdl_in_scaling: {_format_optional_float(summary['wdl_in_scaling'])}")
-    lines.append(f"wdl_out_scaling: {_format_optional_float(summary['wdl_out_scaling'])}")
-    lines.append(f"max_abs_score_cp: {_format_optional_float(summary['max_abs_score_cp'])}")
-    lines.append(f"skip_tactical_positions: {summary['skip_tactical_positions']}")
-    lines.append(f"skip_wdl_score_mismatch: {summary['skip_wdl_score_mismatch']}")
+    lines.append(f"in_scaling: {_format_optional_float(summary['in_scaling'])}")
+    lines.append(f"out_scaling: {_format_optional_float(summary['out_scaling'])}")
+    lines.append(f"filtered: {summary['filtered']}")
+    lines.append(f"wld_filtered: {summary['wld_filtered']}")
     lines.append(f"random_fen_skipping: {_format_optional_int(summary['random_fen_skipping'])}")
+    lines.append(
+        "network_testing_nodes_per_move: "
+        f"{_format_optional_int(summary['network_testing_nodes_per_move'])}"
+    )
     lines.append("")
     lines.append("Generalization")
     lines.append(f"best_validation_gap: {_format_optional_float(summary['best_validation_gap'])}")
@@ -622,7 +632,7 @@ def _plot_overview(plt, formatter_factory, locator_factory, output_path: Path, r
 
     metadata = "\n".join(
         [
-            f"validation epoch size: {_format_optional_int(_validation_epoch_positions(run))}",
+            f"validation epoch size: {_format_optional_int(_validation_epoch_size(run))}",
             f"validation points: {len(run.validation_records)}",
             f"best checkpoint step: {_format_optional_int(run.checkpoint_global_step)}",
         ]
@@ -794,8 +804,8 @@ def _best_checkpoint_path(run_dir: Path) -> Path | None:
     return None
 
 
-def _validation_epoch_positions(run: MetricsRun) -> int | None:
-    return _as_int(_config_value(run, "epoch_positions"))
+def _validation_epoch_size(run: MetricsRun) -> int | None:
+    return _as_int(_config_value(run, "epoch_size"))
 
 
 def _best_validation_index(run: MetricsRun, *, batch_size: int | None) -> int | None:
@@ -970,22 +980,22 @@ def _build_suggestions(summary: dict[str, object]) -> list[str]:
         )
     elif summary["resume_recommendation"] == "continue-latest":
         suggestions.append(
-            "Validation is still near its best point; resume from the latest checkpoint and extend total_train_positions."
+            "Validation is still near its best point; resume from the latest checkpoint and extend max_epochs."
         )
     elif summary["resume_recommendation"] == "export-best":
         suggestions.append("Best validation is materially earlier than the end; export best.pt and start the next experiment from there.")
     else:
         suggestions.append("There are too few validation points to judge continuation confidently yet.")
 
-    wdl_lambda = summary["wdl_lambda"]
-    wdl_lambda_end = summary["wdl_lambda_end"]
+    start_lambda = summary["start_lambda"]
+    end_lambda = summary["end_lambda"]
     if (
-        wdl_lambda is not None
-        and wdl_lambda_end is not None
-        and abs(float(wdl_lambda) - float(wdl_lambda_end)) > 1e-12
+        start_lambda is not None
+        and end_lambda is not None
+        and abs(float(start_lambda) - float(end_lambda)) > 1e-12
     ):
         suggestions.append(
-            "Total loss uses a moving wdl_lambda, so compare score_mae and teacher_wdl_loss before treating an upward total-loss curve as divergence."
+            "Total loss uses a moving lambda, so compare score_mae and teacher_wdl_loss before treating an upward total-loss curve as divergence."
         )
 
     cp_corr = summary["latest_validation_cp_corr"]
@@ -1003,11 +1013,11 @@ def _build_suggestions(summary: dict[str, object]) -> list[str]:
         suggestions.append(
             "Material ladder is barely ordered; prefer best_deployable.pt when available, or continue/retrain until the material gaps clear the deployable margin."
         )
-    wdl_in_scaling = summary["wdl_in_scaling"]
-    wdl_out_scaling = summary["wdl_out_scaling"]
+    in_scaling = summary["in_scaling"]
+    out_scaling = summary["out_scaling"]
     if (
-        (wdl_in_scaling is not None and wdl_in_scaling >= 2000.0)
-        or (wdl_out_scaling is not None and wdl_out_scaling >= 2000.0)
+        (in_scaling is not None and in_scaling >= 2000.0)
+        or (out_scaling is not None and out_scaling >= 2000.0)
     ):
         suggestions.append(
             "WDL scaling is very flat for a filtered stream; inspect with the same filters as training and prefer a Stockfish-like scale near 400-600 unless the filtered data is still saturated."
@@ -1015,7 +1025,7 @@ def _build_suggestions(summary: dict[str, object]) -> list[str]:
     if summary["scheduler_exhausted"]:
         suggestions.append("Learning rate is effectively exhausted; if validation is still improving, continue by increasing the position budget.")
     if summary["positions_seen"] is not None and summary["positions_seen"] < 500_000_000:
-        suggestions.append("The position budget is still modest for a sparse HalfKP feature transformer; the run may simply need more data exposure.")
+        suggestions.append("The position budget is still modest for a sparse NNUE feature transformer; the run may simply need more data exposure.")
     if not suggestions:
         suggestions.append("No obvious red flags; compare this run against engine testing and nearby hyperparameter variants.")
     return suggestions

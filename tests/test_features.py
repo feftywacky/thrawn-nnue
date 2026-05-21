@@ -8,6 +8,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from thrawn_nnue.board import BoardState, flip_vertical, square_to_index
 from thrawn_nnue.features import (
+    HALFKA_V2_HM_MAX_ACTIVE_FEATURES,
+    HALFKA_V2_HM_NUM_FEATURES,
     MAX_ACTIVE_FEATURES,
     NUM_FEATURES,
     active_feature_indices,
@@ -37,6 +39,16 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(len(black), MAX_ACTIVE_FEATURES)
         self.assertTrue(all(0 <= value < NUM_FEATURES for value in white))
         self.assertTrue(all(0 <= value < NUM_FEATURES for value in black))
+
+    def test_halfka_v2_hm_features_include_kings_and_fit_stockfish_width(self) -> None:
+        board = BoardState.from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1")
+        white = active_feature_indices(board, "white", features="HalfKAv2_hm^")
+        black = active_feature_indices(board, "black", features="HalfKAv2_hm^")
+
+        self.assertEqual(len(white), HALFKA_V2_HM_MAX_ACTIVE_FEATURES)
+        self.assertEqual(len(black), HALFKA_V2_HM_MAX_ACTIVE_FEATURES)
+        self.assertTrue(all(0 <= value < HALFKA_V2_HM_NUM_FEATURES for value in white))
+        self.assertTrue(all(0 <= value < HALFKA_V2_HM_NUM_FEATURES for value in black))
 
     def test_king_square_uses_perspective_king(self) -> None:
         board = BoardState.from_fen("8/8/8/8/8/8/4p3/4K2k b - - 0 1")

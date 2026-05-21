@@ -8,16 +8,18 @@ import time
 @dataclass(slots=True)
 class ConsoleContext:
     run_name: str
-    device: str
+    accelerator: str
     train_shards: int
     validation_shards: int
-    total_train_positions: int
+    max_epochs: int
+    epoch_size: int
+    total_positions: int
     initial_positions_seen: int
     batch_size: int
-    epoch_positions: int
-    log_every: int
+    log_every_n_steps: int
     nnue2score: float = 600.0
-    prefetch_batches: int = 0
+    data_loader_queue_size: int = 0
+    network_testing_nodes_per_move: int = 0
 
 
 class _BaseReporter:
@@ -55,27 +57,31 @@ class TextReporter(_BaseReporter):
         self._started_at = time.monotonic()
         self._latest_validation_loss: float | None = None
         self._log_every = 1
-        self._total_train_positions = 0
+        self._total_positions = 0
 
     def startup(self, context: ConsoleContext) -> None:
-        self._log_every = context.log_every
-        self._total_train_positions = context.total_train_positions
+        self._log_every = context.log_every_n_steps
+        self._total_positions = context.total_positions
         print(
             "training start:"
             f" run={context.run_name}"
-            f" device={context.device}"
+            f" accelerator={context.accelerator}"
             f" train_shards={context.train_shards}"
             f" validation_shards={context.validation_shards}"
-            f" total_positions={_format_count(context.total_train_positions)}"
+            f" max_epochs={_format_count(context.max_epochs)}"
+            f" epoch_size={_format_count(context.epoch_size)}"
+            f" total_positions={_format_count(context.total_positions)}"
             f" batch_size={_format_count(context.batch_size)}"
             f" nnue2score={context.nnue2score:g}"
-            f" prefetch_batches={context.prefetch_batches}"
+            f" data_loader_queue_size={context.data_loader_queue_size}"
+            " network_testing_nodes_per_move="
+            f"{_format_optional_count(context.network_testing_nodes_per_move)}"
         )
         print(
             "training stream:"
-            " combined cyclic stream across all train_datasets;"
-            f" epoch_positions={_format_count(context.epoch_positions)};"
-            " validation runs at epoch boundaries;"
+            " combined cyclic stream across all datasets;"
+            f" epoch_size={_format_count(context.epoch_size)};"
+            " validation follows check_val_every_n_epoch;"
             f" validation uses non-cyclic passes across {context.validation_shards} validation shard(s)"
         )
         print(_train_metric_legend_line())
@@ -96,7 +102,7 @@ class TextReporter(_BaseReporter):
         elapsed = time.monotonic() - self._started_at
         pieces = [
             f"step={global_step}",
-            f"positions={_format_progress(positions_seen, self._total_train_positions)}",
+            f"positions={_format_progress(positions_seen, self._total_positions)}",
             f"epoch={epoch_index}",
             f"loss={loss:.6f}",
             f"lr={lr:.8f}",
@@ -153,7 +159,7 @@ class ProgressReporter(_BaseReporter):
 
     def startup(self, context: ConsoleContext) -> None:
         self._bar = self._tqdm(
-            total=context.total_train_positions,
+            total=context.total_positions,
             initial=context.initial_positions_seen,
             dynamic_ncols=True,
             file=sys.stdout,
@@ -163,19 +169,23 @@ class ProgressReporter(_BaseReporter):
         self._bar.write(
             "training start:"
             f" run={context.run_name}"
-            f" device={context.device}"
+            f" accelerator={context.accelerator}"
             f" train_shards={context.train_shards}"
             f" validation_shards={context.validation_shards}"
-            f" total_positions={_format_count(context.total_train_positions)}"
+            f" max_epochs={_format_count(context.max_epochs)}"
+            f" epoch_size={_format_count(context.epoch_size)}"
+            f" total_positions={_format_count(context.total_positions)}"
             f" batch_size={_format_count(context.batch_size)}"
             f" nnue2score={context.nnue2score:g}"
-            f" prefetch_batches={context.prefetch_batches}"
+            f" data_loader_queue_size={context.data_loader_queue_size}"
+            " network_testing_nodes_per_move="
+            f"{_format_optional_count(context.network_testing_nodes_per_move)}"
         )
         self._bar.write(
             "training stream:"
-            " combined cyclic stream across all train_datasets;"
-            f" epoch_positions={_format_count(context.epoch_positions)};"
-            " validation runs at epoch boundaries;"
+            " combined cyclic stream across all datasets;"
+            f" epoch_size={_format_count(context.epoch_size)};"
+            " validation follows check_val_every_n_epoch;"
             f" validation uses non-cyclic passes across {context.validation_shards} validation shard(s)"
         )
         self._bar.write(_train_metric_legend_line())
@@ -280,6 +290,12 @@ def _format_seconds(value: float) -> str:
 
 def _format_count(value: int) -> str:
     return f"{int(value):,}"
+
+
+def _format_optional_count(value: int) -> str:
+    if int(value) <= 0:
+        return "unset"
+    return _format_count(value)
 
 
 def _format_progress(current: int, total: int) -> str:

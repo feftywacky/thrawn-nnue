@@ -137,7 +137,8 @@ void* thrawn_binpack_open_many(
     std::int32_t random_fen_skipping,
     double max_abs_score,
     std::int32_t split_role,
-    double validation_split_fraction
+    double validation_split_fraction,
+    std::int32_t feature_set
 );
 void thrawn_binpack_close(void* handle);
 ThrawnBatchView* thrawn_binpack_next_batch(void* handle, std::int32_t batch_size);
@@ -160,10 +161,21 @@ namespace {
 
 thread_local std::string g_last_error;
 
-constexpr std::int32_t kFactorFeatures = 640;
-constexpr std::int32_t kNumFeatures = 40960;
-constexpr std::int32_t kMaxActiveFeatures = 30;
+constexpr std::int32_t kHalfKpFactorFeatures = 640;
+constexpr std::int32_t kHalfKpMaxActiveFeatures = 30;
+constexpr std::int32_t kHalfKaV2HmFactorFeatures = 768;
+constexpr std::int32_t kHalfKaV2HmMaxActiveFeatures = 32;
 constexpr double kStockfishInternalToCp = 100.0 / 208.0;
+constexpr std::array<std::int32_t, 64> kHalfKaV2HmKingBuckets{
+    -1, -1, -1, -1, 31, 30, 29, 28,
+    -1, -1, -1, -1, 27, 26, 25, 24,
+    -1, -1, -1, -1, 23, 22, 21, 20,
+    -1, -1, -1, -1, 19, 18, 17, 16,
+    -1, -1, -1, -1, 15, 14, 13, 12,
+    -1, -1, -1, -1, 11, 10, 9, 8,
+    -1, -1, -1, -1, 7, 6, 5, 4,
+    -1, -1, -1, -1, 3, 2, 1, 0,
+};
 constexpr std::array<chess::PieceType, 6> kPieceTypes{
     chess::PieceType::Pawn,
     chess::PieceType::Knight,
@@ -171,6 +183,11 @@ constexpr std::array<chess::PieceType, 6> kPieceTypes{
     chess::PieceType::Rook,
     chess::PieceType::Queen,
     chess::PieceType::King,
+};
+
+enum class FeatureSet : std::int32_t {
+    HalfKp = 0,
+    HalfKaV2Hm = 1,
 };
 
 struct BinpackFilterOptions {
@@ -191,9 +208,11 @@ struct ReaderHandle {
         std::vector<std::string> input_paths,
         std::int32_t num_threads,
         bool cyclic,
-        BinpackFilterOptions filter_options
+        BinpackFilterOptions filter_options,
+        FeatureSet input_feature_set
     ) :
         paths(std::move(input_paths)),
+        feature_set(input_feature_set),
         reader(std::make_unique<CompressedTrainingDataEntryParallelReader>(
             std::max(1, num_threads),
             paths,
@@ -204,6 +223,7 @@ struct ReaderHandle {
     {}
 
     std::vector<std::string> paths;
+    FeatureSet feature_set;
     std::unique_ptr<CompressedTrainingDataEntryParallelReader> reader;
 };
 
@@ -231,7 +251,7 @@ struct ReaderHandle {
     chess::Piece piece
 ) {
     const auto oriented_king = orient_square(perspective, king_sq);
-    return oriented_king * kFactorFeatures + factor_feature_index(perspective, sq, piece);
+    return oriented_king * kHalfKpFactorFeatures + factor_feature_index(perspective, sq, piece);
 }
 
 [[nodiscard]] std::int32_t fill_feature_list(
@@ -249,12 +269,85 @@ struct ReaderHandle {
         if (piece.type() == chess::PieceType::King) {
             continue;
         }
-        if (count >= kMaxActiveFeatures) {
+        if (count >= kHalfKpMaxActiveFeatures) {
             break;
         }
         out_features[count++] = feature_index(perspective, king_sq, sq, piece);
     }
     return count;
+}
+
+[[nodiscard]] std::int32_t halfka_v2_hm_orient(
+    chess::Color perspective,
+    chess::Square sq,
+    chess::Square king_sq
+) {
+    std::int32_t result = static_cast<std::int32_t>(sq);
+    if (static_cast<int>(king_sq.file()) < 4) {
+        result ^= 7;
+    }
+    if (perspective == chess::Color::Black) {
+        result ^= 56;
+    }
+    return result;
+}
+
+[[nodiscard]] std::int32_t halfka_v2_hm_feature_index(
+    chess::Color perspective,
+    chess::Square king_sq,
+    chess::Square sq,
+    chess::Piece piece
+) {
+    const auto piece_bucket =
+        static_cast<std::int32_t>(piece.type()) * 2 +
+        static_cast<std::int32_t>(piece.color() != perspective);
+    const auto oriented_king = halfka_v2_hm_orient(perspective, king_sq, king_sq);
+    const auto king_bucket = kHalfKaV2HmKingBuckets[static_cast<std::size_t>(oriented_king)];
+    if (king_bucket < 0) {
+        throw std::runtime_error("HalfKAv2_hm king orientation did not map to a valid bucket");
+    }
+    return halfka_v2_hm_orient(perspective, sq, king_sq) +
+           piece_bucket * 64 +
+           king_bucket * kHalfKaV2HmFactorFeatures;
+}
+
+[[nodiscard]] std::int32_t fill_halfka_v2_hm_feature_list(
+    const chess::Position& pos,
+    chess::Color perspective,
+    std::int32_t* out_features
+) {
+    const auto king_sq = pos.kingSquare(perspective);
+    std::int32_t count = 0;
+    for (chess::Square sq : pos.piecesBB()) {
+        const auto piece = pos.pieceAt(sq);
+        if (piece == chess::Piece::none()) {
+            continue;
+        }
+        if (count >= kHalfKaV2HmMaxActiveFeatures) {
+            break;
+        }
+        out_features[count++] = halfka_v2_hm_feature_index(perspective, king_sq, sq, piece);
+    }
+    return count;
+}
+
+[[nodiscard]] std::int32_t max_active_features(FeatureSet feature_set) {
+    if (feature_set == FeatureSet::HalfKaV2Hm) {
+        return kHalfKaV2HmMaxActiveFeatures;
+    }
+    return kHalfKpMaxActiveFeatures;
+}
+
+[[nodiscard]] std::int32_t fill_features(
+    const chess::Position& pos,
+    chess::Color perspective,
+    FeatureSet feature_set,
+    std::int32_t* out_features
+) {
+    if (feature_set == FeatureSet::HalfKaV2Hm) {
+        return fill_halfka_v2_hm_feature_list(pos, perspective, out_features);
+    }
+    return fill_feature_list(pos, perspective, out_features);
 }
 
 [[nodiscard]] float result_to_wdl(std::int16_t result) {
@@ -507,7 +600,8 @@ extern "C" void* thrawn_binpack_open_many(
     std::int32_t random_fen_skipping,
     double max_abs_score,
     std::int32_t split_role,
-    double validation_split_fraction
+    double validation_split_fraction,
+    std::int32_t feature_set
 ) {
     clear_error();
     try {
@@ -522,6 +616,9 @@ extern "C" void* thrawn_binpack_open_many(
         }
         if (random_fen_skipping < 0) {
             throw std::runtime_error("random_fen_skipping must be >= 0");
+        }
+        if (feature_set < 0 || feature_set > 1) {
+            throw std::runtime_error("feature_set must be 0 or 1");
         }
 
         std::vector<std::string> owned_paths;
@@ -542,7 +639,13 @@ extern "C" void* thrawn_binpack_open_many(
         filter_options.split_role = split_role;
         filter_options.validation_split_fraction = validation_split_fraction;
 
-        auto* handle = new ReaderHandle(std::move(owned_paths), num_threads, cyclic != 0, filter_options);
+        auto* handle = new ReaderHandle(
+            std::move(owned_paths),
+            num_threads,
+            cyclic != 0,
+            filter_options,
+            static_cast<FeatureSet>(feature_set)
+        );
         return handle;
     } catch (const std::exception& ex) {
         store_error(ex);
@@ -573,37 +676,40 @@ extern "C" ThrawnBatchView* thrawn_binpack_next_batch(void* handle, std::int32_t
         }
 
         auto* batch = new ThrawnBatchView{};
+        const auto active_feature_count = max_active_features(reader_handle->feature_set);
         batch->size = filled;
-        batch->max_active_features = kMaxActiveFeatures;
-        batch->white_indices = alloc_array<std::int32_t>(static_cast<std::size_t>(filled) * kMaxActiveFeatures);
-        batch->black_indices = alloc_array<std::int32_t>(static_cast<std::size_t>(filled) * kMaxActiveFeatures);
+        batch->max_active_features = active_feature_count;
+        batch->white_indices = alloc_array<std::int32_t>(static_cast<std::size_t>(filled) * active_feature_count);
+        batch->black_indices = alloc_array<std::int32_t>(static_cast<std::size_t>(filled) * active_feature_count);
         batch->stm = alloc_array<float>(filled);
         batch->score = alloc_array<float>(filled);
         batch->result_wdl = alloc_array<float>(filled);
 
         std::fill(
             batch->white_indices,
-            batch->white_indices + static_cast<std::size_t>(filled) * kMaxActiveFeatures,
+            batch->white_indices + static_cast<std::size_t>(filled) * active_feature_count,
             -1
         );
         std::fill(
             batch->black_indices,
-            batch->black_indices + static_cast<std::size_t>(filled) * kMaxActiveFeatures,
+            batch->black_indices + static_cast<std::size_t>(filled) * active_feature_count,
             -1
         );
 
         for (int i = 0; i < filled; ++i) {
             const auto& entry = entries[static_cast<std::size_t>(i)];
-            const auto base = static_cast<std::size_t>(i) * kMaxActiveFeatures;
+            const auto base = static_cast<std::size_t>(i) * active_feature_count;
 
-            static_cast<void>(fill_feature_list(
+            static_cast<void>(fill_features(
                 entry.pos,
                 chess::Color::White,
+                reader_handle->feature_set,
                 batch->white_indices + base
             ));
-            static_cast<void>(fill_feature_list(
+            static_cast<void>(fill_features(
                 entry.pos,
                 chess::Color::Black,
+                reader_handle->feature_set,
                 batch->black_indices + base
             ));
             batch->stm[i] = entry.pos.sideToMove() == chess::Color::White ? 1.0f : 0.0f;
