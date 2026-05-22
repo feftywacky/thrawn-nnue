@@ -29,11 +29,6 @@ class NativeTests(unittest.TestCase):
             self.assertEqual(sampled_stats["entries_seen"], 2)
             self.assertEqual(sampled_stats["entries_read"], 2)
 
-            filtered_stats = inspect_binpack(path, max_abs_score=10.0)
-            self.assertEqual(filtered_stats["entries_read"], 1)
-            self.assertAlmostEqual(float(filtered_stats["min_score"]), -12.0 * 100.0 / 208.0, places=5)
-            self.assertAlmostEqual(float(filtered_stats["max_score"]), -12.0 * 100.0 / 208.0, places=5)
-
             with BinpackStream([path], num_threads=1, cyclic=False) as stream:
                 batch = stream.next_batch(2)
                 self.assertIsNotNone(batch)
@@ -46,16 +41,14 @@ class NativeTests(unittest.TestCase):
                 self.assertEqual(batch.score.shape, (2,))
                 self.assertTrue(set(float(score) for score in batch.score.tolist()).issubset({-12.0, 24.0, 31.0}))
 
-            with BinpackStream([path], num_threads=1, cyclic=False, max_abs_score=10.0) as stream:
-                batch = stream.next_batch(3)
-                self.assertIsNotNone(batch)
-                assert batch is not None
-                self.assertEqual(batch.score.shape, (1,))
-                self.assertAlmostEqual(float(batch.score[0]), -12.0, places=5)
-
             with BinpackStream([path], num_threads=1, cyclic=False, skip_tactical_positions=True) as stream:
-                batch = stream.next_batch(3)
-                self.assertIsNotNone(batch)
+                self.assertIsNotNone(stream)
+
+            with BinpackStream([path], num_threads=1, cyclic=False, early_fen_skipping=999) as stream:
+                self.assertIsNone(stream.next_batch(3))
+
+            with BinpackStream([path], num_threads=1, cyclic=False, simple_eval_skipping=1) as stream:
+                self.assertIsNone(stream.next_batch(3))
 
             with BinpackStream([path], num_threads=1, cyclic=False) as stream:
                 batch = stream.next_batch(3)

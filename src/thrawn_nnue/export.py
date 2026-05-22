@@ -22,7 +22,6 @@ EXPECTED_FORWARD_SIZE = 1
 EXPECTED_FC1_OUTPUT_SIZE = 32
 MAX_DESCRIPTION_BYTES = 1_000_000
 STOCKFISH_INTERNAL_TO_CP = 100.0 / 208.0
-MATERIAL_ORDER_MIN_GAP_CP = 20.0
 HEADER_PREFIX_STRUCT = struct.Struct("<8sI")
 HEADER_REST_STRUCT = struct.Struct("<16sIIIIIIIIfffffI")
 DEFAULT_VERIFICATION_FENS = [
@@ -30,15 +29,6 @@ DEFAULT_VERIFICATION_FENS = [
     "r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/2P5/PP3PPP/RNBQKBNR b - - 0 3",
     "8/2k5/8/8/8/8/5K2/8 w - - 0 1",
 ]
-STARTING_POSITION_SANITY = ("starting_position", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1")
-MATERIAL_LADDER_POSITIONS = [
-    ("equal_material", "r1bqkbnr/pppp1ppp/2n5/4p3/4P3/2N5/PPPP1PPP/R1BQKBNR w - - 0 3"),
-    ("white_up_pawn", "r1bqkb1r/ppp2ppp/2p2n2/8/4P3/8/PPPP1PPP/RNBQKB1R w KQkq - 0 5"),
-    ("white_up_knight", "r1bqk1nr/pppp1ppp/2n5/4p3/4P3/2N3P1/PPPP1K1P/R1BQ1BNR w kq - 1 5"),
-    ("white_up_rook", "r1bk1b1N/p1p1qBpp/1pnp1n2/4p3/4P3/8/PPPP1PPP/RNBQK2R w KQ - 2 8"),
-    ("white_up_queen", "2r2b1r/pQ2p1pk/4bn1p/8/3n4/2N5/PPP2PPP/R1B2RK1 w - - 5 13"),
-]
-SANITY_POSITIONS = [STARTING_POSITION_SANITY, *MATERIAL_LADDER_POSITIONS]
 
 
 @dataclass(slots=True)
@@ -262,8 +252,6 @@ def verify_export(
     checkpoint_path: str | Path,
     nnue_path: str | Path,
     fens: list[str] | None = None,
-    *,
-    include_sanity: bool = False,
 ) -> dict[str, Any]:
     torch = _require_torch()
     from .checkpoint import load_checkpoint
@@ -328,8 +316,6 @@ def verify_export(
         "nnue2score": float(config.nnue2score),
         "quantization": _export_quantization_diagnostics(exported),
     }
-    if include_sanity:
-        report.update(_verify_material_sanity(model, exported, config, torch))
     return report
 
 
@@ -355,73 +341,7 @@ def render_verify_report(report: dict[str, Any]) -> str:
         ),
         _format_limit_hits(total_limit_hits, limit_hit_detail),
     ]
-    if "material_ordering_ok" in report:
-        lines.append(
-            "sanity: "
-            f"ordering={_pass_fail(bool(report.get('material_ordering_ok')))} "
-            f"margins={_pass_fail(bool(report.get('material_margins_ok')))} "
-            f"start_zero={_pass_fail(bool(report.get('starting_position_near_zero')))}"
-        )
     return "\n".join(lines)
-
-
-def _verify_material_sanity(model, exported: ExportedNetwork, config, torch) -> dict[str, Any]:
-    sanity_fens = [fen for _, fen in SANITY_POSITIONS]
-    with torch.no_grad():
-        white_indices, black_indices, stm = _batch_arrays_from_fens(
-            sanity_fens,
-            max_active_features=config.max_active_features,
-        )
-        sanity_checkpoint = model(
-            torch.from_numpy(white_indices).long(),
-            torch.from_numpy(black_indices).long(),
-            torch.from_numpy(stm).float().unsqueeze(1),
-        )
-        sanity_checkpoint = sanity_checkpoint * float(config.nnue2score)
-        sanity_checkpoint_values = [float(value) for value in sanity_checkpoint.reshape(-1).cpu().tolist()]
-    sanity_exported_values = evaluate_export(exported, sanity_fens)
-    sanity_positions = [
-        {
-            "name": name,
-            "fen": fen,
-            "checkpoint_score": checkpoint_score,
-            "exported_score": exported_score,
-            "checkpoint_cp": _score_to_cp(checkpoint_score),
-            "exported_cp": _score_to_cp(exported_score),
-            "abs_error": abs(checkpoint_score - exported_score),
-            "abs_error_cp": _score_to_cp(abs(checkpoint_score - exported_score)),
-        }
-        for (name, fen), checkpoint_score, exported_score in zip(
-            SANITY_POSITIONS,
-            sanity_checkpoint_values,
-            sanity_exported_values,
-            strict=True,
-        )
-    ]
-    sanity_export_lookup = {item["name"]: float(item["exported_score"]) for item in sanity_positions}
-    sanity_checkpoint_lookup = {item["name"]: float(item["checkpoint_score"]) for item in sanity_positions}
-    material_ordering_ok = (
-        sanity_export_lookup["equal_material"]
-        < sanity_export_lookup["white_up_pawn"]
-        < sanity_export_lookup["white_up_knight"]
-        < sanity_export_lookup["white_up_rook"]
-        < sanity_export_lookup["white_up_queen"]
-    )
-    exported_material_gaps_cp = _material_gaps_cp(sanity_export_lookup)
-    checkpoint_material_gaps_cp = _material_gaps_cp(sanity_checkpoint_lookup)
-    material_margins_ok = bool(
-        material_ordering_ok
-        and all(gap >= MATERIAL_ORDER_MIN_GAP_CP for gap in exported_material_gaps_cp.values())
-    )
-    return {
-        "sanity_positions": sanity_positions,
-        "material_ordering_ok": bool(material_ordering_ok),
-        "material_margins_ok": material_margins_ok,
-        "material_min_gap_cp": MATERIAL_ORDER_MIN_GAP_CP,
-        "checkpoint_material_gaps_cp": checkpoint_material_gaps_cp,
-        "exported_material_gaps_cp": exported_material_gaps_cp,
-        "starting_position_near_zero": abs(sanity_export_lookup["starting_position"]) <= _cp_to_score(50.0),
-    }
 
 
 def evaluate_export(exported: ExportedNetwork, fens: list[str]) -> list[float]:
@@ -459,19 +379,6 @@ def evaluate_export(exported: ExportedNetwork, fens: list[str]) -> list[float]:
 
 def _score_to_cp(value: float) -> float:
     return float(value) * STOCKFISH_INTERNAL_TO_CP
-
-
-def _cp_to_score(value: float) -> float:
-    return float(value) / STOCKFISH_INTERNAL_TO_CP
-
-
-def _material_gaps_cp(values: dict[str, float]) -> dict[str, float]:
-    return {
-        "pawn_over_equal": _score_to_cp(values["white_up_pawn"] - values["equal_material"]),
-        "knight_over_pawn": _score_to_cp(values["white_up_knight"] - values["white_up_pawn"]),
-        "rook_over_knight": _score_to_cp(values["white_up_rook"] - values["white_up_knight"]),
-        "queen_over_rook": _score_to_cp(values["white_up_queen"] - values["white_up_rook"]),
-    }
 
 
 def _exported_network_from_model(model, config) -> ExportedNetwork:
@@ -563,10 +470,6 @@ def _format_limit_hits(total_limit_hits: int, detail: list[str]) -> str:
     if total_limit_hits == 0:
         return "quantization: limit_hits=0"
     return f"quantization: limit_hits={total_limit_hits} ({', '.join(detail)})"
-
-
-def _pass_fail(value: bool) -> str:
-    return "pass" if value else "fail"
 
 
 def _quantized_tensor_stats(values: np.ndarray) -> dict[str, float]:

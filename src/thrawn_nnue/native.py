@@ -207,18 +207,14 @@ def build_native_extension(force: bool = False) -> Path:
 def inspect_binpack(
     path: str | Path,
     *,
-    skip_capture_positions: bool = False,
     skip_wdl_score_mismatch: bool = False,
-    max_abs_score: float = 0.0,
     sample_entries: int = 0,
 ) -> dict[str, object]:
     lib = _load_library()
     return _inspect_binpack_with_library(
         path,
         lib,
-        skip_capture_positions=skip_capture_positions,
         skip_wdl_score_mismatch=skip_wdl_score_mismatch,
-        max_abs_score=max_abs_score,
         sample_entries=sample_entries,
     )
 
@@ -227,13 +223,9 @@ def _inspect_binpack_with_library(
     path: str | Path,
     lib: ctypes.CDLL,
     *,
-    skip_capture_positions: bool = False,
     skip_wdl_score_mismatch: bool = False,
-    max_abs_score: float = 0.0,
     sample_entries: int = 0,
 ) -> dict[str, object]:
-    if max_abs_score < 0.0:
-        raise ValueError("max_abs_score must be >= 0")
     if sample_entries < 0:
         raise ValueError("sample_entries must be >= 0")
     stats = _InspectStats()
@@ -241,9 +233,7 @@ def _inspect_binpack_with_library(
     ok = lib.thrawn_inspect_binpack_with_options(
         os.fsencode(resolved),
         ctypes.byref(stats),
-        1 if skip_capture_positions else 0,
         1 if skip_wdl_score_mismatch else 0,
-        float(max_abs_score),
         int(sample_entries),
     )
     if ok != 1:
@@ -256,9 +246,7 @@ def _inspect_binpack_with_library(
         "format": _binpack_format_summary(),
         "file": _file_summary(stats, file_bytes),
         "filters": {
-            "skip_capture_positions": bool(skip_capture_positions),
             "skip_wdl_score_mismatch": bool(skip_wdl_score_mismatch),
-            "max_abs_score": float(max_abs_score),
             "sample_entries": int(sample_entries),
         },
         "sampled": sample_entries > 0,
@@ -411,16 +399,12 @@ def inspect_binpack_collection(
     paths: list[str | Path],
     *,
     jobs: int | None = None,
-    skip_capture_positions: bool = False,
     skip_wdl_score_mismatch: bool = False,
-    max_abs_score: float = 0.0,
     sample_entries: int = 0,
 ) -> dict[str, object]:
     resolved_paths = [Path(path).resolve() for path in paths]
     if not resolved_paths:
         raise ValueError("At least one .binpack path is required")
-    if max_abs_score < 0.0:
-        raise ValueError("max_abs_score must be >= 0")
     if sample_entries < 0:
         raise ValueError("sample_entries must be >= 0")
 
@@ -432,9 +416,7 @@ def inspect_binpack_collection(
         return _inspect_binpack_with_library(
             path,
             lib,
-            skip_capture_positions=skip_capture_positions,
             skip_wdl_score_mismatch=skip_wdl_score_mismatch,
-            max_abs_score=max_abs_score,
             sample_entries=sample_entries,
         )
 
@@ -454,9 +436,7 @@ def inspect_binpack_collection(
         "file_count": len(per_file),
         "format": _binpack_format_summary(),
         "filters": {
-            "skip_capture_positions": bool(skip_capture_positions),
             "skip_wdl_score_mismatch": bool(skip_wdl_score_mismatch),
-            "max_abs_score": float(max_abs_score),
             "sample_entries": int(sample_entries),
         },
         "sampled": sample_entries > 0,
@@ -496,22 +476,58 @@ class BinpackStream:
         *,
         num_threads: int = 1,
         cyclic: bool = False,
-        skip_capture_positions: bool = False,
         skip_wdl_score_mismatch: bool = False,
         skip_tactical_positions: bool = False,
         random_fen_skipping: int = 0,
-        max_abs_score: float = 0.0,
+        early_fen_skipping: int = -1,
+        soft_early_fen_skipping: int = 0,
+        simple_eval_skipping: int = -1,
+        param_index: int = 0,
+        pc_y0: float = 0.0,
+        pc_y1: float = 0.4,
+        pc_y2: float = 1.0,
+        pc_y3: float = 1.0,
+        pc_y4: float = 0.75,
+        ply_x1: float = 0.0,
+        ply_y1: float = 0.1,
+        ply_x2: float = 6.0,
+        ply_y2: float = 0.15,
+        ply_x3: float = 10.0,
+        ply_y3: float = 0.25,
+        ply_x4: float = 18.0,
+        ply_y4: float = 0.75,
         split_role: str = "all",
         validation_split_fraction: float = 0.0,
     ):
         if not paths:
             raise ValueError("At least one dataset path is required")
-        if max_abs_score < 0.0:
-            raise ValueError("max_abs_score must be >= 0")
         if validation_split_fraction < 0.0 or validation_split_fraction >= 1.0:
             raise ValueError("validation_split_fraction must be >= 0 and < 1")
         if random_fen_skipping < 0:
             raise ValueError("random_fen_skipping must be >= 0")
+        if early_fen_skipping < -1:
+            raise ValueError("early_fen_skipping must be >= -1")
+        if simple_eval_skipping < -1:
+            raise ValueError("simple_eval_skipping must be >= -1")
+        if param_index < 0:
+            raise ValueError("param_index must be >= 0")
+        for name, value in (
+            ("pc_y0", pc_y0),
+            ("pc_y1", pc_y1),
+            ("pc_y2", pc_y2),
+            ("pc_y3", pc_y3),
+            ("pc_y4", pc_y4),
+            ("ply_x1", ply_x1),
+            ("ply_y1", ply_y1),
+            ("ply_x2", ply_x2),
+            ("ply_y2", ply_y2),
+            ("ply_x3", ply_x3),
+            ("ply_y3", ply_y3),
+            ("ply_x4", ply_x4),
+            ("ply_y4", ply_y4),
+        ):
+            if not math.isfinite(float(value)):
+                raise ValueError(f"{name} must be finite")
         if split_role not in _SPLIT_ROLE_IDS:
             allowed = ", ".join(sorted(_SPLIT_ROLE_IDS))
             raise ValueError(f"split_role must be one of: {allowed}")
@@ -524,11 +540,26 @@ class BinpackStream:
             len(encoded_paths),
             num_threads,
             1 if cyclic else 0,
-            1 if skip_capture_positions else 0,
             1 if skip_wdl_score_mismatch else 0,
             1 if skip_tactical_positions else 0,
             int(random_fen_skipping),
-            float(max_abs_score),
+            int(early_fen_skipping),
+            int(soft_early_fen_skipping),
+            int(simple_eval_skipping),
+            int(param_index),
+            float(pc_y0),
+            float(pc_y1),
+            float(pc_y2),
+            float(pc_y3),
+            float(pc_y4),
+            float(ply_x1),
+            float(ply_y1),
+            float(ply_x2),
+            float(ply_y2),
+            float(ply_x3),
+            float(ply_y3),
+            float(ply_x4),
+            float(ply_y4),
             _SPLIT_ROLE_IDS[split_role],
             float(validation_split_fraction),
         )
@@ -609,6 +640,21 @@ def _configure_library_symbols(lib: ctypes.CDLL) -> None:
         ctypes.c_int32,
         ctypes.c_int32,
         ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_int32,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_double,
+        ctypes.c_double,
         ctypes.c_double,
         ctypes.c_int32,
         ctypes.c_double,
@@ -626,8 +672,6 @@ def _configure_library_symbols(lib: ctypes.CDLL) -> None:
         ctypes.c_char_p,
         ctypes.POINTER(_InspectStats),
         ctypes.c_int32,
-        ctypes.c_int32,
-        ctypes.c_double,
         ctypes.c_uint64,
     ]
     lib.thrawn_inspect_binpack_with_options.restype = ctypes.c_int32

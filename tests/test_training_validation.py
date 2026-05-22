@@ -273,7 +273,7 @@ class ValidationTrainingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "synthetic producer failure"):
                 next(source)
 
-    def test_run_validation_reports_cp_metrics_and_material_sanity(self) -> None:
+    def test_run_validation_reports_cp_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             train_path = tmp / "train.binpack"
@@ -292,6 +292,7 @@ class ValidationTrainingTests(unittest.TestCase):
                     "accelerator": "cpu",
                     "filtered": False,
                     "wld_filtered": False,
+                    "soft_early_fen_skipping": 0,
                 }
             )
             state = _create_state(config)
@@ -309,8 +310,8 @@ class ValidationTrainingTests(unittest.TestCase):
             self.assertIn("score_mae", metrics)
             self.assertIn("score_rmse", metrics)
             self.assertIn("score_corr", metrics)
-            self.assertIn("material_sanity", metrics)
-            self.assertIn("material_ordering_ok", metrics)
+            self.assertNotIn("material_sanity", metrics)
+            self.assertNotIn("material_ordering_ok", metrics)
             for key, before in model_before.items():
                 self.assertTrue(torch.equal(before, state.model.state_dict()[key]))
 
@@ -337,6 +338,7 @@ class ValidationTrainingTests(unittest.TestCase):
                     "amp": False,
                     "filtered": False,
                     "wld_filtered": False,
+                    "soft_early_fen_skipping": 0,
                 }
             )
 

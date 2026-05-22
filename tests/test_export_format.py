@@ -277,7 +277,7 @@ class ExportFormatTests(unittest.TestCase):
 
 @unittest.skipUnless(torch is not None, "PyTorch is required for verify-export tests")
 class VerifyExportTests(unittest.TestCase):
-    def test_verify_export_reports_material_sanity_suite(self) -> None:
+    def test_verify_export_reports_parity_and_quantization_diagnostics(self) -> None:
         from thrawn_nnue.model import HalfKAv2HmNNUE
 
         model = HalfKAv2HmNNUE()
@@ -307,14 +307,9 @@ class VerifyExportTests(unittest.TestCase):
             )
             export_checkpoint(checkpoint_path, nnue_path)
             report = verify_export(checkpoint_path, nnue_path)
-            sanity_report = verify_export(checkpoint_path, nnue_path, include_sanity=True)
             diagnostics = _export_quantization_diagnostics(load_export(nnue_path))
 
         self.assertNotIn("sanity_positions", report)
-        self.assertIn("sanity_positions", sanity_report)
-        self.assertEqual(len(sanity_report["sanity_positions"]), 6)
-        self.assertIn("material_ordering_ok", sanity_report)
-        self.assertIn("starting_position_near_zero", sanity_report)
         self.assertIn("export_fc0_scale", report)
         self.assertIn("fc0_weight", diagnostics)
 

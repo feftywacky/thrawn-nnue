@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from glob import glob
 from pathlib import Path
 from typing import Any
+import math
 import tomllib
 
 from .features import FEATURES, canonical_feature_name, feature_shape
@@ -23,7 +24,6 @@ class TrainConfig:
     batch_size: int = 16_384
     pin_memory: bool = True
     data_loader_queue_size: int = 8
-    threads: int = -1
     tf32: bool = True
     fused_optimizer: bool = True
     seed: int = 42
@@ -46,6 +46,23 @@ class TrainConfig:
     filtered: bool = True
     wld_filtered: bool = True
     random_fen_skipping: int = 0
+    early_fen_skipping: int = -1
+    soft_early_fen_skipping: int = 20
+    simple_eval_skipping: int = -1
+    param_index: int = 0
+    pc_y0: float = 0.0
+    pc_y1: float = 0.4
+    pc_y2: float = 1.0
+    pc_y3: float = 1.0
+    pc_y4: float = 0.75
+    ply_x1: float = 0.0
+    ply_y1: float = 0.1
+    ply_x2: float = 6.0
+    ply_y2: float = 0.15
+    ply_x3: float = 10.0
+    ply_y3: float = 0.25
+    ply_x4: float = 18.0
+    ply_y4: float = 0.75
 
     optimizer_name: str = "adamw"
     lr: float = 8.75e-4
@@ -132,10 +149,31 @@ class TrainConfig:
             raise ValueError("num_workers must be positive")
         if self.data_loader_queue_size < 0:
             raise ValueError("data_loader_queue_size must be >= 0")
-        if self.threads < -1:
-            raise ValueError("threads must be -1 or non-negative")
         if self.random_fen_skipping < 0:
             raise ValueError("random_fen_skipping must be >= 0")
+        if self.early_fen_skipping < -1:
+            raise ValueError("early_fen_skipping must be >= -1")
+        if self.simple_eval_skipping < -1:
+            raise ValueError("simple_eval_skipping must be >= -1")
+        if self.param_index < 0:
+            raise ValueError("param_index must be >= 0")
+        for name in (
+            "pc_y0",
+            "pc_y1",
+            "pc_y2",
+            "pc_y3",
+            "pc_y4",
+            "ply_x1",
+            "ply_y1",
+            "ply_x2",
+            "ply_y2",
+            "ply_x3",
+            "ply_y3",
+            "ply_x4",
+            "ply_y4",
+        ):
+            if not math.isfinite(float(getattr(self, name))):
+                raise ValueError(f"{name} must be finite")
         if self.optimizer_name != "adamw":
             raise ValueError("Only optimizer_name='adamw' is supported by this trainer")
         if self.lr <= 0.0:

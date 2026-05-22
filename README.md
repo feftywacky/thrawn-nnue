@@ -185,9 +185,9 @@ That config currently points at:
 
 - `data/nodes5000pv2_UHO.binpack`
 - output directory `configs/runs/v4`
-- Stockfish-style baseline schedule: `max_epochs = 400`, `epoch_size = 100,000,000`, `batch_size = 16,384`
+- Stockfish-style baseline schedule: `max_epochs = 200`, `epoch_size = 100,000,000`, `batch_size = 16,384`
 - `HalfKAv2_hm` features with `1024x2 -> 31+1 -> 32 -> 1`
-- Lambda schedule: `start_lambda = 1.0` to `end_lambda = 0.75`
+- Lambda schedule: `start_lambda = 1.0` to `end_lambda = 1.0`
 
 The current second-stage fine-tune config is:
 
@@ -206,6 +206,8 @@ Important config themes:
 - training budget and checkpoint cadence
 - optimizer / LR schedule
 - feature set and fixed Stockfish-style network constants
+- Stockfish-style dataloader skipping: tactical positions, WDL/score mismatch, random FEN skipping, hard/soft early-ply skipping, simple-eval skipping, and dynamic piece-count weighting
+- loader throughput: `num_workers` controls native `.binpack` reader concurrency; `data_loader_queue_size` controls Python-side prefetch depth
 - WDL target shaping
 - export quantization scales
 
@@ -237,7 +239,7 @@ Optional:
 
 ```bash
 thrawn-nnue train --config configs/v4.toml --console-mode text
-thrawn-nnue train --config configs/v4.toml --init-checkpoint configs/runs/v4/checkpoints/best.pt
+thrawn-nnue train --config configs/v4.toml --init-checkpoint configs/runs/v4/checkpoints/epoch_0123_best.pt
 ```
 
 `--init-checkpoint` warm-starts model weights but starts a fresh optimizer/scheduler state for the new run.
@@ -247,7 +249,7 @@ thrawn-nnue train --config configs/v4.toml --init-checkpoint configs/runs/v4/che
 Fine-tune from an existing checkpoint with a new config and a fresh optimizer:
 
 ```bash
-thrawn-nnue fine-tune --config configs/v5.toml --checkpoint configs/runs/v4/checkpoints/best.pt
+thrawn-nnue fine-tune --config configs/v5.toml --checkpoint configs/runs/v4/checkpoints/epoch_0123_best.pt
 ```
 
 This is equivalent to `train --init-checkpoint`, but names the workflow directly. Use it when changing datasets or optimizer settings while keeping trained weights.
@@ -273,39 +275,31 @@ Export writes the current `HalfKAv2_hm` v8 file format directly. The payload sto
 Export a checkpoint to `.nnue`:
 
 ```bash
-thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/best.pt --out configs/runs/v4/model.nnue
+thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/epoch_0123_best.pt --out configs/runs/v4/model.nnue
 ```
 
 Export and immediately verify checkpoint/export parity:
 
 ```bash
-thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/best.pt --out configs/runs/v4/model.nnue --verify
+thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/epoch_0123_best.pt --out configs/runs/v4/model.nnue --verify
 ```
 
 Checkpoint selection notes:
 
-- `best.pt` is the best checkpoint according to validation score metrics.
-- `best_deployable.pt`, when present, is the best validation-score checkpoint that also passes starting-position sanity and margin-aware material ordering.
-- `best_loss.pt` is the checkpoint with the lowest blended validation loss.
+- `epoch_####_best.pt` is the one retained best checkpoint, selected by lowest validation `score_mae`.
 
 ### Verify export
 
 Compare a PyTorch checkpoint against the exported `.nnue` file. The default output is a concise parity report; add `--json` for the full prediction and quantization diagnostics.
 
 ```bash
-thrawn-nnue verify-export --checkpoint configs/runs/v4/checkpoints/best.pt --nnue configs/runs/v4/model.nnue
-```
-
-The optional sanity suite checks a small set of fixed material positions in addition to checkpoint/export parity:
-
-```bash
-thrawn-nnue verify-export --checkpoint configs/runs/v4/checkpoints/best.pt --nnue configs/runs/v4/model.nnue --sanity
+thrawn-nnue verify-export --checkpoint configs/runs/v4/checkpoints/epoch_0123_best.pt --nnue configs/runs/v4/model.nnue
 ```
 
 You can also provide one or more custom FENs:
 
 ```bash
-thrawn-nnue verify-export --checkpoint configs/runs/v4/checkpoints/best.pt --nnue configs/runs/v4/model.nnue --fen "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1"
+thrawn-nnue verify-export --checkpoint configs/runs/v4/checkpoints/epoch_0123_best.pt --nnue configs/runs/v4/model.nnue --fen "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1"
 ```
 
 ### Inspect one dataset
@@ -325,7 +319,7 @@ thrawn-nnue inspect-binpack --path C:/path/to/data.binpack --sample-entries 1000
 Optional diagnostic filters:
 
 ```bash
-thrawn-nnue inspect-binpack --path C:/path/to/data.binpack --skip-capture-positions --skip-wdl-score-mismatch --max-abs-score 2000
+thrawn-nnue inspect-binpack --path C:/path/to/data.binpack --skip-wdl-score-mismatch
 ```
 
 ### Inspect a directory of datasets
@@ -358,7 +352,7 @@ Run artifacts typically include:
 
 - `metrics.jsonl`
 - `plots/loss.png`
-- `plots/validation_quality.png`
+- `plots/mae.png`
 
 ### Run tests
 
@@ -385,9 +379,8 @@ thrawn-nnue test --pattern "test_cli.py"
 5. Fine-tune with `thrawn-nnue fine-tune` when switching to better data.
 6. Resume if interrupted.
 7. Inspect `thrawn-nnue metrics`.
-8. Export `best.pt` or another chosen checkpoint with `--verify`.
-9. Optionally run `verify-export --sanity` for the fixed material-position smoke test.
-10. Integrate using [docs/nnue_spec.md](docs/nnue_spec.md).
+8. Export the `epoch_####_best.pt` checkpoint or another chosen checkpoint with `--verify`.
+9. Integrate using [docs/nnue_spec.md](docs/nnue_spec.md).
 
 ## Tests
 

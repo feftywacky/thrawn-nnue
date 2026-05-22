@@ -44,7 +44,7 @@ class CliTests(unittest.TestCase):
                 "--config",
                 "configs/v5.toml",
                 "--checkpoint",
-                "configs/runs/v4/checkpoints/best.pt",
+                "configs/runs/v4/checkpoints/epoch_0123_best.pt",
                 "--console-mode",
                 "text",
             ]
@@ -61,7 +61,7 @@ class CliTests(unittest.TestCase):
         train_from_config.assert_called_once_with(
             config,
             console_mode="text",
-            init_checkpoint="configs/runs/v4/checkpoints/best.pt",
+            init_checkpoint="configs/runs/v4/checkpoints/epoch_0123_best.pt",
         )
         print_mock.assert_called_once_with("out.pt")
 
@@ -78,7 +78,6 @@ class CliTests(unittest.TestCase):
                 "--out",
                 "model.nnue",
                 "--verify",
-                "--sanity",
                 "--fen",
                 fen,
             ]
@@ -97,7 +96,6 @@ class CliTests(unittest.TestCase):
             "checkpoint.pt",
             Path("model.nnue"),
             [fen],
-            include_sanity=True,
         )
         render_verify_report.assert_called_once_with(report)
         print_mock.assert_any_call("exported: model.nnue")
@@ -114,7 +112,6 @@ class CliTests(unittest.TestCase):
                 "checkpoint.pt",
                 "--nnue",
                 "model.nnue",
-                "--sanity",
             ]
             with (
                 patch("thrawn_nnue.export.verify_export", return_value=report) as verify_export,
@@ -129,7 +126,6 @@ class CliTests(unittest.TestCase):
             "checkpoint.pt",
             "model.nnue",
             None,
-            include_sanity=True,
         )
         render_verify_report.assert_called_once_with(report)
         print_mock.assert_called_once_with("verify text")

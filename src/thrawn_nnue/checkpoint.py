@@ -46,16 +46,10 @@ def save_checkpoint(
     global_step: int,
     positions_seen: int,
     epoch_index: int,
-    best_validation_loss: float | None = None,
-    best_validation_positions: int | None = None,
     best_checkpoint_metric_name: str | None = None,
     best_checkpoint_metric_value: float | None = None,
     best_checkpoint_positions: int | None = None,
     best_checkpoint_sort_key: tuple[float, ...] | None = None,
-    best_deployable_checkpoint_metric_name: str | None = None,
-    best_deployable_checkpoint_metric_value: float | None = None,
-    best_deployable_checkpoint_positions: int | None = None,
-    best_deployable_checkpoint_sort_key: tuple[float, ...] | None = None,
 ) -> Path:
     torch = _require_torch()
     output_path = Path(path)
@@ -70,20 +64,10 @@ def save_checkpoint(
         "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
         "scaler_state": scaler.state_dict() if scaler is not None else None,
         "rng_state": capture_rng_state(),
-        "best_validation_loss": best_validation_loss,
-        "best_validation_positions": best_validation_positions,
         "best_checkpoint_metric_name": best_checkpoint_metric_name,
         "best_checkpoint_metric_value": best_checkpoint_metric_value,
         "best_checkpoint_positions": best_checkpoint_positions,
         "best_checkpoint_sort_key": list(best_checkpoint_sort_key) if best_checkpoint_sort_key is not None else None,
-        "best_deployable_checkpoint_metric_name": best_deployable_checkpoint_metric_name,
-        "best_deployable_checkpoint_metric_value": best_deployable_checkpoint_metric_value,
-        "best_deployable_checkpoint_positions": best_deployable_checkpoint_positions,
-        "best_deployable_checkpoint_sort_key": (
-            list(best_deployable_checkpoint_sort_key)
-            if best_deployable_checkpoint_sort_key is not None
-            else None
-        ),
     }
     torch.save(payload, output_path)
     return output_path

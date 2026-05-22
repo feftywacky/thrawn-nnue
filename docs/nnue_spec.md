@@ -295,17 +295,12 @@ Before turning the net on in search:
 3. Verify incremental accumulator patching against full refresh.
 4. Verify king moves, castling, promotions, en passant, captures.
 5. Verify side-to-move sign handling.
-6. Optionally verify material sanity ordering with `thrawn-nnue verify-export --sanity`:
-
-```text
-equal_material < white_up_pawn < white_up_knight < white_up_rook < white_up_queen
-```
-
-`verify-export --sanity` also reports material gaps in cp. Treat tiny gaps, especially queen-over-rook, as unstable because quantization can flip them even when checkpoint-side ordering barely passes.
 
 ## Stockfish References
 
 - [Stockfish `HalfKAv2_hm` feature source](https://github.com/official-stockfish/Stockfish/blob/master/src/nnue/features/half_ka_v2_hm.h)
 - [Stockfish `HalfKAv2_hm::make_index`](https://github.com/official-stockfish/Stockfish/blob/master/src/nnue/features/half_ka_v2_hm.cpp)
 - [Stockfish NNUE architecture header](https://github.com/official-stockfish/Stockfish/blob/master/src/nnue/nnue_architecture.h)
+- [Stockfish `nnue-pytorch` dataloader skip config](https://github.com/official-stockfish/nnue-pytorch/blob/master/data_loader/config.py)
+- [Stockfish `nnue-pytorch` skip predicate](https://github.com/official-stockfish/nnue-pytorch/blob/master/data_loader/cpp/training_data_loader.cpp)
 - [Official nnue-pytorch architecture history](https://official-stockfish.github.io/docs/nnue-pytorch-wiki/docs/nnue.html)

@@ -131,11 +131,26 @@ void* thrawn_binpack_open_many(
     std::int32_t num_paths,
     std::int32_t num_threads,
     std::int32_t cyclic,
-    std::int32_t skip_capture_positions,
     std::int32_t skip_wdl_score_mismatch,
     std::int32_t skip_tactical_positions,
     std::int32_t random_fen_skipping,
-    double max_abs_score,
+    std::int32_t early_fen_skipping,
+    std::int32_t soft_early_fen_skipping,
+    std::int32_t simple_eval_skipping,
+    std::int32_t param_index,
+    double pc_y0,
+    double pc_y1,
+    double pc_y2,
+    double pc_y3,
+    double pc_y4,
+    double ply_x1,
+    double ply_y1,
+    double ply_x2,
+    double ply_y2,
+    double ply_x3,
+    double ply_y3,
+    double ply_x4,
+    double ply_y4,
     std::int32_t split_role,
     double validation_split_fraction
 );
@@ -146,9 +161,7 @@ std::int32_t thrawn_inspect_binpack(const char* path, ThrawnInspectStats* out_st
 std::int32_t thrawn_inspect_binpack_with_options(
     const char* path,
     ThrawnInspectStats* out_stats,
-    std::int32_t skip_capture_positions,
     std::int32_t skip_wdl_score_mismatch,
-    double max_abs_score,
     std::uint64_t sample_entries
 );
 std::int32_t thrawn_write_fixture_binpack(const char* path);
@@ -183,11 +196,26 @@ constexpr std::array<chess::PieceType, 6> kPieceTypes{
 };
 
 struct BinpackFilterOptions {
-    bool skip_capture_positions = false;
     bool skip_wdl_score_mismatch = false;
     bool skip_tactical_positions = false;
     std::int32_t random_fen_skipping = 0;
-    double max_abs_score = 0.0;
+    std::int32_t early_fen_skipping = -1;
+    std::int32_t soft_early_fen_skipping = 0;
+    std::int32_t simple_eval_skipping = -1;
+    std::int32_t param_index = 0;
+    double pc_y0 = 0.0;
+    double pc_y1 = 0.4;
+    double pc_y2 = 1.0;
+    double pc_y3 = 1.0;
+    double pc_y4 = 0.75;
+    double ply_x1 = 0.0;
+    double ply_y1 = 0.1;
+    double ply_x2 = 6.0;
+    double ply_y2 = 0.15;
+    double ply_x3 = 10.0;
+    double ply_y3 = 0.25;
+    double ply_x4 = 18.0;
+    double ply_y4 = 0.75;
     std::int32_t split_role = 0;
     double validation_split_fraction = 0.0;
     std::uint64_t sample_entries = 0;
@@ -343,61 +371,274 @@ void hash_combine(std::uint64_t& seed, std::uint64_t value) {
     return std::ldexp(static_cast<double>(thread_rng()() >> 11), -53);
 }
 
-[[nodiscard]] bool should_randomly_skip_fen(std::int32_t random_fen_skipping) {
-    if (random_fen_skipping <= 0) {
-        return false;
-    }
-    std::uniform_int_distribution<std::int32_t> distribution(0, random_fen_skipping);
-    return distribution(thread_rng()) != 0;
-}
-
-[[nodiscard]] bool should_skip_entry(const TrainingDataEntry& entry, const BinpackFilterOptions& options) {
-    if (options.skip_capture_positions && entry.isCapturingMove()) {
-        return true;
-    }
-
-    if (options.skip_tactical_positions && (entry.isCapturingMove() || entry.isInCheck())) {
-        return true;
-    }
-
-    const double score_cp = score_to_cp(static_cast<double>(entry.score));
-    const double abs_score_cp = std::abs(score_cp);
-
-    if (options.max_abs_score > 0.0 && abs_score_cp > options.max_abs_score) {
-        return true;
-    }
-
-    if (options.validation_split_fraction > 0.0 && options.split_role != 0) {
-        const bool is_validation_entry =
-            stable_unit_random(entry, 0x9e3779b97f4a7c15ULL) < options.validation_split_fraction;
-        if (options.split_role == 1 && is_validation_entry) {
-            return true;
-        }
-        if (options.split_role == 2 && !is_validation_entry) {
-            return true;
-        }
-    }
-
-    if (options.skip_wdl_score_mismatch) {
-        const double keep_probability = std::clamp(entry.score_result_prob(), 0.0, 1.0);
-        const double draw = options.split_role == 2
-            ? stable_unit_random(entry, 0xd1b54a32d192ed03ULL)
-            : random_unit();
-        if (draw >= keep_probability) {
-            return true;
-        }
-    }
-
-    if (options.split_role != 2 && should_randomly_skip_fen(options.random_fen_skipping)) {
-        return true;
-    }
-
-    return false;
-}
-
 [[nodiscard]] std::function<bool(const TrainingDataEntry&)> make_skip_predicate(BinpackFilterOptions options) {
-    return [options](const TrainingDataEntry& entry) {
-        return should_skip_entry(entry, options);
+    const bool has_stockfish_filter =
+        options.skip_tactical_positions ||
+        options.skip_wdl_score_mismatch ||
+        options.random_fen_skipping > 0 ||
+        options.early_fen_skipping >= 0 ||
+        options.soft_early_fen_skipping > 0 ||
+        options.simple_eval_skipping > 0;
+    const bool has_local_filter =
+        (options.validation_split_fraction > 0.0 && options.split_role != 0);
+    if (!has_stockfish_filter && !has_local_filter) {
+        return nullptr;
+    }
+
+    std::uint64_t random_skip_threshold = 0;
+    if (options.random_fen_skipping > 0) {
+        const double skip_prob =
+            static_cast<double>(options.random_fen_skipping) /
+            static_cast<double>(options.random_fen_skipping + 1);
+        random_skip_threshold = static_cast<std::uint64_t>(
+            skip_prob * static_cast<double>(std::numeric_limits<std::uint64_t>::max())
+        );
+    }
+
+    std::array<double, 33> target_pc_weights_lut{};
+    double target_pc_weights_total = 0.0;
+
+    auto desired_piece_count_weight = [&options](int pc) -> double {
+        const double x = static_cast<double>(pc);
+        const double y[5] = {options.pc_y0, options.pc_y1, options.pc_y2, options.pc_y3, options.pc_y4};
+
+        if (x <= 0.0) {
+            return y[0];
+        }
+        if (x >= 32.0) {
+            return y[4];
+        }
+
+        int i = static_cast<int>(x / 8.0);
+        if (i > 3) {
+            i = 3;
+        }
+
+        const double x0 = static_cast<double>(i) * 8.0;
+        const double t = (x - x0) / 8.0;
+
+        auto get_slope = [&](int idx) {
+            if (idx == 0) {
+                return y[1] - y[0];
+            }
+            if (idx == 4) {
+                return y[4] - y[3];
+            }
+            return (y[idx + 1] - y[idx - 1]) / 2.0;
+        };
+
+        const double m0 = get_slope(i);
+        const double m1 = get_slope(i + 1);
+        const double t2 = t * t;
+        const double t3 = t2 * t;
+        const double h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+        const double h10 = t3 - 2.0 * t2 + t;
+        const double h01 = -2.0 * t3 + 3.0 * t2;
+        const double h11 = t3 - t2;
+
+        const double value = h00 * y[i] + h10 * m0 + h01 * y[i + 1] + h11 * m1;
+        return std::max(0.0, value);
+    };
+
+    for (int i = 0; i < 33; ++i) {
+        target_pc_weights_lut[static_cast<std::size_t>(i)] = desired_piece_count_weight(i);
+        target_pc_weights_total += target_pc_weights_lut[static_cast<std::size_t>(i)];
+    }
+    if (target_pc_weights_total <= 0.0) {
+        target_pc_weights_lut.fill(1.0);
+        target_pc_weights_total = static_cast<double>(target_pc_weights_lut.size());
+    }
+
+    std::vector<double> early_ply_accept_prob;
+    if (options.soft_early_fen_skipping > 0) {
+        const auto lut_size = static_cast<std::size_t>(options.soft_early_fen_skipping) + 1;
+        early_ply_accept_prob.resize(lut_size);
+
+        auto interpolate_ply = [&options](double ply) -> double {
+            struct Point {
+                double x;
+                double y;
+            };
+            const Point points[5] = {
+                {options.ply_x1, options.ply_y1},
+                {options.ply_x2, options.ply_y2},
+                {options.ply_x3, options.ply_y3},
+                {options.ply_x4, options.ply_y4},
+                {static_cast<double>(options.soft_early_fen_skipping), 1.0},
+            };
+
+            if (ply <= points[0].x) {
+                return points[0].y;
+            }
+            if (ply >= points[4].x) {
+                return points[4].y;
+            }
+            for (int i = 0; i < 4; ++i) {
+                if (ply >= points[i].x && ply <= points[i + 1].x) {
+                    if (points[i + 1].x == points[i].x) {
+                        return points[i].y;
+                    }
+                    const double t = (ply - points[i].x) / (points[i + 1].x - points[i].x);
+                    return points[i].y + t * (points[i + 1].y - points[i].y);
+                }
+            }
+            return 1.0;
+        };
+
+        for (std::size_t i = 0; i < early_ply_accept_prob.size(); ++i) {
+            early_ply_accept_prob[i] = std::clamp(interpolate_ply(static_cast<double>(i)), 0.0, 1.0);
+        }
+    }
+
+    return [
+        options,
+        has_stockfish_filter,
+        random_skip_threshold,
+        target_pc_weights_lut,
+        target_pc_weights_total,
+        early_ply_accept_prob = std::move(early_ply_accept_prob)
+    ](const TrainingDataEntry& entry) {
+        if (has_stockfish_filter) {
+            static constexpr int kValueNone = 32002;
+            static thread_local int last_ply = -1;
+            static thread_local int last_score = kValueNone;
+
+            const bool skip_placeholder_zero =
+                entry.ply > last_ply &&
+                last_score != kValueNone &&
+                std::abs(last_score) > 100 &&
+                entry.result != 0 &&
+                entry.score == 0;
+
+            last_ply = entry.ply;
+            if (entry.score == kValueNone || skip_placeholder_zero) {
+                return true;
+            }
+            last_score = entry.score;
+
+            if (entry.ply <= options.early_fen_skipping) {
+                return true;
+            }
+        }
+
+        if (options.validation_split_fraction > 0.0 && options.split_role != 0) {
+            const bool is_validation_entry =
+                stable_unit_random(entry, 0x9e3779b97f4a7c15ULL) < options.validation_split_fraction;
+            if (options.split_role == 1 && is_validation_entry) {
+                return true;
+            }
+            if (options.split_role == 2 && !is_validation_entry) {
+                return true;
+            }
+        }
+
+        if (!has_stockfish_filter) {
+            return false;
+        }
+
+        auto& prng = thread_rng();
+
+        if (options.split_role != 2 && options.random_fen_skipping > 0 && prng() < random_skip_threshold) {
+            return true;
+        }
+        if (options.skip_tactical_positions && (entry.isCapturingMove() || entry.isInCheck())) {
+            return true;
+        }
+        if (options.skip_wdl_score_mismatch) {
+            const double keep_probability = std::clamp(entry.score_result_prob(), 0.0, 1.0);
+            const double draw = options.split_role == 2
+                ? stable_unit_random(entry, 0xd1b54a32d192ed03ULL)
+                : random_unit();
+            if (draw >= keep_probability) {
+                return true;
+            }
+        }
+        if (options.simple_eval_skipping > 0 && std::abs(entry.pos.simple_eval()) < options.simple_eval_skipping) {
+            return true;
+        }
+        if (options.soft_early_fen_skipping > 0 && entry.ply < options.soft_early_fen_skipping) {
+            const double accept_probability = early_ply_accept_prob[entry.ply];
+            const double draw = options.split_role == 2
+                ? stable_unit_random(entry, 0xa24baed4963ee407ULL)
+                : random_unit();
+            if (draw >= accept_probability) {
+                return true;
+            }
+        }
+
+        const int piece_count = static_cast<int>(entry.pos.piecesBB().count());
+        if (piece_count < 0 || piece_count > 32) {
+            return true;
+        }
+
+        static thread_local double alpha = 1.0;
+        static thread_local double pc_history_all[33] = {0.0};
+        static thread_local double pc_history_passed[33] = {0.0};
+        static thread_local double pc_history_all_total = 0.0;
+        static thread_local double pc_history_passed_total = 0.0;
+        static thread_local std::uint64_t step_count = 0;
+
+        constexpr double kMaxPieceCountSkipRate = 0.975;
+
+        pc_history_all[piece_count] += 1.0;
+        pc_history_all_total += 1.0;
+        ++step_count;
+
+        const bool should_update =
+            step_count == 100 ||
+            step_count == 500 ||
+            step_count == 1000 ||
+            step_count == 2500 ||
+            step_count == 5000 ||
+            (step_count > 5000 && step_count % 10000 == 0);
+
+        if (should_update) {
+            double min_ratio = std::numeric_limits<double>::infinity();
+            bool found_valid = false;
+            for (int i = 0; i < 33; ++i) {
+                const auto index = static_cast<std::size_t>(i);
+                if (target_pc_weights_lut[index] > 0.0 && pc_history_all[i] > 0.0) {
+                    const double current_ratio =
+                        (pc_history_all_total * target_pc_weights_lut[index]) /
+                        (target_pc_weights_total * pc_history_all[i]);
+                    if (current_ratio < min_ratio) {
+                        min_ratio = current_ratio;
+                        found_valid = true;
+                    }
+                }
+            }
+            if (found_valid && min_ratio > 0.0) {
+                alpha = (1.0 - kMaxPieceCountSkipRate) / min_ratio;
+            }
+
+            if (step_count >= 10000 && step_count % 10000 == 0) {
+                for (double& count : pc_history_all) {
+                    count *= 0.5;
+                }
+                pc_history_all_total *= 0.5;
+            }
+        }
+
+        double accept_probability = 0.0;
+        const auto pc_index = static_cast<std::size_t>(piece_count);
+        if (target_pc_weights_lut[pc_index] > 0.0 && pc_history_all[piece_count] > 0.0) {
+            const double current_ratio =
+                (pc_history_all_total * target_pc_weights_lut[pc_index]) /
+                (target_pc_weights_total * pc_history_all[piece_count]);
+            accept_probability = alpha * current_ratio;
+        }
+        accept_probability = std::clamp(accept_probability, 0.0, 1.0);
+
+        const double draw = options.split_role == 2
+            ? stable_unit_random(entry, 0x9fb21c651e98df25ULL)
+            : random_unit();
+        if (draw >= accept_probability) {
+            return true;
+        }
+
+        pc_history_passed[piece_count] += 1.0;
+        pc_history_passed_total += 1.0;
+        return false;
     };
 }
 
@@ -535,11 +776,26 @@ extern "C" void* thrawn_binpack_open_many(
     std::int32_t num_paths,
     std::int32_t num_threads,
     std::int32_t cyclic,
-    std::int32_t skip_capture_positions,
     std::int32_t skip_wdl_score_mismatch,
     std::int32_t skip_tactical_positions,
     std::int32_t random_fen_skipping,
-    double max_abs_score,
+    std::int32_t early_fen_skipping,
+    std::int32_t soft_early_fen_skipping,
+    std::int32_t simple_eval_skipping,
+    std::int32_t param_index,
+    double pc_y0,
+    double pc_y1,
+    double pc_y2,
+    double pc_y3,
+    double pc_y4,
+    double ply_x1,
+    double ply_y1,
+    double ply_x2,
+    double ply_y2,
+    double ply_x3,
+    double ply_y3,
+    double ply_x4,
+    double ply_y4,
     std::int32_t split_role,
     double validation_split_fraction
 ) {
@@ -557,6 +813,15 @@ extern "C" void* thrawn_binpack_open_many(
         if (random_fen_skipping < 0) {
             throw std::runtime_error("random_fen_skipping must be >= 0");
         }
+        if (early_fen_skipping < -1) {
+            throw std::runtime_error("early_fen_skipping must be >= -1");
+        }
+        if (simple_eval_skipping < -1) {
+            throw std::runtime_error("simple_eval_skipping must be >= -1");
+        }
+        if (param_index < 0) {
+            throw std::runtime_error("param_index must be >= 0");
+        }
         std::vector<std::string> owned_paths;
         owned_paths.reserve(static_cast<std::size_t>(num_paths));
         for (std::int32_t i = 0; i < num_paths; ++i) {
@@ -567,11 +832,26 @@ extern "C" void* thrawn_binpack_open_many(
         }
 
         BinpackFilterOptions filter_options;
-        filter_options.skip_capture_positions = skip_capture_positions != 0;
         filter_options.skip_wdl_score_mismatch = skip_wdl_score_mismatch != 0;
         filter_options.skip_tactical_positions = skip_tactical_positions != 0;
         filter_options.random_fen_skipping = random_fen_skipping;
-        filter_options.max_abs_score = max_abs_score;
+        filter_options.early_fen_skipping = early_fen_skipping;
+        filter_options.soft_early_fen_skipping = soft_early_fen_skipping;
+        filter_options.simple_eval_skipping = simple_eval_skipping;
+        filter_options.param_index = param_index;
+        filter_options.pc_y0 = pc_y0;
+        filter_options.pc_y1 = pc_y1;
+        filter_options.pc_y2 = pc_y2;
+        filter_options.pc_y3 = pc_y3;
+        filter_options.pc_y4 = pc_y4;
+        filter_options.ply_x1 = ply_x1;
+        filter_options.ply_y1 = ply_y1;
+        filter_options.ply_x2 = ply_x2;
+        filter_options.ply_y2 = ply_y2;
+        filter_options.ply_x3 = ply_x3;
+        filter_options.ply_y3 = ply_y3;
+        filter_options.ply_x4 = ply_x4;
+        filter_options.ply_y4 = ply_y4;
         filter_options.split_role = split_role;
         filter_options.validation_split_fraction = validation_split_fraction;
 
@@ -721,6 +1001,7 @@ std::int32_t inspect_binpack_impl(
         std::array<std::uint64_t, 3> result_counts{};
         std::array<double, 3> result_score_sums{};
         std::array<double, 3> result_abs_score_sums{};
+        auto skip_predicate = make_skip_predicate(filter_options);
         bool reached_sample_limit = false;
 
         auto sample_limit_reached = [&]() {
@@ -729,7 +1010,7 @@ std::int32_t inspect_binpack_impl(
 
         auto record_entry = [&](const TrainingDataEntry& entry, bool is_continuation) {
             ++stats.entries_seen;
-            if (should_skip_entry(entry, filter_options)) {
+            if (skip_predicate && skip_predicate(entry)) {
                 ++stats.entries_skipped;
                 return;
             }
@@ -998,15 +1279,11 @@ extern "C" std::int32_t thrawn_inspect_binpack(const char* path, ThrawnInspectSt
 extern "C" std::int32_t thrawn_inspect_binpack_with_options(
     const char* path,
     ThrawnInspectStats* out_stats,
-    std::int32_t skip_capture_positions,
     std::int32_t skip_wdl_score_mismatch,
-    double max_abs_score,
     std::uint64_t sample_entries
 ) {
     BinpackFilterOptions filter_options;
-    filter_options.skip_capture_positions = skip_capture_positions != 0;
     filter_options.skip_wdl_score_mismatch = skip_wdl_score_mismatch != 0;
-    filter_options.max_abs_score = max_abs_score;
     filter_options.sample_entries = sample_entries;
     return inspect_binpack_impl(path, out_stats, filter_options);
 }

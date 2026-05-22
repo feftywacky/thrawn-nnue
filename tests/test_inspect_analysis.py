@@ -72,9 +72,7 @@ class InspectAnalysisTests(unittest.TestCase):
             self.assertEqual(
                 combined["filters"],
                 {
-                    "skip_capture_positions": False,
                     "skip_wdl_score_mismatch": False,
-                    "max_abs_score": 0.0,
                     "sample_entries": 0,
                 },
             )

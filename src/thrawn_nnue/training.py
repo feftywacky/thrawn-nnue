@@ -12,12 +12,10 @@ import time
 from .checkpoint import load_checkpoint, restore_rng_state, save_checkpoint
 from .console import ConsoleContext, create_console_reporter
 from .config import TrainConfig
-from .export import SANITY_POSITIONS
 from .native import BinpackStream
 
 
 _STOCKFISH_INTERNAL_TO_CP = 100.0 / 208.0
-_MATERIAL_ORDER_MIN_GAP_CP = 20.0
 
 
 def _require_torch():
@@ -38,16 +36,10 @@ class TrainState:
     device: str
     run_dir: Path
     metrics_path: Path
-    best_validation_loss: float | None = None
-    best_validation_positions: int | None = None
-    best_checkpoint_metric_name: str = "validation_score_mae"
+    best_checkpoint_metric_name: str = "score_mae"
     best_checkpoint_metric_value: float | None = None
     best_checkpoint_positions: int | None = None
     best_checkpoint_sort_key: tuple[float, ...] | None = None
-    best_deployable_checkpoint_metric_name: str = "validation_score_mae"
-    best_deployable_checkpoint_metric_value: float | None = None
-    best_deployable_checkpoint_positions: int | None = None
-    best_deployable_checkpoint_sort_key: tuple[float, ...] | None = None
     global_step: int = 0
     positions_seen: int = 0
     epoch_index: int = 0
@@ -90,7 +82,7 @@ def train_from_config(
 
 def resume_training(checkpoint_path: str | Path, *, console_mode: str | None = None) -> Path:
     payload = load_checkpoint(checkpoint_path, map_location="cpu")
-    config = TrainConfig.from_dict(dict(payload["config"]))
+    config = TrainConfig.from_dict(_checkpoint_config_dict(payload["config"]))
     if console_mode is not None:
         config.console_mode = console_mode
         config.validate()
@@ -102,29 +94,11 @@ def resume_training(checkpoint_path: str | Path, *, console_mode: str | None = N
     if state.scaler is not None and payload["scaler_state"] is not None:
         state.scaler.load_state_dict(payload["scaler_state"])
     restore_rng_state(payload["rng_state"])
-    state.best_validation_loss = payload.get("best_validation_loss")
-    state.best_validation_positions = _payload_best_validation_positions(payload)
-    state.best_checkpoint_metric_name = str(payload.get("best_checkpoint_metric_name", "validation_score_mae"))
+    state.best_checkpoint_metric_name = "score_mae"
     state.best_checkpoint_metric_value = _payload_optional_float(payload, "best_checkpoint_metric_value")
     state.best_checkpoint_positions = _payload_optional_int(payload, "best_checkpoint_positions")
     state.best_checkpoint_sort_key = _payload_optional_float_tuple(payload, "best_checkpoint_sort_key")
-    state.best_deployable_checkpoint_metric_name = str(
-        payload.get("best_deployable_checkpoint_metric_name", "validation_score_mae")
-    )
-    state.best_deployable_checkpoint_metric_value = _payload_optional_float(
-        payload,
-        "best_deployable_checkpoint_metric_value",
-    )
-    state.best_deployable_checkpoint_positions = _payload_optional_int(
-        payload,
-        "best_deployable_checkpoint_positions",
-    )
-    state.best_deployable_checkpoint_sort_key = _payload_optional_float_tuple(
-        payload,
-        "best_deployable_checkpoint_sort_key",
-    )
     _restore_best_checkpoint_tracking_from_metrics(state)
-    _restore_best_deployable_checkpoint_tracking_from_metrics(state)
     state.global_step = int(payload["global_step"])
     state.positions_seen = _payload_positions_seen(payload)
     state.epoch_index = _payload_epoch_index(payload)
@@ -133,6 +107,29 @@ def resume_training(checkpoint_path: str | Path, *, console_mode: str | None = N
     final_checkpoint = state.run_dir / "checkpoints" / f"step_{state.global_step:08d}.pt"
     _save_training_checkpoint(state, final_checkpoint)
     return final_checkpoint
+
+
+def _checkpoint_config_dict(raw_config: object) -> dict[str, object]:
+    config = dict(raw_config)  # type: ignore[arg-type]
+    if "soft_early_fen_skipping" not in config:
+        config.setdefault("early_fen_skipping", -1)
+        config.setdefault("soft_early_fen_skipping", 0)
+        config.setdefault("simple_eval_skipping", -1)
+        config.setdefault("param_index", 0)
+        config.setdefault("pc_y0", 0.0)
+        config.setdefault("pc_y1", 0.4)
+        config.setdefault("pc_y2", 1.0)
+        config.setdefault("pc_y3", 1.0)
+        config.setdefault("pc_y4", 0.75)
+        config.setdefault("ply_x1", 0.0)
+        config.setdefault("ply_y1", 0.1)
+        config.setdefault("ply_x2", 6.0)
+        config.setdefault("ply_y2", 0.15)
+        config.setdefault("ply_x3", 10.0)
+        config.setdefault("ply_y3", 0.25)
+        config.setdefault("ply_x4", 18.0)
+        config.setdefault("ply_y4", 0.75)
+    return config
 
 
 def _create_state(config: TrainConfig) -> TrainState:
@@ -384,6 +381,23 @@ def _run_training_loop(state: TrainState) -> None:
                                 "filtered": state.config.filtered,
                                 "wld_filtered": state.config.wld_filtered,
                                 "random_fen_skipping": state.config.random_fen_skipping,
+                                "early_fen_skipping": state.config.early_fen_skipping,
+                                "soft_early_fen_skipping": state.config.soft_early_fen_skipping,
+                                "simple_eval_skipping": state.config.simple_eval_skipping,
+                                "param_index": state.config.param_index,
+                                "pc_y0": state.config.pc_y0,
+                                "pc_y1": state.config.pc_y1,
+                                "pc_y2": state.config.pc_y2,
+                                "pc_y3": state.config.pc_y3,
+                                "pc_y4": state.config.pc_y4,
+                                "ply_x1": state.config.ply_x1,
+                                "ply_y1": state.config.ply_y1,
+                                "ply_x2": state.config.ply_x2,
+                                "ply_y2": state.config.ply_y2,
+                                "ply_x3": state.config.ply_x3,
+                                "ply_y3": state.config.ply_y3,
+                                "ply_x4": state.config.ply_x4,
+                                "ply_y4": state.config.ply_y4,
                                 "max_epochs": state.config.max_epochs,
                                 "epoch_size": state.config.epoch_size,
                                 "lr": current_lr,
@@ -427,16 +441,10 @@ def _save_training_checkpoint(state: TrainState, checkpoint_path: Path) -> None:
         global_step=state.global_step,
         positions_seen=state.positions_seen,
         epoch_index=state.epoch_index,
-        best_validation_loss=state.best_validation_loss,
-        best_validation_positions=state.best_validation_positions,
         best_checkpoint_metric_name=state.best_checkpoint_metric_name,
         best_checkpoint_metric_value=state.best_checkpoint_metric_value,
         best_checkpoint_positions=state.best_checkpoint_positions,
         best_checkpoint_sort_key=state.best_checkpoint_sort_key,
-        best_deployable_checkpoint_metric_name=state.best_deployable_checkpoint_metric_name,
-        best_deployable_checkpoint_metric_value=state.best_deployable_checkpoint_metric_value,
-        best_deployable_checkpoint_positions=state.best_deployable_checkpoint_positions,
-        best_deployable_checkpoint_sort_key=state.best_deployable_checkpoint_sort_key,
     )
 
 
@@ -545,20 +553,14 @@ def _run_train_step(state: TrainState, tensors, torch, *, autocast_enabled: bool
 def _run_validation_and_report(state: TrainState, reporter) -> None:
     reporter.validation_started(global_step=state.global_step, positions_seen=state.positions_seen)
     metrics = _run_validation(state)
-    is_best, is_deployable_best = _maybe_update_best_checkpoint(state, metrics)
+    is_best = _maybe_update_best_checkpoint(state, metrics)
     metrics["is_best"] = is_best
-    metrics["is_deployable_best"] = is_deployable_best
     _log_metrics(state, metrics)
     reporter.validation_finished(metrics, is_best=is_best)
     if is_best:
         reporter.checkpoint_saved(
-            str(_best_step_checkpoint_path(state.run_dir, state.global_step)),
+            str(_best_checkpoint_path(state.run_dir, state.epoch_index)),
             is_best=True,
-        )
-    if is_deployable_best:
-        reporter.checkpoint_saved(
-            str(_best_deployable_step_checkpoint_path(state.run_dir, state.global_step)),
-            is_best=False,
         )
 
 
@@ -762,7 +764,6 @@ def _run_validation(state: TrainState) -> dict[str, object]:
     )
     cp_mae = score_mae * _STOCKFISH_INTERNAL_TO_CP
     cp_rmse = score_rmse * _STOCKFISH_INTERNAL_TO_CP
-    material_sanity = _material_sanity_snapshot(state)
 
     return {
         "event": "validation",
@@ -785,8 +786,6 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         "validation_batches": batches,
         "validation_seconds": validation_seconds,
         "validation_positions_per_second": validation_positions_per_second,
-        "material_sanity": material_sanity,
-        "material_ordering_ok": bool(material_sanity["ordering_ok"]),
         "lambda": lambda_weight,
         "start_lambda": state.config.start_lambda,
         "end_lambda": state.config.end_lambda,
@@ -798,64 +797,25 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         "filtered": state.config.filtered,
         "wld_filtered": state.config.wld_filtered,
         "random_fen_skipping": state.config.random_fen_skipping,
+        "early_fen_skipping": state.config.early_fen_skipping,
+        "soft_early_fen_skipping": state.config.soft_early_fen_skipping,
+        "simple_eval_skipping": state.config.simple_eval_skipping,
+        "param_index": state.config.param_index,
+        "pc_y0": state.config.pc_y0,
+        "pc_y1": state.config.pc_y1,
+        "pc_y2": state.config.pc_y2,
+        "pc_y3": state.config.pc_y3,
+        "pc_y4": state.config.pc_y4,
+        "ply_x1": state.config.ply_x1,
+        "ply_y1": state.config.ply_y1,
+        "ply_x2": state.config.ply_x2,
+        "ply_y2": state.config.ply_y2,
+        "ply_x3": state.config.ply_x3,
+        "ply_y3": state.config.ply_y3,
+        "ply_x4": state.config.ply_x4,
+        "ply_y4": state.config.ply_y4,
         "max_epochs": state.config.max_epochs,
         "epoch_size": state.config.epoch_size,
-    }
-
-
-def _material_sanity_snapshot(state: TrainState) -> dict[str, object]:
-    torch = _require_torch()
-    from .board import BoardState
-    from .features import active_feature_indices
-
-    white_indices: list[list[int]] = []
-    black_indices: list[list[int]] = []
-    stm: list[float] = []
-    for _, fen in SANITY_POSITIONS:
-        board = BoardState.from_fen(fen)
-        white = active_feature_indices(board, "white", features=state.config.features)
-        black = active_feature_indices(board, "black", features=state.config.features)
-        white_indices.append(white + [-1] * (state.config.max_active_features - len(white)))
-        black_indices.append(black + [-1] * (state.config.max_active_features - len(black)))
-        stm.append(1.0 if board.side_to_move == "w" else 0.0)
-
-    white_tensor = torch.tensor(white_indices, dtype=torch.long, device=state.device)
-    black_tensor = torch.tensor(black_indices, dtype=torch.long, device=state.device)
-    stm_tensor = torch.tensor(stm, dtype=torch.float32, device=state.device).unsqueeze(1)
-    with torch.no_grad():
-        predictions = _model_output_to_score(
-            state.model(white_tensor, black_tensor, stm_tensor),
-            state.config.nnue2score,
-        )
-    values = [float(value) for value in predictions.detach().cpu().reshape(-1).tolist()]
-    named = {
-        name: value
-        for (name, _), value in zip(SANITY_POSITIONS, values, strict=True)
-    }
-    named["ordering_ok"] = (
-        named["equal_material"]
-        < named["white_up_pawn"]
-        < named["white_up_knight"]
-        < named["white_up_rook"]
-        < named["white_up_queen"]
-    )
-    material_gaps = _material_gaps_cp(named)
-    named["material_gaps_cp"] = material_gaps
-    named["material_min_gap_cp"] = _MATERIAL_ORDER_MIN_GAP_CP
-    named["material_margins_ok"] = bool(
-        named["ordering_ok"]
-        and all(gap >= _MATERIAL_ORDER_MIN_GAP_CP for gap in material_gaps.values())
-    )
-    named["starting_position_near_zero"] = abs(named["starting_position"]) <= _cp_to_score(50.0)
-    return named
-
-
-def _material_gaps_cp(values: dict[str, object]) -> dict[str, float]:
-    return {
-        "pawn_over_equal": _score_to_cp(float(values["white_up_pawn"]) - float(values["equal_material"])),
-        "knight_over_pawn": _score_to_cp(float(values["white_up_knight"]) - float(values["white_up_pawn"])),
-        "rook_over_knight": _score_to_cp(float(values["white_up_rook"]) - float(values["white_up_knight"])),
-        "queen_over_rook": _score_to_cp(float(values["white_up_queen"]) - float(values["white_up_rook"])),
     }
 
 
@@ -880,114 +840,53 @@ def _pearson_correlation(
     return float(value)
 
 
-def _maybe_update_best_checkpoint(state: TrainState, metrics: dict[str, object]) -> tuple[bool, bool]:
-    validation_loss = float(metrics["validation_loss"])
-    if not math.isfinite(validation_loss):
-        return False, False
-
-    if state.best_validation_loss is None or validation_loss < state.best_validation_loss:
-        state.best_validation_loss = validation_loss
-        state.best_validation_positions = state.positions_seen
-        _write_best_loss_checkpoint(state)
+def _maybe_update_best_checkpoint(state: TrainState, metrics: dict[str, object]) -> bool:
+    score_mae = float(metrics["score_mae"])
+    if not math.isfinite(score_mae):
+        return False
 
     is_best = False
     candidate_key = _best_checkpoint_sort_key(metrics)
     if state.best_checkpoint_sort_key is None or candidate_key < state.best_checkpoint_sort_key:
-        state.best_checkpoint_metric_value = float(metrics["score_mae"])
+        state.best_checkpoint_metric_name = "score_mae"
+        state.best_checkpoint_metric_value = score_mae
         state.best_checkpoint_positions = state.positions_seen
         state.best_checkpoint_sort_key = candidate_key
         is_best = True
 
-    is_deployable_best = False
-    if _material_sanity_is_deployable(metrics):
-        if (
-            state.best_deployable_checkpoint_sort_key is None
-            or candidate_key < state.best_deployable_checkpoint_sort_key
-        ):
-            state.best_deployable_checkpoint_metric_value = float(metrics["score_mae"])
-            state.best_deployable_checkpoint_positions = state.positions_seen
-            state.best_deployable_checkpoint_sort_key = candidate_key
-            is_deployable_best = True
-
     if is_best:
         _write_best_checkpoint(state)
-    if is_deployable_best:
-        _write_best_deployable_checkpoint(state)
 
-    return is_best, is_deployable_best
+    return is_best
 
 
 def _write_best_checkpoint(state: TrainState) -> Path:
     checkpoints_dir = state.run_dir / "checkpoints"
-    alias_path = checkpoints_dir / "best.pt"
-    stamped_path = _best_step_checkpoint_path(state.run_dir, state.global_step)
-    _save_training_checkpoint(state, alias_path)
+    stamped_path = _best_checkpoint_path(state.run_dir, state.epoch_index)
     _save_training_checkpoint(state, stamped_path)
-    for candidate in checkpoints_dir.glob("best_step_*.pt"):
+    for candidate in checkpoints_dir.glob("epoch_*_best.pt"):
         if candidate != stamped_path:
-            candidate.unlink()
+            candidate.unlink(missing_ok=True)
     return stamped_path
 
 
-def _write_best_loss_checkpoint(state: TrainState) -> Path:
-    checkpoints_dir = state.run_dir / "checkpoints"
-    alias_path = checkpoints_dir / "best_loss.pt"
-    stamped_path = _best_loss_step_checkpoint_path(state.run_dir, state.global_step)
-    _save_training_checkpoint(state, alias_path)
-    _save_training_checkpoint(state, stamped_path)
-    for candidate in checkpoints_dir.glob("best_loss_step_*.pt"):
-        if candidate != stamped_path:
-            candidate.unlink()
-    return stamped_path
-
-
-def _write_best_deployable_checkpoint(state: TrainState) -> Path:
-    checkpoints_dir = state.run_dir / "checkpoints"
-    alias_path = checkpoints_dir / "best_deployable.pt"
-    stamped_path = _best_deployable_step_checkpoint_path(state.run_dir, state.global_step)
-    _save_training_checkpoint(state, alias_path)
-    _save_training_checkpoint(state, stamped_path)
-    for candidate in checkpoints_dir.glob("best_deployable_step_*.pt"):
-        if candidate != stamped_path:
-            candidate.unlink()
-    return stamped_path
-
-
-def _best_step_checkpoint_path(run_dir: Path, global_step: int) -> Path:
-    return run_dir / "checkpoints" / f"best_step_{global_step:08d}.pt"
-
-
-def _best_loss_step_checkpoint_path(run_dir: Path, global_step: int) -> Path:
-    return run_dir / "checkpoints" / f"best_loss_step_{global_step:08d}.pt"
-
-
-def _best_deployable_step_checkpoint_path(run_dir: Path, global_step: int) -> Path:
-    return run_dir / "checkpoints" / f"best_deployable_step_{global_step:08d}.pt"
+def _best_checkpoint_path(run_dir: Path, epoch_index: int) -> Path:
+    return run_dir / "checkpoints" / f"epoch_{epoch_index:04d}_best.pt"
 
 
 def _best_checkpoint_sort_key(metrics: dict[str, object]) -> tuple[float, ...]:
     return (
         float(metrics["score_mae"]),
+        float(metrics["validation_loss"]),
         float(metrics["validation_teacher_wdl_loss"]),
         -float(metrics["score_corr"]),
-        float(metrics["validation_loss"]),
-    )
-
-
-def _material_sanity_is_deployable(metrics: dict[str, object]) -> bool:
-    material_sanity = metrics.get("material_sanity")
-    if not isinstance(material_sanity, dict):
-        return False
-    return bool(
-        material_sanity.get("starting_position_near_zero")
-        and material_sanity.get("ordering_ok")
-        and material_sanity.get("material_margins_ok")
     )
 
 
 def _restore_best_checkpoint_tracking_from_metrics(state: TrainState) -> None:
     if state.best_checkpoint_sort_key is not None:
         return
+
     if not state.metrics_path.exists():
         return
 
@@ -1009,38 +908,10 @@ def _restore_best_checkpoint_tracking_from_metrics(state: TrainState) -> None:
     if best_record is None or best_key is None:
         return
 
+    state.best_checkpoint_metric_name = "score_mae"
     state.best_checkpoint_sort_key = best_key
     state.best_checkpoint_metric_value = float(best_record["score_mae"])
     state.best_checkpoint_positions = int(best_record["positions_seen"])
-
-
-def _restore_best_deployable_checkpoint_tracking_from_metrics(state: TrainState) -> None:
-    if state.best_deployable_checkpoint_sort_key is not None:
-        return
-    if not state.metrics_path.exists():
-        return
-
-    best_record: dict[str, object] | None = None
-    best_key: tuple[float, ...] | None = None
-    with state.metrics_path.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            record = json.loads(line)
-            if record.get("event") != "validation" or not _material_sanity_is_deployable(record):
-                continue
-            try:
-                candidate_key = _best_checkpoint_sort_key(record)
-            except (KeyError, TypeError, ValueError):
-                continue
-            if best_key is None or candidate_key < best_key:
-                best_key = candidate_key
-                best_record = record
-
-    if best_record is None or best_key is None:
-        return
-
-    state.best_deployable_checkpoint_sort_key = best_key
-    state.best_deployable_checkpoint_metric_value = float(best_record["score_mae"])
-    state.best_deployable_checkpoint_positions = int(best_record["positions_seen"])
 
 
 def _log_metrics(state: TrainState, metrics: dict[str, object]) -> None:
@@ -1230,7 +1101,23 @@ def _binpack_filter_options(config: TrainConfig, *, split_role: str = "all") -> 
         "skip_tactical_positions": config.filtered,
         "skip_wdl_score_mismatch": config.wld_filtered,
         "random_fen_skipping": config.random_fen_skipping if split_role == "train" else 0,
-        "max_abs_score": 0.0,
+        "early_fen_skipping": config.early_fen_skipping,
+        "soft_early_fen_skipping": config.soft_early_fen_skipping,
+        "simple_eval_skipping": config.simple_eval_skipping,
+        "param_index": config.param_index,
+        "pc_y0": config.pc_y0,
+        "pc_y1": config.pc_y1,
+        "pc_y2": config.pc_y2,
+        "pc_y3": config.pc_y3,
+        "pc_y4": config.pc_y4,
+        "ply_x1": config.ply_x1,
+        "ply_y1": config.ply_y1,
+        "ply_x2": config.ply_x2,
+        "ply_y2": config.ply_y2,
+        "ply_x3": config.ply_x3,
+        "ply_y3": config.ply_y3,
+        "ply_x4": config.ply_x4,
+        "ply_y4": config.ply_y4,
         "split_role": split_role,
         "validation_split_fraction": 0.0,
     }
@@ -1275,14 +1162,6 @@ def _wdl_expectation_from_score(values, offset: float, scaling: float, torch):
     return (win + 0.5 * draw).clamp(0.0, 1.0)
 
 
-def _cp_to_score(value: float) -> float:
-    return float(value) / _STOCKFISH_INTERNAL_TO_CP
-
-
-def _score_to_cp(value: float) -> float:
-    return float(value) * _STOCKFISH_INTERNAL_TO_CP
-
-
 def _wdl_bucket(values):
     return values.mul(3.0).clamp_min(0.0).clamp_max(2.999999).to(dtype=values.dtype).to(dtype=values.long().dtype)
 
@@ -1293,12 +1172,6 @@ def _payload_positions_seen(payload: dict[str, object]) -> int:
 
 def _payload_epoch_index(payload: dict[str, object]) -> int:
     return int(payload["epoch_index"])
-
-
-def _payload_best_validation_positions(payload: dict[str, object]) -> int | None:
-    if payload.get("best_validation_positions") is not None:
-        return int(payload["best_validation_positions"])
-    return None
 
 
 def _payload_optional_int(payload: dict[str, object], key: str) -> int | None:

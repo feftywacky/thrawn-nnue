@@ -26,20 +26,18 @@ def _write_metrics(path: Path, records: list[dict[str, object]]) -> None:
 
 
 class MetricsSummaryTests(unittest.TestCase):
-    def test_checkpoint_diagnostics_falls_back_to_stamped_best_checkpoint(self) -> None:
+    def test_checkpoint_diagnostics_reads_epoch_best_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
             checkpoints_dir = run_dir / "checkpoints"
             checkpoints_dir.mkdir(parents=True, exist_ok=True)
-            stamped_path = checkpoints_dir / "best_step_00000042.pt"
+            stamped_path = checkpoints_dir / "epoch_0042_best.pt"
             stamped_path.write_bytes(b"fixture")
 
             with patch(
                 "thrawn_nnue.checkpoint.load_checkpoint",
                 return_value={
-                    "best_validation_loss": 0.123,
-                    "best_validation_positions": 8192,
-                    "best_checkpoint_metric_name": "validation_score_mae",
+                    "best_checkpoint_metric_name": "score_mae",
                     "best_checkpoint_metric_value": 77.0,
                     "best_checkpoint_positions": 9000,
                     "config": {"batch_size": 1024},
@@ -49,10 +47,9 @@ class MetricsSummaryTests(unittest.TestCase):
             ):
                 diagnostics = _checkpoint_diagnostics(run_dir)
 
-            self.assertEqual(diagnostics["best_validation_loss"], 0.123)
             self.assertEqual(diagnostics["global_step"], 42)
             self.assertEqual(diagnostics["positions_seen"], 8192)
-            self.assertEqual(diagnostics["best_checkpoint_metric_name"], "validation_score_mae")
+            self.assertEqual(diagnostics["best_checkpoint_metric_name"], "score_mae")
 
     def test_load_and_summarize_train_only_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -83,8 +80,6 @@ class MetricsSummaryTests(unittest.TestCase):
             with patch(
                 "thrawn_nnue.metrics._checkpoint_diagnostics",
                 return_value={
-                    "best_validation_loss": None,
-                    "best_validation_positions": None,
                     "best_checkpoint_metric_name": None,
                     "best_checkpoint_metric_value": None,
                     "best_checkpoint_positions": None,
@@ -111,7 +106,7 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertEqual(summary["resume_recommendation"], "insufficient-validation")
             self.assertIn("progress: 4096/10000", render_summary_text(summary))
 
-    def test_validation_summary_prefers_best_validation_positions_and_material_flag(self) -> None:
+    def test_validation_summary_prefers_best_mae_positions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
             _write_metrics(
@@ -141,14 +136,13 @@ class MetricsSummaryTests(unittest.TestCase):
                         "positions_seen": 2048,
                         "validation_loss": 0.5,
                         "validation_wdl_loss": 0.6,
+                        "score_mae": 120.0,
                         "cp_mae": 120.0,
                         "cp_rmse": 140.0,
                         "cp_corr": 0.51,
                         "wdl_accuracy": 0.55,
                         "teacher_result_disagreement_rate": 0.40,
                         "validation_positions": 1024,
-                        "material_sanity": {"ordering_ok": False},
-                        "material_ordering_ok": False,
                     },
                     {
                         "event": "validation",
@@ -156,23 +150,20 @@ class MetricsSummaryTests(unittest.TestCase):
                         "positions_seen": 4096,
                         "validation_loss": 0.3,
                         "validation_wdl_loss": 0.35,
+                        "score_mae": 80.0,
                         "cp_mae": 80.0,
                         "cp_rmse": 95.0,
                         "cp_corr": 0.72,
                         "wdl_accuracy": 0.62,
                         "teacher_result_disagreement_rate": 0.33,
                         "validation_positions": 1024,
-                        "material_sanity": {"ordering_ok": True},
-                        "material_ordering_ok": True,
                     },
                 ],
             )
             with patch(
                 "thrawn_nnue.metrics._checkpoint_diagnostics",
                 return_value={
-                    "best_validation_loss": 0.3,
-                    "best_validation_positions": 4096,
-                    "best_checkpoint_metric_name": "validation_score_mae",
+                    "best_checkpoint_metric_name": "score_mae",
                     "best_checkpoint_metric_value": 80.0,
                     "best_checkpoint_positions": 4096,
                     "config": {
@@ -189,9 +180,8 @@ class MetricsSummaryTests(unittest.TestCase):
                 run = load_metrics_run(run_dir)
                 summary = summarize_run(run)
             self.assertEqual(summary["status"], "validated")
-            self.assertEqual(summary["best_validation_positions"], 4096)
-            self.assertAlmostEqual(summary["best_validation_loss"], 0.3)
-            self.assertEqual(summary["best_checkpoint_metric_name"], "validation_score_mae")
+            self.assertEqual(summary["best_checkpoint_positions"], 4096)
+            self.assertEqual(summary["best_checkpoint_metric_name"], "score_mae")
             self.assertAlmostEqual(summary["best_checkpoint_metric_value"], 80.0)
             self.assertEqual(summary["resume_recommendation"], "continue-latest")
             self.assertTrue(summary["best_is_latest_validation"])
@@ -199,14 +189,12 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertEqual(summary["latest_epoch_index"], 1)
             self.assertAlmostEqual(summary["train_validation_gap"], -0.1)
             self.assertAlmostEqual(summary["latest_validation_wdl_accuracy"], 0.62)
-            self.assertTrue(summary["latest_material_ordering_ok"])
             text = render_summary_text(summary)
-            self.assertIn("best: loss=0.300000 at=4096", text)
-            self.assertIn("best_metric: validation_score_mae=80.000000", text)
+            self.assertIn("best: score_mae=80.000000 at=4096", text)
             self.assertIn("budget: batch=1024 epoch_size=4096", text)
             self.assertNotIn("Suggestions", text)
 
-    def test_starting_position_sanity_failure_overrides_continue_suggestion(self) -> None:
+    def test_small_validation_gap_continues_latest(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir)
             _write_metrics(
@@ -227,12 +215,8 @@ class MetricsSummaryTests(unittest.TestCase):
                         "positions_seen": 1024,
                         "validation_loss": 0.2,
                         "validation_wdl_loss": 0.2,
+                        "score_mae": 10.0,
                         "cp_corr": 0.9,
-                        "material_sanity": {
-                            "ordering_ok": False,
-                            "starting_position_near_zero": False,
-                        },
-                        "material_ordering_ok": False,
                     },
                     {
                         "event": "validation",
@@ -240,23 +224,17 @@ class MetricsSummaryTests(unittest.TestCase):
                         "positions_seen": 2048,
                         "validation_loss": 0.20001,
                         "validation_wdl_loss": 0.20001,
+                        "score_mae": 10.1,
                         "cp_corr": 0.9,
-                        "material_sanity": {
-                            "ordering_ok": False,
-                            "starting_position_near_zero": False,
-                        },
-                        "material_ordering_ok": False,
                     },
                 ],
             )
             with patch(
                 "thrawn_nnue.metrics._checkpoint_diagnostics",
                 return_value={
-                    "best_validation_loss": 0.2,
-                    "best_validation_positions": 1024,
                     "best_checkpoint_metric_name": None,
-                    "best_checkpoint_metric_value": None,
-                    "best_checkpoint_positions": None,
+                    "best_checkpoint_metric_value": 10.0,
+                    "best_checkpoint_positions": 1024,
                     "config": {
                         "batch_size": 1024,
                         "max_epochs": 4,
@@ -270,7 +248,6 @@ class MetricsSummaryTests(unittest.TestCase):
 
             self.assertEqual(summary["resume_recommendation"], "continue-latest")
             self.assertNotIn("suggestions", summary)
-            self.assertFalse(summary["latest_material_ordering_ok"])
 
     def test_moving_lambda_adds_loss_caveat(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -294,21 +271,18 @@ class MetricsSummaryTests(unittest.TestCase):
                         "positions_seen": 1024,
                         "validation_loss": 0.2,
                         "validation_wdl_loss": 0.2,
+                        "score_mae": 10.0,
                         "lambda": 0.74,
                         "cp_corr": 0.9,
-                        "material_sanity": {"ordering_ok": True},
-                        "material_ordering_ok": True,
                     },
                 ],
             )
             with patch(
                 "thrawn_nnue.metrics._checkpoint_diagnostics",
                 return_value={
-                    "best_validation_loss": 0.2,
-                    "best_validation_positions": 1024,
                     "best_checkpoint_metric_name": None,
-                    "best_checkpoint_metric_value": None,
-                    "best_checkpoint_positions": None,
+                    "best_checkpoint_metric_value": 10.0,
+                    "best_checkpoint_positions": 1024,
                     "config": {
                         "batch_size": 1024,
                         "max_epochs": 4,
@@ -360,22 +334,19 @@ class MetricsPlotTests(unittest.TestCase):
                         "positions_seen": 2048,
                         "validation_loss": 0.5,
                         "validation_wdl_loss": 0.55,
+                        "score_mae": 100.0,
                         "cp_mae": 100.0,
                         "cp_rmse": 120.0,
                         "cp_corr": 0.5,
                         "wdl_accuracy": 0.60,
                         "teacher_result_disagreement_rate": 0.30,
                         "validation_positions": 1024,
-                        "material_sanity": {"ordering_ok": True},
-                        "material_ordering_ok": True,
                     },
                 ],
             )
             with patch(
                 "thrawn_nnue.metrics._checkpoint_diagnostics",
                 return_value={
-                    "best_validation_loss": None,
-                    "best_validation_positions": None,
                     "best_checkpoint_metric_name": None,
                     "best_checkpoint_metric_value": None,
                     "best_checkpoint_positions": None,
@@ -394,7 +365,7 @@ class MetricsPlotTests(unittest.TestCase):
             old_plot.write_bytes(b"stale")
             outputs = generate_run_plots(run)
             names = {path.name for path in outputs}
-            self.assertEqual(names, {"loss.png", "validation_quality.png"})
+            self.assertEqual(names, {"loss.png", "mae.png"})
             self.assertFalse(old_plot.exists())
             for output in outputs:
                 self.assertTrue(output.exists())
