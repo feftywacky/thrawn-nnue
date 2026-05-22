@@ -16,7 +16,7 @@ tf32 = true
 fused_optimizer = true
 seed = 42
 
-max_epochs = 200
+max_epochs = 100
 epoch_size = 100000000
 network_save_period = 1
 save_last_network = true
