@@ -137,7 +137,6 @@ void* thrawn_binpack_open_many(
     std::int32_t early_fen_skipping,
     std::int32_t soft_early_fen_skipping,
     std::int32_t simple_eval_skipping,
-    std::int32_t param_index,
     double pc_y0,
     double pc_y1,
     double pc_y2,
@@ -202,7 +201,6 @@ struct BinpackFilterOptions {
     std::int32_t early_fen_skipping = -1;
     std::int32_t soft_early_fen_skipping = 0;
     std::int32_t simple_eval_skipping = -1;
-    std::int32_t param_index = 0;
     double pc_y0 = 0.0;
     double pc_y1 = 0.4;
     double pc_y2 = 1.0;
@@ -782,7 +780,6 @@ extern "C" void* thrawn_binpack_open_many(
     std::int32_t early_fen_skipping,
     std::int32_t soft_early_fen_skipping,
     std::int32_t simple_eval_skipping,
-    std::int32_t param_index,
     double pc_y0,
     double pc_y1,
     double pc_y2,
@@ -819,9 +816,6 @@ extern "C" void* thrawn_binpack_open_many(
         if (simple_eval_skipping < -1) {
             throw std::runtime_error("simple_eval_skipping must be >= -1");
         }
-        if (param_index < 0) {
-            throw std::runtime_error("param_index must be >= 0");
-        }
         std::vector<std::string> owned_paths;
         owned_paths.reserve(static_cast<std::size_t>(num_paths));
         for (std::int32_t i = 0; i < num_paths; ++i) {
@@ -838,7 +832,6 @@ extern "C" void* thrawn_binpack_open_many(
         filter_options.early_fen_skipping = early_fen_skipping;
         filter_options.soft_early_fen_skipping = soft_early_fen_skipping;
         filter_options.simple_eval_skipping = simple_eval_skipping;
-        filter_options.param_index = param_index;
         filter_options.pc_y0 = pc_y0;
         filter_options.pc_y1 = pc_y1;
         filter_options.pc_y2 = pc_y2;

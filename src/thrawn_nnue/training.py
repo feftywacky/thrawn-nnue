@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 import math
 from queue import Full, Queue
+import shutil
 from threading import Event, Thread
 import time
 
@@ -54,6 +55,12 @@ class _PreparedBatch:
 @dataclass(slots=True)
 class _ProducerException:
     exception: BaseException
+
+
+@dataclass(slots=True)
+class _CudaPrefetchedBatch:
+    prepared: _PreparedBatch
+    ready_event: object
 
 
 _PREFETCH_EOF = object()
@@ -115,7 +122,6 @@ def _checkpoint_config_dict(raw_config: object) -> dict[str, object]:
         config.setdefault("early_fen_skipping", -1)
         config.setdefault("soft_early_fen_skipping", 0)
         config.setdefault("simple_eval_skipping", -1)
-        config.setdefault("param_index", 0)
         config.setdefault("pc_y0", 0.0)
         config.setdefault("pc_y1", 0.4)
         config.setdefault("pc_y2", 1.0)
@@ -183,6 +189,7 @@ class _PreparedBatchSource:
         total_positions: int | None,
         queue_size: int,
         pin_memory: bool,
+        prefetch_device: str | None,
         torch,
     ) -> None:
         self._stream = stream
@@ -190,6 +197,7 @@ class _PreparedBatchSource:
         self._remaining_positions = total_positions
         self._queue_size = queue_size
         self._pin_memory = pin_memory
+        self._prefetch_device = prefetch_device
         self._torch = torch
         self._queue: Queue[object] | None = None
         self._stop_event = Event()
@@ -242,10 +250,14 @@ class _PreparedBatchSource:
         if isinstance(item, _ProducerException):
             self.close()
             raise item.exception
+        if isinstance(item, _CudaPrefetchedBatch):
+            self._wait_for_cuda_prefetch(item)
+            return item.prepared
         return item
 
     def _run_producer(self) -> None:
         try:
+            prefetch_stream = self._create_prefetch_stream()
             while not self._stop_event.is_set():
                 requested_batch_size = _requested_batch_size(self._batch_size, self._remaining_positions)
                 if requested_batch_size is None:
@@ -254,8 +266,9 @@ class _PreparedBatchSource:
                 if batch is None:
                     break
                 prepared = _prepare_batch(batch, self._torch, pin_memory=self._pin_memory)
+                item = self._prefetch_to_device(prepared, prefetch_stream)
                 self._remaining_positions = _consume_positions(self._remaining_positions, prepared.batch_positions)
-                if not self._queue_put(prepared):
+                if not self._queue_put(item):
                     return
         except BaseException as exc:
             self._queue_put(_ProducerException(exc))
@@ -272,6 +285,42 @@ class _PreparedBatchSource:
             except Full:
                 continue
         return False
+
+    def _create_prefetch_stream(self):
+        if self._prefetch_device != "cuda":
+            return None
+        cuda = getattr(self._torch, "cuda", None)
+        if cuda is None or not cuda.is_available():
+            return None
+        return cuda.Stream()
+
+    def _prefetch_to_device(self, prepared: _PreparedBatch, prefetch_stream) -> object:
+        if prefetch_stream is None:
+            return prepared
+        cuda = self._torch.cuda
+        with cuda.stream(prefetch_stream):
+            moved = _PreparedBatch(
+                batch_positions=prepared.batch_positions,
+                tensors=_move_tensors_to_device(
+                    prepared.tensors,
+                    "cuda",
+                    non_blocking=True,
+                ),
+            )
+            ready_event = cuda.Event()
+            ready_event.record(prefetch_stream)
+        return _CudaPrefetchedBatch(prepared=moved, ready_event=ready_event)
+
+    def _wait_for_cuda_prefetch(self, item: _CudaPrefetchedBatch) -> None:
+        if self._prefetch_device != "cuda":
+            return
+        current_stream = self._torch.cuda.current_stream()
+        current_stream.wait_event(item.ready_event)
+        for tensor in item.prepared.tensors.values():
+            try:
+                tensor.record_stream(current_stream)
+            except RuntimeError:
+                pass
 
 
 def _run_training_loop(state: TrainState) -> None:
@@ -313,6 +362,7 @@ def _run_training_loop(state: TrainState) -> None:
                 total_positions=remaining_positions,
                 queue_size=state.config.data_loader_queue_size,
                 pin_memory=_pin_memory_enabled(state),
+                prefetch_device=_prefetch_device(state),
                 torch=torch,
             ) as train_batches:
                 while state.positions_seen < total_positions:
@@ -384,7 +434,6 @@ def _run_training_loop(state: TrainState) -> None:
                                 "early_fen_skipping": state.config.early_fen_skipping,
                                 "soft_early_fen_skipping": state.config.soft_early_fen_skipping,
                                 "simple_eval_skipping": state.config.simple_eval_skipping,
-                                "param_index": state.config.param_index,
                                 "pc_y0": state.config.pc_y0,
                                 "pc_y1": state.config.pc_y1,
                                 "pc_y2": state.config.pc_y2,
@@ -466,10 +515,7 @@ def _create_scheduler(config: TrainConfig, optimizer, torch):
 
 
 def _create_optimizer(config: TrainConfig, model, torch):
-    kwargs = {
-        "lr": config.lr,
-        "weight_decay": config.weight_decay,
-    }
+    kwargs = {"lr": config.lr}
     if _model_device_type(model) == "cuda":
         if config.fused_optimizer:
             try:
@@ -559,7 +605,7 @@ def _run_validation_and_report(state: TrainState, reporter) -> None:
     reporter.validation_finished(metrics, is_best=is_best)
     if is_best:
         reporter.checkpoint_saved(
-            str(_best_checkpoint_path(state.run_dir, state.epoch_index)),
+            str(_best_checkpoint_alias_path(state.run_dir)),
             is_best=True,
         )
 
@@ -663,9 +709,10 @@ def _run_validation(state: TrainState) -> dict[str, object]:
             total_positions=validation_budget,
             queue_size=state.config.data_loader_queue_size,
             pin_memory=_pin_memory_enabled(state),
+            prefetch_device=_prefetch_device(state),
             torch=torch,
         ) as validation_batches:
-            with torch.no_grad():
+            with torch.inference_mode():
                 for prepared_batch in validation_batches:
                     batch_positions = prepared_batch.batch_positions
                     tensors = _move_tensors_to_device(
@@ -800,7 +847,6 @@ def _run_validation(state: TrainState) -> dict[str, object]:
         "early_fen_skipping": state.config.early_fen_skipping,
         "soft_early_fen_skipping": state.config.soft_early_fen_skipping,
         "simple_eval_skipping": state.config.simple_eval_skipping,
-        "param_index": state.config.param_index,
         "pc_y0": state.config.pc_y0,
         "pc_y1": state.config.pc_y1,
         "pc_y2": state.config.pc_y2,
@@ -864,14 +910,20 @@ def _write_best_checkpoint(state: TrainState) -> Path:
     checkpoints_dir = state.run_dir / "checkpoints"
     stamped_path = _best_checkpoint_path(state.run_dir, state.epoch_index)
     _save_training_checkpoint(state, stamped_path)
+    alias_path = _best_checkpoint_alias_path(state.run_dir)
+    shutil.copy2(stamped_path, alias_path)
     for candidate in checkpoints_dir.glob("epoch_*_best.pt"):
         if candidate != stamped_path:
             candidate.unlink(missing_ok=True)
-    return stamped_path
+    return alias_path
 
 
 def _best_checkpoint_path(run_dir: Path, epoch_index: int) -> Path:
     return run_dir / "checkpoints" / f"epoch_{epoch_index:04d}_best.pt"
+
+
+def _best_checkpoint_alias_path(run_dir: Path) -> Path:
+    return run_dir / "checkpoints" / "best.pt"
 
 
 def _best_checkpoint_sort_key(metrics: dict[str, object]) -> tuple[float, ...]:
@@ -1085,11 +1137,23 @@ def _move_tensors_to_device(
 ) -> dict[str, object]:
     if device == "cpu":
         return tensors
-    return {name: tensor.to(device=device, non_blocking=non_blocking) for name, tensor in tensors.items()}
+    moved = {}
+    for name, tensor in tensors.items():
+        if getattr(getattr(tensor, "device", None), "type", None) == device:
+            moved[name] = tensor
+        else:
+            moved[name] = tensor.to(device=device, non_blocking=non_blocking)
+    return moved
 
 
 def _pin_memory_enabled(state: TrainState) -> bool:
     return state.device == "cuda" and state.config.pin_memory
+
+
+def _prefetch_device(state: TrainState) -> str | None:
+    if state.device == "cuda" and state.config.data_loader_queue_size > 0:
+        return "cuda"
+    return None
 
 
 def _batch_size(batch) -> int:
@@ -1104,7 +1168,6 @@ def _binpack_filter_options(config: TrainConfig, *, split_role: str = "all") -> 
         "early_fen_skipping": config.early_fen_skipping,
         "soft_early_fen_skipping": config.soft_early_fen_skipping,
         "simple_eval_skipping": config.simple_eval_skipping,
-        "param_index": config.param_index,
         "pc_y0": config.pc_y0,
         "pc_y1": config.pc_y1,
         "pc_y2": config.pc_y2,

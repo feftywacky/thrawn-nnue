@@ -41,7 +41,6 @@ class TrainConfig:
     hidden_size: int = 31
     forward_size: int = 1
     fc1_output_size: int = 32
-    output_perspective: str = "stm"
 
     filtered: bool = True
     wld_filtered: bool = True
@@ -49,7 +48,6 @@ class TrainConfig:
     early_fen_skipping: int = -1
     soft_early_fen_skipping: int = 20
     simple_eval_skipping: int = -1
-    param_index: int = 0
     pc_y0: float = 0.0
     pc_y1: float = 0.4
     pc_y2: float = 1.0
@@ -64,10 +62,8 @@ class TrainConfig:
     ply_x4: float = 18.0
     ply_y4: float = 0.75
 
-    optimizer_name: str = "adamw"
     lr: float = 8.75e-4
     gamma: float = 0.992
-    weight_decay: float = 0.0
     clip_grad_norm: float = 10.0
     amp: bool = True
 
@@ -131,8 +127,6 @@ class TrainConfig:
         shape = feature_shape(self.features)
         self.num_features = shape["num_features"]
         self.max_active_features = shape["max_active_features"]
-        if self.output_perspective != "stm":
-            raise ValueError("Only output_perspective='stm' is supported")
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if self.max_epochs <= 0:
@@ -155,8 +149,6 @@ class TrainConfig:
             raise ValueError("early_fen_skipping must be >= -1")
         if self.simple_eval_skipping < -1:
             raise ValueError("simple_eval_skipping must be >= -1")
-        if self.param_index < 0:
-            raise ValueError("param_index must be >= 0")
         for name in (
             "pc_y0",
             "pc_y1",
@@ -174,14 +166,10 @@ class TrainConfig:
         ):
             if not math.isfinite(float(getattr(self, name))):
                 raise ValueError(f"{name} must be finite")
-        if self.optimizer_name != "adamw":
-            raise ValueError("Only optimizer_name='adamw' is supported by this trainer")
         if self.lr <= 0.0:
             raise ValueError("lr must be positive")
         if self.gamma <= 0.0 or self.gamma > 1.0:
             raise ValueError("gamma must be > 0 and <= 1")
-        if self.weight_decay < 0.0:
-            raise ValueError("weight_decay must be >= 0")
         if self.clip_grad_norm <= 0.0:
             raise ValueError("clip_grad_norm must be positive")
         if self.ft_size != 1024:
@@ -231,7 +219,23 @@ def _normalize_config_keys(data: dict[str, Any]) -> dict[str, Any]:
         if "lambda_" in normalized and normalized["lambda_"] != value:
             raise ValueError("Conflicting config keys: lambda and lambda_")
         normalized["lambda_"] = value
+    _drop_legacy_fixed_key(normalized, "output_perspective", "stm")
+    _drop_legacy_fixed_key(normalized, "optimizer_name", "adamw")
+    _drop_legacy_fixed_key(normalized, "weight_decay", 0.0)
+    _drop_legacy_fixed_key(normalized, "param_index", 0)
     return normalized
+
+
+def _drop_legacy_fixed_key(data: dict[str, Any], key: str, expected: object) -> None:
+    if key not in data:
+        return
+    value = data.pop(key)
+    if isinstance(expected, float):
+        matches = math.isclose(float(value), expected, rel_tol=0.0, abs_tol=1e-12)
+    else:
+        matches = value == expected
+    if not matches:
+        raise ValueError(f"{key} is no longer configurable; expected legacy value {expected!r}")
 
 
 def _resolve_dataset_list(base_dir: Path, values: list[str]) -> list[str]:

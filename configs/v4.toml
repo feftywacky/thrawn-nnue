@@ -2,11 +2,7 @@ run_name = "v4"
 default_root_dir = "runs/v4"
 
 datasets = [
-  'C:\Users\Felix\OneDrive\Documents\thrawn-nnue\data\nodes5000pv2_UHO.binpack',
-]
-
-validation_datasets = [
-  'C:\Users\Felix\OneDrive\Documents\thrawn-nnue\data\nodes5000pv2_UHO.binpack',
+  '../data/nodes5000pv2_UHO.binpack',
 ]
 validation_size = 1000000
 check_val_every_n_epoch = 1
@@ -20,19 +16,13 @@ tf32 = true
 fused_optimizer = true
 seed = 42
 
-max_epochs = 200
+max_epochs = 400
 epoch_size = 100000000
 network_save_period = 1
 save_last_network = true
 console_mode = "progress"
 
 features = "HalfKAv2_hm"
-num_features = 22528
-max_active_features = 32
-ft_size = 1024
-hidden_size = 31
-forward_size = 1
-fc1_output_size = 32
 
 filtered = true
 wld_filtered = true
@@ -40,7 +30,6 @@ random_fen_skipping = 3
 early_fen_skipping = -1
 soft_early_fen_skipping = 20
 simple_eval_skipping = -1
-param_index = 0
 pc_y0 = 0.0
 pc_y1 = 0.4
 pc_y2 = 1.0
@@ -55,10 +44,8 @@ ply_y3 = 0.25
 ply_x4 = 18.0
 ply_y4 = 0.75
 
-optimizer_name = "adamw"
-lr = 0.000875
-gamma = 0.992
-weight_decay = 0.0
+lr = 0.0005
+gamma = 0.995
 clip_grad_norm = 10.0
 amp = true
 
@@ -71,6 +58,4 @@ out_offset = 270.0
 out_scaling = 380.0
 pow_exp = 2.5
 
-export_ft_scale = 255.0
-export_dense_scale = 64.0
 export_description = "thrawn HalfKAv2_hm 1024x2 -> 31+1 -> 32 -> 1 nodes5000pv2 UHO 200ep lambda1.0"

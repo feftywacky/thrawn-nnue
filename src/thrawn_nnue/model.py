@@ -19,11 +19,6 @@ if torch is not None:
         return torch.clamp(x, 0.0, 1.0)
 
 
-    def screlu(x: torch.Tensor) -> torch.Tensor:
-        y = crelu(x)
-        return y * y
-
-
     class HalfKAv2HmNNUE(nn.Module):
         def __init__(
             self,
@@ -96,7 +91,8 @@ if torch is not None:
             fc0_out = self.fc0(torch.cat([us, them], dim=1))
             hidden = fc0_out[:, : self.hidden_size]
             forward = fc0_out[:, self.hidden_size : self.hidden_size + self.forward_size]
-            fc1_in = torch.cat([screlu(hidden), crelu(hidden)], dim=1)
+            hidden_crelu = crelu(hidden)
+            fc1_in = torch.cat([hidden_crelu.square(), hidden_crelu], dim=1)
             fc1_out = crelu(self.fc1(fc1_in))
             return self.fc2(fc1_out) + forward
 

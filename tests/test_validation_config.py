@@ -62,7 +62,6 @@ class ValidationConfigTests(unittest.TestCase):
             ("random_fen_skipping", -1),
             ("early_fen_skipping", -2),
             ("simple_eval_skipping", -2),
-            ("param_index", -1),
             ("lr", 0.0),
             ("gamma", 0.0),
             ("lambda", 1.1),
@@ -158,6 +157,31 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.pc_y3, 1.0)
         self.assertEqual(config.pc_y4, 0.75)
 
+    def test_legacy_fixed_knobs_are_accepted_only_at_default_values(self) -> None:
+        config = TrainConfig.from_dict(
+            {
+                "datasets": ["/tmp/train.binpack"],
+                "max_epochs": 1,
+                "epoch_size": 1,
+                "output_perspective": "stm",
+                "optimizer_name": "adamw",
+                "weight_decay": 0.0,
+                "param_index": 0,
+            }
+        )
+
+        self.assertEqual(config.lr, 8.75e-4)
+
+        with self.assertRaisesRegex(ValueError, "weight_decay is no longer configurable"):
+            TrainConfig.from_dict(
+                {
+                    "datasets": ["/tmp/train.binpack"],
+                    "max_epochs": 1,
+                    "epoch_size": 1,
+                    "weight_decay": 0.1,
+                }
+            )
+
     def test_halfka_v2_hm_shape_is_derived_from_feature_name(self) -> None:
         config = TrainConfig.from_dict(
             {
@@ -207,7 +231,7 @@ class ValidationConfigTests(unittest.TestCase):
 
         self.assertEqual(v6.max_epochs, 200)
         self.assertEqual(v6.epoch_size, 100_000_000)
-        self.assertEqual(v6.lr, 0.00005)
+        self.assertEqual(v6.lr, 0.00021875)
         self.assertEqual(v6.gamma, 0.997)
         self.assertEqual(v6.start_lambda, 1.0)
         self.assertEqual(v6.end_lambda, 0.75)

@@ -482,7 +482,6 @@ class BinpackStream:
         early_fen_skipping: int = -1,
         soft_early_fen_skipping: int = 0,
         simple_eval_skipping: int = -1,
-        param_index: int = 0,
         pc_y0: float = 0.0,
         pc_y1: float = 0.4,
         pc_y2: float = 1.0,
@@ -509,8 +508,6 @@ class BinpackStream:
             raise ValueError("early_fen_skipping must be >= -1")
         if simple_eval_skipping < -1:
             raise ValueError("simple_eval_skipping must be >= -1")
-        if param_index < 0:
-            raise ValueError("param_index must be >= 0")
         for name, value in (
             ("pc_y0", pc_y0),
             ("pc_y1", pc_y1),
@@ -546,7 +543,6 @@ class BinpackStream:
             int(early_fen_skipping),
             int(soft_early_fen_skipping),
             int(simple_eval_skipping),
-            int(param_index),
             float(pc_y0),
             float(pc_y1),
             float(pc_y2),
@@ -633,31 +629,30 @@ def _load_library() -> ctypes.CDLL:
 def _configure_library_symbols(lib: ctypes.CDLL) -> None:
     lib.thrawn_binpack_open_many.argtypes = [
         ctypes.POINTER(ctypes.c_char_p),
-        ctypes.c_int32,
-        ctypes.c_int32,
-        ctypes.c_int32,
-        ctypes.c_int32,
-        ctypes.c_int32,
-        ctypes.c_int32,
-        ctypes.c_int32,
-        ctypes.c_int32,
-        ctypes.c_int32,
-        ctypes.c_int32,
-        ctypes.c_double,
-        ctypes.c_double,
-        ctypes.c_double,
-        ctypes.c_double,
-        ctypes.c_double,
-        ctypes.c_double,
-        ctypes.c_double,
-        ctypes.c_double,
-        ctypes.c_double,
-        ctypes.c_double,
-        ctypes.c_double,
-        ctypes.c_double,
-        ctypes.c_double,
-        ctypes.c_int32,
-        ctypes.c_double,
+        ctypes.c_int32,  # num_paths
+        ctypes.c_int32,  # num_threads
+        ctypes.c_int32,  # cyclic
+        ctypes.c_int32,  # skip_wdl_score_mismatch
+        ctypes.c_int32,  # skip_tactical_positions
+        ctypes.c_int32,  # random_fen_skipping
+        ctypes.c_int32,  # early_fen_skipping
+        ctypes.c_int32,  # soft_early_fen_skipping
+        ctypes.c_int32,  # simple_eval_skipping
+        ctypes.c_double,  # pc_y0
+        ctypes.c_double,  # pc_y1
+        ctypes.c_double,  # pc_y2
+        ctypes.c_double,  # pc_y3
+        ctypes.c_double,  # pc_y4
+        ctypes.c_double,  # ply_x1
+        ctypes.c_double,  # ply_y1
+        ctypes.c_double,  # ply_x2
+        ctypes.c_double,  # ply_y2
+        ctypes.c_double,  # ply_x3
+        ctypes.c_double,  # ply_y3
+        ctypes.c_double,  # ply_x4
+        ctypes.c_double,  # ply_y4
+        ctypes.c_int32,  # split_role
+        ctypes.c_double,  # validation_split_fraction
     ]
     lib.thrawn_binpack_open_many.restype = ctypes.c_void_p
     lib.thrawn_binpack_close.argtypes = [ctypes.c_void_p]

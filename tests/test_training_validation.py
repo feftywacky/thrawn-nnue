@@ -240,6 +240,7 @@ class ValidationTrainingTests(unittest.TestCase):
             total_positions=None,
             queue_size=0,
             pin_memory=False,
+            prefetch_device=None,
             torch=torch,
         ) as sync_source:
             sync_scores = [batch.tensors["score"].squeeze(1).tolist() for batch in sync_source]
@@ -251,6 +252,7 @@ class ValidationTrainingTests(unittest.TestCase):
             total_positions=None,
             queue_size=2,
             pin_memory=False,
+            prefetch_device=None,
             torch=torch,
         ) as prefetched_source:
             prefetched_scores = [batch.tensors["score"].squeeze(1).tolist() for batch in prefetched_source]
@@ -266,6 +268,7 @@ class ValidationTrainingTests(unittest.TestCase):
             total_positions=None,
             queue_size=2,
             pin_memory=False,
+            prefetch_device=None,
             torch=torch,
         ) as source:
             first = next(source)
@@ -345,6 +348,7 @@ class ValidationTrainingTests(unittest.TestCase):
             checkpoint_path = train_from_config(config, console_mode="text")
 
             self.assertTrue(checkpoint_path.exists())
+            self.assertTrue((Path(config.default_root_dir) / "checkpoints" / "best.pt").exists())
             metrics_path = Path(config.default_root_dir) / "metrics.jsonl"
             records = [json.loads(line) for line in metrics_path.read_text(encoding="utf-8").splitlines()]
             train_records = [record for record in records if record["event"] == "train"]

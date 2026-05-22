@@ -95,7 +95,6 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
     early_fen_skipping = _as_int(_config_value(run, "early_fen_skipping"))
     soft_early_fen_skipping = _as_int(_config_value(run, "soft_early_fen_skipping"))
     simple_eval_skipping = _as_int(_config_value(run, "simple_eval_skipping"))
-    param_index = _as_int(_config_value(run, "param_index"))
     pc_weights = [
         _as_float(_config_value(run, name))
         for name in ("pc_y0", "pc_y1", "pc_y2", "pc_y3", "pc_y4")
@@ -246,7 +245,6 @@ def summarize_run(run: MetricsRun) -> dict[str, object]:
         "early_fen_skipping": early_fen_skipping,
         "soft_early_fen_skipping": soft_early_fen_skipping,
         "simple_eval_skipping": simple_eval_skipping,
-        "param_index": param_index,
         "pc_weights": pc_weights,
         "ply_filter_points": ply_filter_points,
     }
@@ -574,6 +572,9 @@ def _checkpoint_diagnostics(run_dir: Path) -> dict[str, object]:
 
 def _best_checkpoint_path(run_dir: Path) -> Path | None:
     checkpoints_dir = run_dir / "checkpoints"
+    alias_path = checkpoints_dir / "best.pt"
+    if alias_path.exists():
+        return alias_path
     stamped_paths = sorted(checkpoints_dir.glob("epoch_*_best.pt"))
     if stamped_paths:
         return stamped_paths[-1]

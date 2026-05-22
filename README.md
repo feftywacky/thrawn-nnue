@@ -204,12 +204,11 @@ Important config themes:
 - epoch-derived position budgets
 - device/runtime settings
 - training budget and checkpoint cadence
-- optimizer / LR schedule
-- feature set and fixed Stockfish-style network constants
+- LR schedule
+- feature set
 - Stockfish-style dataloader skipping: tactical positions, WDL/score mismatch, random FEN skipping, hard/soft early-ply skipping, simple-eval skipping, and dynamic piece-count weighting
 - loader throughput: `num_workers` controls native `.binpack` reader concurrency; `data_loader_queue_size` controls Python-side prefetch depth
 - WDL target shaping
-- export quantization scales
 
 The exported runtime score contract is documented in [docs/nnue_spec.md](docs/nnue_spec.md), not duplicated here.
 
@@ -239,7 +238,7 @@ Optional:
 
 ```bash
 thrawn-nnue train --config configs/v4.toml --console-mode text
-thrawn-nnue train --config configs/v4.toml --init-checkpoint configs/runs/v4/checkpoints/epoch_0123_best.pt
+thrawn-nnue train --config configs/v4.toml --init-checkpoint configs/runs/v4/checkpoints/best.pt
 ```
 
 `--init-checkpoint` warm-starts model weights but starts a fresh optimizer/scheduler state for the new run.
@@ -249,7 +248,7 @@ thrawn-nnue train --config configs/v4.toml --init-checkpoint configs/runs/v4/che
 Fine-tune from an existing checkpoint with a new config and a fresh optimizer:
 
 ```bash
-thrawn-nnue fine-tune --config configs/v5.toml --checkpoint configs/runs/v4/checkpoints/epoch_0123_best.pt
+thrawn-nnue fine-tune --config configs/v5.toml --checkpoint configs/runs/v4/checkpoints/best.pt
 ```
 
 This is equivalent to `train --init-checkpoint`, but names the workflow directly. Use it when changing datasets or optimizer settings while keeping trained weights.
@@ -275,31 +274,32 @@ Export writes the current `HalfKAv2_hm` v8 file format directly. The payload sto
 Export a checkpoint to `.nnue`:
 
 ```bash
-thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/epoch_0123_best.pt --out configs/runs/v4/model.nnue
+thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/best.pt --out configs/runs/v4/model.nnue
 ```
 
 Export and immediately verify checkpoint/export parity:
 
 ```bash
-thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/epoch_0123_best.pt --out configs/runs/v4/model.nnue --verify
+thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/best.pt --out configs/runs/v4/model.nnue --verify
 ```
 
 Checkpoint selection notes:
 
-- `epoch_####_best.pt` is the one retained best checkpoint, selected by lowest validation `score_mae`.
+- `best.pt` is continuously replaced with the best checkpoint by validation `score_mae`.
+- `epoch_####_best.pt` is retained beside it as the epoch-stamped copy of the same best checkpoint.
 
 ### Verify export
 
 Compare a PyTorch checkpoint against the exported `.nnue` file. The default output is a concise parity report; add `--json` for the full prediction and quantization diagnostics.
 
 ```bash
-thrawn-nnue verify-export --checkpoint configs/runs/v4/checkpoints/epoch_0123_best.pt --nnue configs/runs/v4/model.nnue
+thrawn-nnue verify-export --checkpoint configs/runs/v4/checkpoints/best.pt --nnue configs/runs/v4/model.nnue
 ```
 
 You can also provide one or more custom FENs:
 
 ```bash
-thrawn-nnue verify-export --checkpoint configs/runs/v4/checkpoints/epoch_0123_best.pt --nnue configs/runs/v4/model.nnue --fen "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1"
+thrawn-nnue verify-export --checkpoint configs/runs/v4/checkpoints/best.pt --nnue configs/runs/v4/model.nnue --fen "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1"
 ```
 
 ### Inspect one dataset
@@ -379,7 +379,7 @@ thrawn-nnue test --pattern "test_cli.py"
 5. Fine-tune with `thrawn-nnue fine-tune` when switching to better data.
 6. Resume if interrupted.
 7. Inspect `thrawn-nnue metrics`.
-8. Export the `epoch_####_best.pt` checkpoint or another chosen checkpoint with `--verify`.
+8. Export the `best.pt` checkpoint or another chosen checkpoint with `--verify`.
 9. Integrate using [docs/nnue_spec.md](docs/nnue_spec.md).
 
 ## Tests

@@ -14,6 +14,7 @@ try:
 except ModuleNotFoundError:
     matplotlib = None
 
+import thrawn_nnue.checkpoint
 from thrawn_nnue.metrics import _checkpoint_diagnostics, generate_run_plots, load_metrics_run, render_summary_text, summarize_run
 
 
@@ -50,6 +51,27 @@ class MetricsSummaryTests(unittest.TestCase):
             self.assertEqual(diagnostics["global_step"], 42)
             self.assertEqual(diagnostics["positions_seen"], 8192)
             self.assertEqual(diagnostics["best_checkpoint_metric_name"], "score_mae")
+
+    def test_checkpoint_diagnostics_prefers_best_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            checkpoints_dir = run_dir / "checkpoints"
+            checkpoints_dir.mkdir(parents=True, exist_ok=True)
+            (checkpoints_dir / "epoch_0042_best.pt").write_bytes(b"stamped")
+            (checkpoints_dir / "best.pt").write_bytes(b"alias")
+
+            with patch("thrawn_nnue.checkpoint.load_checkpoint") as load_checkpoint:
+                load_checkpoint.return_value = {
+                    "best_checkpoint_metric_name": "score_mae",
+                    "best_checkpoint_metric_value": 77.0,
+                    "best_checkpoint_positions": 9000,
+                    "config": {"batch_size": 1024},
+                    "global_step": 42,
+                    "positions_seen": 8192,
+                }
+                _checkpoint_diagnostics(run_dir)
+
+            self.assertEqual(load_checkpoint.call_args.args[0], checkpoints_dir / "best.pt")
 
     def test_load_and_summarize_train_only_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
