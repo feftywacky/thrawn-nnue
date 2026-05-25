@@ -22,7 +22,7 @@ High-level layout:
 - `tests/`
   - unit and regression tests
 
-Current Stockfish-style training shape:
+Current training shape:
 
 ```text
 HalfKAv2_hm sparse features: 22528
