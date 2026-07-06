@@ -2,6 +2,7 @@ build/
 __pycache__/
 *.pyc
 venv
+.venv
 *.egg-info
 /data
 /configs/runs

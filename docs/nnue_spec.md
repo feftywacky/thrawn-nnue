@@ -28,7 +28,8 @@ Current production shape:
 HalfKAv2_hm sparse features: 22528
 feature transformer: 22528 -> 1024 per perspective
 concat [us_acc | them_acc]: 2048
-fc0: 2048 -> 32
+FT activation (pairwise SqrCReLU): 2048 -> 1024
+fc0: 1024 -> 32          (u8 x i8)
 split fc0: lanes 0..30 hidden, lane 31 forward
 activation concat: SCReLU(hidden) || CReLU(hidden) -> 62
 fc1: 62 -> 32
@@ -36,6 +37,11 @@ activation: CReLU
 fc2: 32 -> 1
 final: fc2_output + forward_output
 ```
+
+The feature transformer output is *activated before* fc0: this is what makes fc0
+a `u8 x i8` layer instead of the `i16 x i16` layer that a raw un-clamped
+accumulator would force (fc0 is ~60% of engine eval time). The pairwise product
+also halves the fc0 input width from `2048` to `1024`.
 
 Constants:
 
@@ -47,6 +53,7 @@ static constexpr int FtSize = 1024;
 static constexpr int HiddenSize = 31;
 static constexpr int ForwardSize = 1;
 static constexpr int Fc0OutputSize = HiddenSize + ForwardSize;
+static constexpr int Fc0InputSize = FtSize;        // pairwise SqrCReLU: 2*FtSize -> FtSize
 static constexpr int Fc1InputSize = HiddenSize * 2;
 static constexpr int Fc1OutputSize = 32;
 ```
@@ -56,6 +63,16 @@ Activation definitions:
 ```cpp
 crelu(x)  = clamp(x, 0, 1)
 screlu(x) = crelu(x) * crelu(x)
+
+// Pairwise SqrCReLU on the feature-transformer output.
+// Each perspective's FtSize accumulator is split into two FtSize/2 halves that
+// are clamped and multiplied together; the two perspectives are concatenated.
+// Float reference:
+ft_activation(us, them):
+    for i in 0 .. FtSize/2 - 1:
+        out[i]            = crelu(us[i])   * crelu(us[i + FtSize/2])
+        out[i + FtSize/2] = crelu(them[i]) * crelu(them[i + FtSize/2])
+    // out has width FtSize and feeds fc0
 ```
 
 ## File Format
@@ -66,13 +83,14 @@ Header:
 
 ```text
 char   magic[8]            = "THNNUE\0\1"
-uint32 version             = 8
+uint32 version             = 9
 char   feature_set[16]     = "HalfKAv2_hm\0..."
 uint32 num_features        = 22528
 uint32 ft_size             = 1024
 uint32 hidden_size         = 31
 uint32 forward_size        = 1
 uint32 fc0_output_size     = 32
+uint32 fc0_input_size      = 1024
 uint32 fc1_input_size      = 62
 uint32 fc1_output_size     = 32
 uint32 output_perspective  = 1
@@ -91,7 +109,7 @@ Payload:
 int16  ft_bias[ft_size]
 int16  ft_weight[num_features][ft_size]
 int32  fc0_bias[fc0_output_size]
-int8   fc0_weight[ft_size * 2][fc0_output_size]
+int8   fc0_weight[fc0_input_size][fc0_output_size]   // fc0_input_size == ft_size
 int32  fc1_bias[fc1_output_size]
 int8   fc1_weight[fc1_input_size][fc1_output_size]
 int32  fc2_bias[1]
@@ -101,9 +119,10 @@ int8   fc2_weight[fc1_output_size]
 Required loader checks:
 
 - `magic == "THNNUE\0\1"`
-- `version == 8`
+- `version == 9`
 - `feature_set == "HalfKAv2_hm"`
 - all dimensions match the engine build
+- `fc0_input_size == ft_size`
 - `output_perspective == 1`
 
 ## Quantization
@@ -227,7 +246,7 @@ them_acc = stm ? black_acc : white_acc
 Reference flow:
 
 ```text
-x = concat [us_acc | them_acc]
+x = ft_activation(us_acc, them_acc)   # pairwise SqrCReLU, width FtSize
 fc0_out = x @ fc0_weight + fc0_bias
 hidden = fc0_out[0..30]
 forward = fc0_out[31]
@@ -237,6 +256,9 @@ x = CReLU(x)
 x = x @ fc2_weight + fc2_bias
 score_stm = (x + forward) * score_scale
 ```
+
+`ft_activation` is the pairwise SqrCReLU defined above. The reference is float; the
+engine realizes it in integer arithmetic — see Fast Inference Notes.
 
 The repository verifier is the parity target:
 
@@ -252,6 +274,35 @@ Use `score` values for search integration. `cp` values are display conversions.
 ## Fast Inference Notes
 
 Keep feature rows contiguous and 64-byte aligned. Each feature row is `1024 * int16`, so full refresh touches predictable streaming memory and incremental updates only add/subtract changed rows. Keep white and black accumulators hot in the position state and avoid heap allocation in evaluation.
+
+### fc0 as a `u8 x i8` layer (the main hot path)
+
+`fc0` dominates eval. Feeding it the pairwise-SqrCReLU activation keeps it a
+`u8 x i8` dot product (`vpdpbusd` on AVX2, `vdotq_s32`/`sdot` on NEON) — ~16
+MACs/instruction vs ~4 for the `i16 x i16` path, and the pairwise product halves
+the fc0 input to `FtSize`. Realize the float `ft_activation` in integers as:
+
+```text
+ft_one = round(ft_scale)          # e.g. 255; the int16 value that represents 1.0
+for i in 0 .. FtSize/2 - 1:
+    # us perspective
+    a = clamp(us_acc[i],            0, ft_one)     # int16, CReLU
+    b = clamp(us_acc[i + FtSize/2], 0, ft_one)
+    act[i]            = (a * b) >> SHIFT           # uint8 in [0, 127]
+    # them perspective (same, into act[i + FtSize/2])
+```
+
+Choose `SHIFT = 2*log2(ft_one+1) - 7` so the product renormalizes to a uint8
+whose "one" is 127 (`ft_one = 255` -> `SHIFT = 9`; `ft_one = 127` -> `SHIFT = 7`).
+Then `fc0_out[j] = sum_i act[i] * fc0_weight[i][j]` accumulates in int32.
+
+Bias scaling: the exported `fc0_bias` is quantized at `fc0_scale` (it matches the
+float reference where the activation is in `[0,1]`). Because the integer product
+above carries an extra activation factor of `127`, add the bias as
+`fc0_bias[j] * 127` (i.e. pre-multiply the loaded `fc0_bias` by the uint8 "one")
+before the fc0 int32 sum, or fold that factor into a load-time bias rewrite. The
+downstream `fc1`/`fc2` already take `[0,1]`-clamped activations, so they are
+unchanged from v8.
 
 The dense tail is intentionally tiny. Compute `fc0` into a fixed 32-lane buffer, keep lane 31 as the forward lane, materialize the 62 activation bytes/words in a stack buffer aligned to 64 bytes, then run `fc1` and `fc2`. The exported dense matrices are input-major; engines may transpose or tile them at load time for their SIMD kernels.
 
