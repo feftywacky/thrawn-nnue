@@ -1,27 +1,22 @@
-run_name = "v6"
-default_root_dir = "runs/v6"
+run_name = "v2"
+default_root_dir = "runs/v2"
 
 datasets = [
-  '../data/test80-2024-01-jan-2tb7p.min-v2.v6.binpack',
-  '../data/test80-2024-02-feb-2tb7p.min-v2.v6.binpack',
-  '../data/test80-2024-03-mar-2tb7p.min-v2.v6.binpack',
-  '../data/test80-2024-04-apr-2tb7p.min-v2.v6.binpack',
-  '../data/test80-2024-05-may-2tb7p.min-v2.v6.binpack',
-  '../data/test80-2024-06-jun-2tb7p.min-v2.v6.binpack',
+  '../data/T60T70wIsRightFarseer.binpack',
 ]
 validation_size = 1000000
 check_val_every_n_epoch = 1
 
-accelerator = "cuda"
-num_workers = 4
-batch_size = 16384
-pin_memory = true
+accelerator = "mps"
+num_workers = 8
+batch_size = 32768
+pin_memory = false
 data_loader_queue_size = 8
 tf32 = true
 fused_optimizer = true
 seed = 42
 
-max_epochs = 100
+max_epochs = 300
 epoch_size = 100000000
 network_save_period = 1
 save_last_network = true
@@ -49,8 +44,8 @@ ply_y3 = 0.25
 ply_x4 = 18.0
 ply_y4 = 0.75
 
-lr = 0.0001
-gamma = 0.999
+lr = 0.0005
+gamma = 0.992
 clip_grad_norm = 10.0
 amp = true
 
@@ -63,4 +58,4 @@ out_offset = 270.0
 out_scaling = 380.0
 pow_exp = 2.5
 
-export_description = "thrawn HalfKAv2_hm 1024x2 -> 31+1 -> 32 -> 1 Test80 2024 2tb7p 200ep polish fine tune"
+export_description = "thrawn HalfKAv2_hm 1024x2 pairwise -> 31+1 -> 32 -> 1 T60T70 IsRight Farseer finetune from v1"

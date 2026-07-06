@@ -82,7 +82,7 @@ class TrainConfig:
 
     export_ft_scale: float = 255.0
     export_dense_scale: float = 64.0
-    export_description: str = "thrawn HalfKAv2_hm 1024x2 -> 31+1 -> 32 -> 1 nnue"
+    export_description: str = "thrawn HalfKAv2_hm 1024x2 pairwise -> 31+1 -> 32 -> 1 nnue"
 
     @property
     def total_positions(self) -> int:

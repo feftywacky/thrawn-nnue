@@ -12,7 +12,7 @@ from .features import FEATURES, HALFKA_V2_HM_NUM_FEATURES, active_feature_indice
 
 
 MAGIC = b"THNNUE\x00\x01"
-VERSION = 8
+VERSION = 9
 FEATURE_SET_ID = "HalfKAv2_hm"
 OUTPUT_PERSPECTIVE_STM = 1
 EXPECTED_NUM_FEATURES = HALFKA_V2_HM_NUM_FEATURES
@@ -20,10 +20,13 @@ EXPECTED_FT_SIZE = 1024
 EXPECTED_HIDDEN_SIZE = 31
 EXPECTED_FORWARD_SIZE = 1
 EXPECTED_FC1_OUTPUT_SIZE = 32
+# Pairwise SqrCReLU on the FT output feeds fc0 an activation of width ft_size
+# (not ft_size * 2): each perspective's accumulator halves are multiplied together.
+EXPECTED_FC0_INPUT_SIZE = EXPECTED_FT_SIZE
 MAX_DESCRIPTION_BYTES = 1_000_000
 STOCKFISH_INTERNAL_TO_CP = 100.0 / 208.0
 HEADER_PREFIX_STRUCT = struct.Struct("<8sI")
-HEADER_REST_STRUCT = struct.Struct("<16sIIIIIIIIfffffI")
+HEADER_REST_STRUCT = struct.Struct("<16sIIIIIIIIIfffffI")
 DEFAULT_VERIFICATION_FENS = [
     "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b - - 0 1",
     "r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/2P5/PP3PPP/RNBQKBNR b - - 0 3",
@@ -57,6 +60,11 @@ class ExportedNetwork:
     @property
     def fc0_output_size(self) -> int:
         return self.hidden_size + self.forward_size
+
+    @property
+    def fc0_input_size(self) -> int:
+        # Pairwise SqrCReLU halves the raw us||them concat (ft_size * 2) to ft_size.
+        return self.ft_size
 
     @property
     def fc1_input_size(self) -> int:
@@ -114,6 +122,7 @@ def load_export(path: str | Path) -> ExportedNetwork:
             hidden_size,
             forward_size,
             fc0_output_size,
+            fc0_input_size,
             fc1_input_size,
             fc1_output_size,
             output_perspective,
@@ -133,6 +142,7 @@ def load_export(path: str | Path) -> ExportedNetwork:
             hidden_size=hidden_size,
             forward_size=forward_size,
             fc0_output_size=fc0_output_size,
+            fc0_input_size=fc0_input_size,
             fc1_input_size=fc1_input_size,
             fc1_output_size=fc1_output_size,
             output_perspective=output_perspective,
@@ -152,9 +162,9 @@ def load_export(path: str | Path) -> ExportedNetwork:
         ).copy().reshape(num_features, ft_size)
         fc0_bias = np.frombuffer(_read_exact(handle, fc0_output_size * 4, "fc0_bias"), dtype="<i4").copy()
         fc0_weight = np.frombuffer(
-            _read_exact(handle, ft_size * 2 * fc0_output_size, "fc0_weight"),
+            _read_exact(handle, fc0_input_size * fc0_output_size, "fc0_weight"),
             dtype=np.int8,
-        ).copy().reshape(ft_size * 2, fc0_output_size)
+        ).copy().reshape(fc0_input_size, fc0_output_size)
         fc1_bias = np.frombuffer(_read_exact(handle, fc1_output_size * 4, "fc1_bias"), dtype="<i4").copy()
         fc1_weight = np.frombuffer(
             _read_exact(handle, fc1_input_size * fc1_output_size, "fc1_weight"),
@@ -202,6 +212,7 @@ def _validate_export_header(
     hidden_size: int,
     forward_size: int,
     fc0_output_size: int,
+    fc0_input_size: int,
     fc1_input_size: int,
     fc1_output_size: int,
     output_perspective: int,
@@ -231,6 +242,8 @@ def _validate_export_header(
             raise ValueError(f"{name} must be {expected}")
     if fc0_output_size != hidden_size + forward_size:
         raise ValueError("fc0_output_size must equal hidden_size + forward_size")
+    if fc0_input_size != ft_size:
+        raise ValueError("fc0_input_size must equal ft_size (pairwise SqrCReLU FT activation)")
     if fc1_input_size != hidden_size * 2:
         raise ValueError("fc1_input_size must equal hidden_size * 2")
     if output_perspective != OUTPUT_PERSPECTIVE_STM:
@@ -362,10 +375,16 @@ def evaluate_export(exported: ExportedNetwork, fens: list[str]) -> list[float]:
         white_acc = ft_bias + ft_weight[white_features].sum(axis=0)
         black_acc = ft_bias + ft_weight[black_features].sum(axis=0)
         if board.side_to_move == "w":
-            combined = np.concatenate([white_acc, black_acc], axis=0)
+            us_acc, them_acc = white_acc, black_acc
         else:
-            combined = np.concatenate([black_acc, white_acc], axis=0)
-        fc0_out = combined @ fc0_weight + fc0_bias
+            us_acc, them_acc = black_acc, white_acc
+        # Pairwise SqrCReLU: clamp each perspective to the activation range and
+        # multiply its two halves together. Mirrors model.ft_pairwise_screlu so the
+        # exported int net matches the float checkpoint (fc0 input width = ft_size).
+        us_lo, us_hi = np.split(np.clip(us_acc, 0.0, 1.0), 2)
+        them_lo, them_hi = np.split(np.clip(them_acc, 0.0, 1.0), 2)
+        ft_out = np.concatenate([us_lo * us_hi, them_lo * them_hi], axis=0)
+        fc0_out = ft_out @ fc0_weight + fc0_bias
         hidden = fc0_out[: exported.hidden_size]
         forward = fc0_out[exported.hidden_size : exported.fc0_output_size]
         hidden_crelu = np.clip(hidden, 0.0, 1.0)
@@ -502,6 +521,7 @@ def _write_export(handle, exported: ExportedNetwork) -> None:
         exported.hidden_size,
         exported.forward_size,
         exported.fc0_output_size,
+        exported.fc0_input_size,
         exported.fc1_input_size,
         exported.fc1_output_size,
         OUTPUT_PERSPECTIVE_STM,

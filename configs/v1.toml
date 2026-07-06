@@ -1,5 +1,5 @@
-run_name = "v4"
-default_root_dir = "runs/v4"
+run_name = "v1"
+default_root_dir = "runs/v1"
 
 datasets = [
   '../data/nodes5000pv2_UHO.binpack',
@@ -7,13 +7,13 @@ datasets = [
 validation_size = 1000000
 check_val_every_n_epoch = 1
 
-accelerator = "cuda"
-num_workers = 4
-batch_size = 16384
-pin_memory = true
+accelerator = "mps"
+num_workers = 8
+batch_size = 32768
+pin_memory = false
 data_loader_queue_size = 8
-tf32 = true
-fused_optimizer = true
+tf32 = false
+fused_optimizer = false
 seed = 42
 
 max_epochs = 200

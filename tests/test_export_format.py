@@ -52,7 +52,7 @@ class ExportFormatTests(unittest.TestCase):
         ft_weight[0, 0] = 123
         ft_weight[-1, -1] = -456
         fc0_bias = np.arange(fc0_output_size, dtype=np.int32)
-        fc0_weight = np.zeros((EXPECTED_FT_SIZE * 2, fc0_output_size), dtype=np.int8)
+        fc0_weight = np.zeros((EXPECTED_FT_SIZE, fc0_output_size), dtype=np.int8)
         fc0_weight[0, 0] = 7
         fc0_weight[-1, -1] = -8
         fc1_bias = np.arange(fc1_output_size, dtype=np.int32)
@@ -94,6 +94,7 @@ class ExportFormatTests(unittest.TestCase):
             self.assertEqual(loaded.hidden_size, hidden_size)
             self.assertEqual(loaded.forward_size, forward_size)
             self.assertEqual(loaded.fc0_output_size, fc0_output_size)
+            self.assertEqual(loaded.fc0_input_size, EXPECTED_FT_SIZE)
             self.assertEqual(loaded.fc1_input_size, fc1_input_size)
             self.assertEqual(loaded.fc1_output_size, fc1_output_size)
             self.assertEqual(loaded.fc0_scale, exported.fc0_scale)
@@ -163,17 +164,21 @@ class ExportFormatTests(unittest.TestCase):
         self.assertAlmostEqual(float(dequantized_bias[0]), 0.5, places=5)
         self.assertAlmostEqual(exported.score_scale, 4.0)
 
-    def test_evaluate_export_uses_screlu_crelu_and_forward_lane(self) -> None:
+    def test_evaluate_export_uses_pairwise_screlu_crelu_and_forward_lane(self) -> None:
         hidden_size = EXPECTED_HIDDEN_SIZE
         fc0_output_size = hidden_size + 1
         fc1_input_size = hidden_size * 2
         fc1_output_size = EXPECTED_FC1_OUTPUT_SIZE
+        half = EXPECTED_FT_SIZE // 2
+        # Pairwise SqrCReLU multiplies each perspective's two halves, so both the
+        # low (index 0) and high (index half) lanes must be driven to 1.0 for the
+        # first fc0 input lane to be non-zero: crelu(1) * crelu(1) = 1.
         ft_bias = np.zeros(EXPECTED_FT_SIZE, dtype=np.int16)
-        ft_bias[0] = 50
-        fc0_weight = np.zeros((EXPECTED_FT_SIZE * 2, fc0_output_size), dtype=np.int8)
+        ft_bias[0] = 100
+        ft_bias[half] = 100
+        fc0_weight = np.zeros((EXPECTED_FT_SIZE, fc0_output_size), dtype=np.int8)
         fc0_weight[0, 0] = 100
         fc0_bias = np.zeros(fc0_output_size, dtype=np.int32)
-        fc0_bias[-1] = 25
         fc1_weight = np.zeros((fc1_input_size, fc1_output_size), dtype=np.int8)
         fc1_weight[0, 0] = 100
         fc1_weight[hidden_size, 0] = 100
@@ -228,6 +233,7 @@ class ExportFormatTests(unittest.TestCase):
                 EXPECTED_HIDDEN_SIZE,
                 1,
                 EXPECTED_HIDDEN_SIZE + 1,
+                EXPECTED_FT_SIZE,
                 EXPECTED_HIDDEN_SIZE * 2,
                 EXPECTED_FC1_OUTPUT_SIZE,
                 OUTPUT_PERSPECTIVE_STM,
@@ -259,7 +265,7 @@ class ExportFormatTests(unittest.TestCase):
             ft_bias=np.zeros(EXPECTED_FT_SIZE, dtype=np.int16),
             ft_weight=np.zeros((EXPECTED_NUM_FEATURES, EXPECTED_FT_SIZE), dtype=np.int16),
             fc0_bias=np.zeros(EXPECTED_HIDDEN_SIZE + 1, dtype=np.int32),
-            fc0_weight=np.zeros((EXPECTED_FT_SIZE * 2, EXPECTED_HIDDEN_SIZE + 1), dtype=np.int8),
+            fc0_weight=np.zeros((EXPECTED_FT_SIZE, EXPECTED_HIDDEN_SIZE + 1), dtype=np.int8),
             fc1_bias=np.zeros(EXPECTED_FC1_OUTPUT_SIZE, dtype=np.int32),
             fc1_weight=np.zeros((EXPECTED_HIDDEN_SIZE * 2, EXPECTED_FC1_OUTPUT_SIZE), dtype=np.int8),
             fc2_bias=np.zeros(1, dtype=np.int32),
