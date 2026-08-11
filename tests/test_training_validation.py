@@ -107,6 +107,8 @@ class ValidationTrainingTests(unittest.TestCase):
 
         class _Model:
             def __init__(self) -> None:
+                # StackedLinear layout: fc0/fc1/fc2 are single wide nn.Linear-shaped
+                # layers whose output is (out_per_bucket * num_buckets,).
                 self.fc0 = _Layer([[5.0, -5.0]])
                 self.fc1 = _Layer([[4.0, -4.0]])
                 self.fc2 = _Layer([[3.0, -3.0]])

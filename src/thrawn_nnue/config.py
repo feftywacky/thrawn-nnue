@@ -38,9 +38,9 @@ class TrainConfig:
     num_features: int = 22_528
     max_active_features: int = 32
     ft_size: int = 1024
-    hidden_size: int = 31
-    forward_size: int = 1
-    fc1_output_size: int = 32
+    l2_size: int = 32
+    l3_size: int = 32
+    num_buckets: int = 8
 
     filtered: bool = True
     wld_filtered: bool = True
@@ -80,9 +80,26 @@ class TrainConfig:
     w1: float = 0.0
     w2: float = 0.5
 
-    export_ft_scale: float = 255.0
+    # ft_one = 256 (not 255): makes every downstream integer renormalization an
+    # exact power-of-two shift on the engine side (SqrClippedReLU's >> 19 in
+    # particular, which was ~0.78% off at ft_one=255 -- see
+    # docs/nnue_spec.md's Quantization section). Matches Stockfish's own
+    # FtMaxVal=255 / HiddenOneVal=128 constants.
+    export_ft_scale: float = 256.0
     export_dense_scale: float = 64.0
-    export_description: str = "thrawn HalfKAv2_hm 1024x2 pairwise -> 31+1 -> 32 -> 1 nnue"
+    export_description: str = "thrawn HalfKAv2_hm 1024x2 pairwise -> 8 buckets [32 -> 32, wide head] -> 1 nnue"
+
+    # Quantization-aware training: fake-quantize weights (round) and
+    # activations (floor) in the forward pass with straight-through
+    # estimators, mirroring upstream nnue-pytorch's model/quantize.py. Names
+    # mirror upstream. use_fake_ft_weight_quantization is split out from
+    # use_fake_weight_quantization because ft.weight is ~23M floats and
+    # fake-quantizing it every forward pass is measurably expensive (see
+    # docs/nnue_spec.md) -- it can be disabled independently of the other,
+    # cheap weight tensors (ft_bias, fc0/fc1/fc2 weight+bias).
+    use_fake_weight_quantization: bool = True
+    use_fake_act_quantization: bool = True
+    use_fake_ft_weight_quantization: bool = True
 
     @property
     def total_positions(self) -> int:
@@ -174,12 +191,12 @@ class TrainConfig:
             raise ValueError("clip_grad_norm must be positive")
         if self.ft_size != 1024:
             raise ValueError("ft_size must be 1024")
-        if self.hidden_size != 31:
-            raise ValueError("hidden_size must be 31")
-        if self.forward_size != 1:
-            raise ValueError("forward_size must be 1")
-        if self.fc1_output_size != 32:
-            raise ValueError("fc1_output_size must be 32")
+        if self.l2_size != 32:
+            raise ValueError("l2_size must be 32")
+        if self.l3_size != 32:
+            raise ValueError("l3_size must be 32")
+        if self.num_buckets != 8:
+            raise ValueError("num_buckets must be 8")
         if self.accelerator not in {"auto", "cuda", "mps", "cpu"}:
             raise ValueError("accelerator must be one of: auto, cuda, mps, cpu")
         if self.console_mode not in {"progress", "text"}:

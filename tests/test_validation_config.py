@@ -140,9 +140,9 @@ class ValidationConfigTests(unittest.TestCase):
 
         self.assertEqual(config.features, "HalfKAv2_hm")
         self.assertEqual(config.ft_size, 1024)
-        self.assertEqual(config.hidden_size, 31)
-        self.assertEqual(config.forward_size, 1)
-        self.assertEqual(config.fc1_output_size, 32)
+        self.assertEqual(config.l2_size, 32)
+        self.assertEqual(config.l3_size, 32)
+        self.assertEqual(config.num_buckets, 8)
         self.assertEqual(config.num_features, 22_528)
         self.assertEqual(config.max_active_features, 32)
         self.assertTrue(config.filtered)
@@ -196,47 +196,30 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.num_features, 22_528)
         self.assertEqual(config.max_active_features, 32)
 
-    def test_v4_reference_config_loads_stockfish_style_recipe(self) -> None:
-        config = TrainConfig.from_toml(Path(__file__).resolve().parents[1] / "configs" / "v4.toml")
-
-        self.assertEqual(config.run_name, "v4")
-        self.assertIn("nodes5000pv2_UHO.binpack", config.datasets[0])
-        self.assertEqual(config.batch_size, 16_384)
-        self.assertEqual(config.max_epochs, 200)
-        self.assertEqual(config.epoch_size, 100_000_000)
-        self.assertEqual(config.total_positions, 20_000_000_000)
-        self.assertEqual(config.validation_size, 1_000_000)
-        self.assertEqual(config.start_lambda, 1.0)
-        self.assertEqual(config.end_lambda, 1.0)
-        self.assertEqual(config.features, "HalfKAv2_hm")
-        self.assertEqual(config.num_features, 22_528)
-        self.assertEqual(config.max_active_features, 32)
-        self.assertEqual(config.hidden_size, 31)
-        self.assertEqual(config.forward_size, 1)
-        self.assertEqual(config.fc1_output_size, 32)
-
-    def test_v5_and_v6_use_stockfish_epoch_config_names(self) -> None:
+    def test_production_configs_load_with_new_architecture_defaults(self) -> None:
+        # configs/v1-v3.toml are the repo's real, currently-used training
+        # recipes. They don't set l2_size/l3_size/num_buckets themselves, so
+        # this is the guarantee that actually matters post-refactor: the
+        # config files still load end-to-end and pick up the new bucketed
+        # architecture's defaults, rather than silently keeping stale values
+        # or failing to parse. (v4-v6.toml were deleted in a prior commit;
+        # the tests that referenced them asserted specific finetune lr/gamma
+        # schedules for those particular files, which no longer exist and
+        # aren't reconstructable against v1-v3 without inventing new,
+        # unrelated assertions -- so those tests were deleted rather than
+        # repointed.)
         root = Path(__file__).resolve().parents[1] / "configs"
-        v5 = TrainConfig.from_toml(root / "v5.toml")
-        v6 = TrainConfig.from_toml(root / "v6.toml")
-
-        self.assertEqual(v5.max_epochs, 200)
-        self.assertEqual(v5.epoch_size, 100_000_000)
-        self.assertEqual(v5.lr, 0.0004375)
-        self.assertEqual(v5.gamma, 0.995)
-        self.assertEqual(v5.start_lambda, 1.0)
-        self.assertEqual(v5.end_lambda, 0.75)
-        self.assertEqual(v5.features, "HalfKAv2_hm")
-        self.assertEqual(v5.num_features, 22_528)
-
-        self.assertEqual(v6.max_epochs, 200)
-        self.assertEqual(v6.epoch_size, 100_000_000)
-        self.assertEqual(v6.lr, 0.00021875)
-        self.assertEqual(v6.gamma, 0.997)
-        self.assertEqual(v6.start_lambda, 1.0)
-        self.assertEqual(v6.end_lambda, 0.75)
-        self.assertEqual(v6.features, "HalfKAv2_hm")
-        self.assertEqual(v6.num_features, 22_528)
+        for name in ("v1.toml", "v2.toml", "v3.toml"):
+            with self.subTest(config=name):
+                config = TrainConfig.from_toml(root / name)
+                self.assertTrue(config.datasets, f"{name} should resolve at least one dataset path")
+                self.assertEqual(config.features, "HalfKAv2_hm")
+                self.assertEqual(config.num_features, 22_528)
+                self.assertEqual(config.max_active_features, 32)
+                self.assertEqual(config.ft_size, 1024)
+                self.assertEqual(config.l2_size, 32)
+                self.assertEqual(config.l3_size, 32)
+                self.assertEqual(config.num_buckets, 8)
 
 
 if __name__ == "__main__":

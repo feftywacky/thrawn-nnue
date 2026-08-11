@@ -154,9 +154,14 @@ def _create_state(config: TrainConfig) -> TrainState:
     model = HalfKAv2HmNNUE(
         num_features=config.num_features,
         ft_size=config.ft_size,
-        hidden_size=config.hidden_size,
-        forward_size=config.forward_size,
-        fc1_output_size=config.fc1_output_size,
+        l2_size=config.l2_size,
+        l3_size=config.l3_size,
+        num_buckets=config.num_buckets,
+        export_ft_scale=config.export_ft_scale,
+        export_dense_scale=config.export_dense_scale,
+        use_fake_weight_quantization=config.use_fake_weight_quantization,
+        use_fake_act_quantization=config.use_fake_act_quantization,
+        use_fake_ft_weight_quantization=config.use_fake_ft_weight_quantization,
     ).to(device)
     optimizer = _create_optimizer(config, model, torch)
     scheduler = _create_scheduler(config, optimizer, torch)
