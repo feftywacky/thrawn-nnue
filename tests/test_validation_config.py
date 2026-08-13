@@ -196,30 +196,49 @@ class ValidationConfigTests(unittest.TestCase):
         self.assertEqual(config.num_features, 22_528)
         self.assertEqual(config.max_active_features, 32)
 
-    def test_production_configs_load_with_new_architecture_defaults(self) -> None:
-        # configs/v1-v3.toml are the repo's real, currently-used training
-        # recipes. They don't set hidden_size/forward_size/fc1_output_size
-        # themselves, so this is the guarantee that actually matters
-        # post-refactor: the config files still load end-to-end and pick up
-        # the current architecture's defaults, rather than silently keeping
-        # stale values or failing to parse. (v4-v6.toml were deleted in a prior commit;
-        # the tests that referenced them asserted specific finetune lr/gamma
-        # schedules for those particular files, which no longer exist and
-        # aren't reconstructable against v1-v3 without inventing new,
-        # unrelated assertions -- so those tests were deleted rather than
-        # repointed.)
-        root = Path(__file__).resolve().parents[1] / "configs"
-        for name in ("v1.toml", "v2.toml", "v3.toml"):
-            with self.subTest(config=name):
-                config = TrainConfig.from_toml(root / name)
-                self.assertTrue(config.datasets, f"{name} should resolve at least one dataset path")
-                self.assertEqual(config.features, "HalfKAv2_hm")
-                self.assertEqual(config.num_features, 22_528)
-                self.assertEqual(config.max_active_features, 32)
-                self.assertEqual(config.ft_size, 1024)
-                self.assertEqual(config.hidden_size, 31)
-                self.assertEqual(config.forward_size, 1)
-                self.assertEqual(config.fc1_output_size, 32)
+    def test_production_config_loads_with_current_architecture_defaults(self) -> None:
+        # configs/v1.toml is the repo's real, currently-used training recipe
+        # (from-scratch; the v2/v3 finetune stages were deleted). It doesn't
+        # set hidden_size/forward_size/fc1_output_size itself, so this is the
+        # guarantee that actually matters post-refactor: the config file still
+        # loads end-to-end and picks up the current architecture's defaults,
+        # rather than silently keeping stale values or failing to parse.
+        config = TrainConfig.from_toml(Path(__file__).resolve().parents[1] / "configs" / "v1.toml")
+
+        self.assertTrue(config.datasets, "v1.toml should resolve at least one dataset path")
+        self.assertEqual(config.features, "HalfKAv2_hm")
+        self.assertEqual(config.num_features, 22_528)
+        self.assertEqual(config.max_active_features, 32)
+        self.assertEqual(config.ft_size, 1024)
+        self.assertEqual(config.hidden_size, 31)
+        self.assertEqual(config.forward_size, 1)
+        self.assertEqual(config.fc1_output_size, 32)
+
+    def test_production_config_lr_schedule_actually_anneals(self) -> None:
+        # ExponentialLR steps once per EPOCH (see training._advance_scheduler),
+        # so the whole run's decay is gamma ** max_epochs. gamma and
+        # max_epochs must therefore be tuned together: bumping max_epochs
+        # without lowering gamma (or vice versa) silently produces a schedule
+        # that either never anneals or collapses to zero LR early, neither of
+        # which fails loudly anywhere else. Target is ~2% of peak by the final
+        # epoch; this asserts a band around that, not the exact value, so
+        # retuning stays possible without churning the test.
+        config = TrainConfig.from_toml(Path(__file__).resolve().parents[1] / "configs" / "v1.toml")
+
+        final_over_peak = config.gamma**config.max_epochs
+        self.assertGreater(
+            final_over_peak,
+            0.002,
+            msg=f"LR decays to {final_over_peak:.2%} of peak -- gamma is too low for {config.max_epochs} epochs",
+        )
+        self.assertLess(
+            final_over_peak,
+            0.06,
+            msg=(
+                f"LR only decays to {final_over_peak:.2%} of peak over {config.max_epochs} epochs -- "
+                "the net never anneals. Set gamma = 0.02 ** (1 / max_epochs)."
+            ),
+        )
 
 
 if __name__ == "__main__":

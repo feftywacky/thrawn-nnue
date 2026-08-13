@@ -81,7 +81,7 @@ python -c "from thrawn_nnue.native import build_native_extension; print(build_na
 
 ## Configuration
 
-Configs live under `configs/`. The current training config is `configs/v4.toml` (baseline on `nodes5000pv2_UHO.binpack`). Fine-tuning from a v4 checkpoint uses `configs/v5.toml` (T60/T70 IsRight Farseer data).
+Configs live under `configs/`. The current training config is `configs/v1.toml` — a from-scratch run on `nodes5000pv2_UHO.binpack`. It is the only config in the repo; add your own for fine-tuning stages.
 
 Key config knobs: dataset paths, epoch/batch size, LR schedule, device settings, dataloader filtering, and WDL target shaping.
 
@@ -90,8 +90,8 @@ Key config knobs: dataset paths, epoch/batch size, LR schedule, device settings,
 ### Train
 
 ```bash
-thrawn-nnue train --config configs/v4.toml
-thrawn-nnue train --config configs/v4.toml --init-checkpoint configs/runs/v4/checkpoints/best.pt
+thrawn-nnue train --config configs/v1.toml
+thrawn-nnue train --config configs/v1.toml --init-checkpoint configs/runs/v1/checkpoints/best.pt
 ```
 
 `--init-checkpoint` warm-starts weights but resets optimizer/scheduler state.
@@ -99,7 +99,7 @@ thrawn-nnue train --config configs/v4.toml --init-checkpoint configs/runs/v4/che
 ### Fine-tune
 
 ```bash
-thrawn-nnue fine-tune --config configs/v5.toml --checkpoint configs/runs/v4/checkpoints/best.pt
+thrawn-nnue fine-tune --config configs/my-finetune.toml --checkpoint configs/runs/v1/checkpoints/best.pt
 ```
 
 Use when switching datasets or optimizer settings while keeping trained weights.
@@ -107,14 +107,14 @@ Use when switching datasets or optimizer settings while keeping trained weights.
 ### Resume
 
 ```bash
-thrawn-nnue resume --checkpoint configs/runs/v4/checkpoints/step_00010000.pt
+thrawn-nnue resume --checkpoint configs/runs/v1/checkpoints/step_00010000.pt
 ```
 
 ### Export
 
 ```bash
-thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/best.pt --out configs/runs/v4/model.nnue
-thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/best.pt --out configs/runs/v4/model.nnue --verify
+thrawn-nnue export --checkpoint configs/runs/v1/checkpoints/best.pt --out configs/runs/v1/model.nnue
+thrawn-nnue export --checkpoint configs/runs/v1/checkpoints/best.pt --out configs/runs/v1/model.nnue --verify
 ```
 
 `best.pt` is continuously replaced with the best validation checkpoint. `epoch_####_best.pt` is the epoch-stamped copy of the same checkpoint.
@@ -122,7 +122,7 @@ thrawn-nnue export --checkpoint configs/runs/v4/checkpoints/best.pt --out config
 ### Verify export
 
 ```bash
-thrawn-nnue verify-export --checkpoint configs/runs/v4/checkpoints/best.pt --nnue configs/runs/v4/model.nnue
+thrawn-nnue verify-export --checkpoint configs/runs/v1/checkpoints/best.pt --nnue configs/runs/v1/model.nnue
 thrawn-nnue verify-export ... --fen "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w - - 0 1"
 ```
 
@@ -139,8 +139,8 @@ thrawn-nnue inspect-binpack-dir --path /path/to/data --jobs 4 --sample-entries 1
 ### Metrics and plots
 
 ```bash
-thrawn-nnue metrics --run-dir configs/runs/v4
-thrawn-nnue metrics --run-dir configs/runs/v4 --json
+thrawn-nnue metrics --run-dir configs/runs/v1
+thrawn-nnue metrics --run-dir configs/runs/v1 --json
 ```
 
 ### Tests
