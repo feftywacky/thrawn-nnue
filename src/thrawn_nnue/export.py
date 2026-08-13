@@ -13,29 +13,36 @@ from .features import FEATURES, HALFKA_V2_HM_NUM_FEATURES, active_feature_indice
 
 # v10 -> v11: switched the quantization scheme to Stockfish's shift-exact
 # constants (ft_scale 255 -> 256, activation "one" 127 -> 128; see
-# docs/nnue_spec.md's Quantization section). The struct layout is byte-for-
-# byte unchanged, but the activation-clamp semantics a loader must apply
-# aren't encoded in the header, so a v10 file must never be silently read as
-# v11 (or vice versa) -- the version bump is the only guard against that.
+# docs/nnue_spec.md's Quantization section). The struct layout was byte-for-
+# byte unchanged there, but the activation-clamp semantics a loader must
+# apply aren't encoded in the header, so a v10 file must never be silently
+# read as v11 -- the version bump is the only guard against that.
+#
+# v11 -> v12: dropped the 8 piece-count output buckets (the dense stack is a
+# single copy again) and restored the DEDICATED skip lane (fc0 emits
+# hidden_size + forward_size lanes; the extra lane is never activated). The
+# widened output head and the v11 quantization scheme are unchanged. Both the
+# header field list and the payload layout differ from v11, so v11 files
+# cannot be read here at all.
 MAGIC = b"THNNUE\x00\x01"
-VERSION = 11
+VERSION = 12
 FEATURE_SET_ID = "HalfKAv2_hm"
 OUTPUT_PERSPECTIVE_STM = 1
 EXPECTED_NUM_FEATURES = HALFKA_V2_HM_NUM_FEATURES
 EXPECTED_FT_SIZE = 1024
-EXPECTED_NUM_BUCKETS = 8
-EXPECTED_L2_SIZE = 32
-EXPECTED_L3_SIZE = 32
+EXPECTED_HIDDEN_SIZE = 31
+EXPECTED_FORWARD_SIZE = 1
+EXPECTED_FC1_OUTPUT_SIZE = 32
 # Pairwise SqrCReLU on the FT output feeds fc0 an activation of width ft_size
 # (not ft_size * 2): each perspective's accumulator halves are multiplied together.
 EXPECTED_FC0_INPUT_SIZE = EXPECTED_FT_SIZE
-EXPECTED_FC1_INPUT_SIZE = EXPECTED_L2_SIZE * 2
+EXPECTED_FC1_INPUT_SIZE = EXPECTED_HIDDEN_SIZE * 2
 # The output head sees both dense layers' squared+linear activations.
-EXPECTED_FC2_INPUT_SIZE = EXPECTED_L2_SIZE * 2 + EXPECTED_L3_SIZE * 2
+EXPECTED_FC2_INPUT_SIZE = EXPECTED_HIDDEN_SIZE * 2 + EXPECTED_FC1_OUTPUT_SIZE * 2
 MAX_DESCRIPTION_BYTES = 1_000_000
 STOCKFISH_INTERNAL_TO_CP = 100.0 / 208.0
 HEADER_PREFIX_STRUCT = struct.Struct("<8sI")
-HEADER_REST_STRUCT = struct.Struct("<16sIIIIIIIIIfffffI")
+HEADER_REST_STRUCT = struct.Struct("<16sIIIIIIIIIIfffffI")
 DEFAULT_VERIFICATION_FENS = [
     "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b - - 0 1",
     "r1bqkbnr/pppp1ppp/2n5/4p3/3PP3/2P5/PP3PPP/RNBQKBNR b - - 0 3",
@@ -48,9 +55,9 @@ class ExportedNetwork:
     description: str
     num_features: int
     ft_size: int
-    num_buckets: int
-    l2_size: int
-    l3_size: int
+    hidden_size: int
+    forward_size: int
+    fc1_output_size: int
     ft_scale: float
     fc0_scale: float
     fc1_scale: float
@@ -58,13 +65,18 @@ class ExportedNetwork:
     score_scale: float
     ft_bias: np.ndarray
     ft_weight: np.ndarray
-    fc0_bias: np.ndarray  # (num_buckets, l2_size)
-    fc0_weight: np.ndarray  # (num_buckets, fc0_input_size, l2_size)
-    fc1_bias: np.ndarray  # (num_buckets, l3_size)
-    fc1_weight: np.ndarray  # (num_buckets, fc1_input_size, l3_size)
-    fc2_bias: np.ndarray  # (num_buckets,)
-    fc2_weight: np.ndarray  # (num_buckets, fc2_input_size)
+    fc0_bias: np.ndarray  # (fc0_output_size,)
+    fc0_weight: np.ndarray  # (fc0_input_size, fc0_output_size)
+    fc1_bias: np.ndarray  # (fc1_output_size,)
+    fc1_weight: np.ndarray  # (fc1_input_size, fc1_output_size)
+    fc2_bias: np.ndarray  # (1,)
+    fc2_weight: np.ndarray  # (fc2_input_size,)
     version: int = VERSION
+
+    @property
+    def fc0_output_size(self) -> int:
+        # hidden lanes + the dedicated (never-activated) skip lane.
+        return self.hidden_size + self.forward_size
 
     @property
     def fc0_input_size(self) -> int:
@@ -73,12 +85,13 @@ class ExportedNetwork:
 
     @property
     def fc1_input_size(self) -> int:
-        return self.l2_size * 2
+        # Only the hidden lanes are activated; the skip lane is excluded.
+        return self.hidden_size * 2
 
     @property
     def fc2_input_size(self) -> int:
         # The output head sees both dense layers' squared+linear activations.
-        return self.l2_size * 2 + self.l3_size * 2
+        return self.hidden_size * 2 + self.fc1_output_size * 2
 
 
 def _require_torch():
@@ -99,9 +112,9 @@ def export_checkpoint(checkpoint_path: str | Path, output_path: str | Path) -> P
     model = HalfKAv2HmNNUE(
         num_features=config.num_features,
         ft_size=config.ft_size,
-        l2_size=config.l2_size,
-        l3_size=config.l3_size,
-        num_buckets=config.num_buckets,
+        hidden_size=config.hidden_size,
+        forward_size=config.forward_size,
+        fc1_output_size=config.fc1_output_size,
         export_ft_scale=config.export_ft_scale,
         export_dense_scale=config.export_dense_scale,
         use_fake_weight_quantization=config.use_fake_weight_quantization,
@@ -134,11 +147,12 @@ def load_export(path: str | Path) -> ExportedNetwork:
             feature_set,
             num_features,
             ft_size,
-            num_buckets,
-            l2_size,
-            l3_size,
+            hidden_size,
+            forward_size,
+            fc0_output_size,
             fc0_input_size,
             fc1_input_size,
+            fc1_output_size,
             fc2_input_size,
             output_perspective,
             ft_scale,
@@ -154,11 +168,12 @@ def load_export(path: str | Path) -> ExportedNetwork:
         _validate_export_header(
             num_features=num_features,
             ft_size=ft_size,
-            num_buckets=num_buckets,
-            l2_size=l2_size,
-            l3_size=l3_size,
+            hidden_size=hidden_size,
+            forward_size=forward_size,
+            fc0_output_size=fc0_output_size,
             fc0_input_size=fc0_input_size,
             fc1_input_size=fc1_input_size,
+            fc1_output_size=fc1_output_size,
             fc2_input_size=fc2_input_size,
             output_perspective=output_perspective,
             ft_scale=ft_scale,
@@ -176,40 +191,18 @@ def load_export(path: str | Path) -> ExportedNetwork:
             dtype="<i2",
         ).copy().reshape(num_features, ft_size)
 
-        fc0_bias_buckets = []
-        fc0_weight_buckets = []
-        fc1_bias_buckets = []
-        fc1_weight_buckets = []
-        fc2_bias_buckets = []
-        fc2_weight_buckets = []
-        for bucket in range(num_buckets):
-            fc0_bias_buckets.append(
-                np.frombuffer(_read_exact(handle, l2_size * 4, f"fc0_bias[{bucket}]"), dtype="<i4").copy()
-            )
-            fc0_weight_buckets.append(
-                np.frombuffer(
-                    _read_exact(handle, fc0_input_size * l2_size, f"fc0_weight[{bucket}]"),
-                    dtype=np.int8,
-                ).copy().reshape(fc0_input_size, l2_size)
-            )
-            fc1_bias_buckets.append(
-                np.frombuffer(_read_exact(handle, l3_size * 4, f"fc1_bias[{bucket}]"), dtype="<i4").copy()
-            )
-            fc1_weight_buckets.append(
-                np.frombuffer(
-                    _read_exact(handle, fc1_input_size * l3_size, f"fc1_weight[{bucket}]"),
-                    dtype=np.int8,
-                ).copy().reshape(fc1_input_size, l3_size)
-            )
-            fc2_bias_buckets.append(
-                np.frombuffer(_read_exact(handle, 4, f"fc2_bias[{bucket}]"), dtype="<i4").copy()
-            )
-            fc2_weight_buckets.append(
-                np.frombuffer(
-                    _read_exact(handle, fc2_input_size, f"fc2_weight[{bucket}]"),
-                    dtype=np.int8,
-                ).copy()
-            )
+        fc0_bias = np.frombuffer(_read_exact(handle, fc0_output_size * 4, "fc0_bias"), dtype="<i4").copy()
+        fc0_weight = np.frombuffer(
+            _read_exact(handle, fc0_input_size * fc0_output_size, "fc0_weight"),
+            dtype=np.int8,
+        ).copy().reshape(fc0_input_size, fc0_output_size)
+        fc1_bias = np.frombuffer(_read_exact(handle, fc1_output_size * 4, "fc1_bias"), dtype="<i4").copy()
+        fc1_weight = np.frombuffer(
+            _read_exact(handle, fc1_input_size * fc1_output_size, "fc1_weight"),
+            dtype=np.int8,
+        ).copy().reshape(fc1_input_size, fc1_output_size)
+        fc2_bias = np.frombuffer(_read_exact(handle, 4, "fc2_bias"), dtype="<i4").copy()
+        fc2_weight = np.frombuffer(_read_exact(handle, fc2_input_size, "fc2_weight"), dtype=np.int8).copy()
 
         if handle.read(1):
             raise ValueError("Unexpected trailing data in .nnue export")
@@ -218,9 +211,9 @@ def load_export(path: str | Path) -> ExportedNetwork:
             version=version,
             num_features=num_features,
             ft_size=ft_size,
-            num_buckets=num_buckets,
-            l2_size=l2_size,
-            l3_size=l3_size,
+            hidden_size=hidden_size,
+            forward_size=forward_size,
+            fc1_output_size=fc1_output_size,
             ft_scale=ft_scale,
             fc0_scale=fc0_scale,
             fc1_scale=fc1_scale,
@@ -228,12 +221,12 @@ def load_export(path: str | Path) -> ExportedNetwork:
             score_scale=score_scale,
             ft_bias=ft_bias,
             ft_weight=ft_weight,
-            fc0_bias=np.stack(fc0_bias_buckets, axis=0),
-            fc0_weight=np.stack(fc0_weight_buckets, axis=0),
-            fc1_bias=np.stack(fc1_bias_buckets, axis=0),
-            fc1_weight=np.stack(fc1_weight_buckets, axis=0),
-            fc2_bias=np.concatenate(fc2_bias_buckets, axis=0),
-            fc2_weight=np.stack(fc2_weight_buckets, axis=0),
+            fc0_bias=fc0_bias,
+            fc0_weight=fc0_weight,
+            fc1_bias=fc1_bias,
+            fc1_weight=fc1_weight,
+            fc2_bias=fc2_bias,
+            fc2_weight=fc2_weight,
         )
 
 
@@ -248,11 +241,12 @@ def _validate_export_header(
     *,
     num_features: int,
     ft_size: int,
-    num_buckets: int,
-    l2_size: int,
-    l3_size: int,
+    hidden_size: int,
+    forward_size: int,
+    fc0_output_size: int,
     fc0_input_size: int,
     fc1_input_size: int,
+    fc1_output_size: int,
     fc2_input_size: int,
     output_perspective: int,
     ft_scale: float,
@@ -266,25 +260,29 @@ def _validate_export_header(
         raise ValueError(f"Unexpected num_features: {num_features}")
     expected_sizes = {
         "ft_size": EXPECTED_FT_SIZE,
-        "num_buckets": EXPECTED_NUM_BUCKETS,
-        "l2_size": EXPECTED_L2_SIZE,
-        "l3_size": EXPECTED_L3_SIZE,
+        "hidden_size": EXPECTED_HIDDEN_SIZE,
+        "forward_size": EXPECTED_FORWARD_SIZE,
+        "fc1_output_size": EXPECTED_FC1_OUTPUT_SIZE,
     }
     actual_sizes = {
         "ft_size": ft_size,
-        "num_buckets": num_buckets,
-        "l2_size": l2_size,
-        "l3_size": l3_size,
+        "hidden_size": hidden_size,
+        "forward_size": forward_size,
+        "fc1_output_size": fc1_output_size,
     }
     for name, expected in expected_sizes.items():
         if actual_sizes[name] != expected:
             raise ValueError(f"{name} must be {expected}")
+    if fc0_output_size != hidden_size + forward_size:
+        raise ValueError("fc0_output_size must equal hidden_size + forward_size")
     if fc0_input_size != ft_size:
         raise ValueError("fc0_input_size must equal ft_size (pairwise SqrCReLU FT activation)")
-    if fc1_input_size != l2_size * 2:
-        raise ValueError("fc1_input_size must equal l2_size * 2")
-    if fc2_input_size != l2_size * 2 + l3_size * 2:
-        raise ValueError("fc2_input_size must equal l2_size * 2 + l3_size * 2 (widened output head)")
+    if fc1_input_size != hidden_size * 2:
+        raise ValueError("fc1_input_size must equal hidden_size * 2 (the skip lane is not activated)")
+    if fc2_input_size != hidden_size * 2 + fc1_output_size * 2:
+        raise ValueError(
+            "fc2_input_size must equal hidden_size * 2 + fc1_output_size * 2 (widened output head)"
+        )
     if output_perspective != OUTPUT_PERSPECTIVE_STM:
         raise ValueError("Only side-to-move exports are supported")
     for name, scale in (
@@ -315,9 +313,9 @@ def verify_export(
     model = HalfKAv2HmNNUE(
         num_features=config.num_features,
         ft_size=config.ft_size,
-        l2_size=config.l2_size,
-        l3_size=config.l3_size,
-        num_buckets=config.num_buckets,
+        hidden_size=config.hidden_size,
+        forward_size=config.forward_size,
+        fc1_output_size=config.fc1_output_size,
         export_ft_scale=config.export_ft_scale,
         export_dense_scale=config.export_dense_scale,
         use_fake_weight_quantization=config.use_fake_weight_quantization,
@@ -345,9 +343,9 @@ def verify_export(
     if (
         exported.num_features != config.num_features
         or exported.ft_size != config.ft_size
-        or exported.num_buckets != config.num_buckets
-        or exported.l2_size != config.l2_size
-        or exported.l3_size != config.l3_size
+        or exported.hidden_size != config.hidden_size
+        or exported.forward_size != config.forward_size
+        or exported.fc1_output_size != config.fc1_output_size
     ):
         raise ValueError("Export dimensions do not match checkpoint config")
     exported_predictions = evaluate_export(exported, fens)
@@ -399,15 +397,6 @@ def render_verify_report(report: dict[str, Any]) -> str:
         _format_limit_hits(total_limit_hits, limit_hit_detail),
     ]
     return "\n".join(lines)
-
-
-def bucket_for_piece_count(piece_count: int, num_buckets: int) -> int:
-    """Stockfish's piece-count LayerStacks bucket rule.
-
-    ``piece_count`` is the number of active features for the white
-    perspective (always includes both kings, so it ranges 2..32).
-    """
-    return min(max((piece_count - 1) // 4, 0), num_buckets - 1)
 
 
 # Matches model.FT_ACT_QUANT_SCALE / FT_CRELU_CEIL / HIDDEN_ACT_CEIL.
@@ -476,36 +465,33 @@ def evaluate_export(exported: ExportedNetwork, fens: list[str]) -> list[float]:
         # a continuous approximation of it.
         ft_out = _quantize_act(np.concatenate([us_lo * us_hi, them_lo * them_hi], axis=0))
 
-        # LayerStacks bucket selection: only one bucket's dense stack is
-        # evaluated per position (see docs/nnue_spec.md Fast Inference Notes).
-        bucket = bucket_for_piece_count(len(white_features), exported.num_buckets)
-
         # fc0's u8 x i8 dot product accumulates into int32 exactly (integer
         # multiply-accumulate introduces no rounding); the float
         # dequantized-weight matmul below reproduces that value exactly, so
         # fc0_out needs no quantization of its own.
-        fc0_out = ft_out @ fc0_weight[bucket] + fc0_bias[bucket]
-        # The skip connection reads the RAW pre-activation fc0_out's last two
-        # lanes; those lanes are also fed through the activations below like
-        # every other lane (nothing is reserved/excluded). Not quantized --
-        # matches model.forward's skip and upstream's fake_quantize_skip_act
-        # (deliberately an identity).
-        skip = fc0_out[exported.l2_size - 2] - fc0_out[exported.l2_size - 1]
+        fc0_out = ft_out @ fc0_weight + fc0_bias
+        # Dedicated-lane skip: fc0's last lane is reserved for the skip
+        # connection and is NOT activated -- only the leading hidden_size
+        # lanes feed the activations below. The skip is never quantized
+        # either; matches model.forward's skip and upstream's
+        # fake_quantize_skip_act (deliberately an identity).
+        hidden = fc0_out[: exported.hidden_size]
+        skip = fc0_out[exported.hidden_size]
         # Square-then-clamp, NOT clamp-then-square: negatives survive as a
         # positive min(x**2, HIDDEN_ACT_CEIL), matching Stockfish's
         # SqrClippedReLU. Each component is floored onto the uint8 grid
         # separately, before concatenation -- mirrors model.forward's
-        # per-component _quantize_act calls on sqr_crelu(fc0_out) /
-        # crelu(fc0_out).
+        # per-component _quantize_act calls on sqr_crelu(hidden) /
+        # crelu(hidden).
         a0 = np.concatenate(
             [
-                _quantize_act(np.clip(fc0_out * fc0_out, 0.0, HIDDEN_ACT_CEIL)),
-                _quantize_act(np.clip(fc0_out, 0.0, HIDDEN_ACT_CEIL)),
+                _quantize_act(np.clip(hidden * hidden, 0.0, HIDDEN_ACT_CEIL)),
+                _quantize_act(np.clip(hidden, 0.0, HIDDEN_ACT_CEIL)),
             ],
             axis=0,
         )
 
-        fc1_out = a0 @ fc1_weight[bucket] + fc1_bias[bucket]
+        fc1_out = a0 @ fc1_weight + fc1_bias
         a1 = np.concatenate(
             [
                 _quantize_act(np.clip(fc1_out * fc1_out, 0.0, HIDDEN_ACT_CEIL)),
@@ -515,7 +501,7 @@ def evaluate_export(exported: ExportedNetwork, fens: list[str]) -> list[float]:
         )
 
         head_in = np.concatenate([a0, a1], axis=0)
-        out = head_in @ fc2_weight[bucket] + fc2_bias[bucket] + skip
+        out = head_in @ fc2_weight + fc2_bias[0] + skip
         output = out * exported.score_scale
         results.append(float(output))
     return results
@@ -529,30 +515,17 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
     ft_weight = model.ft.weight.detach().cpu().numpy()
     ft_bias = model.ft_bias.detach().cpu().numpy()
 
-    # The model stores each dense layer as ONE wide nn.Linear producing every
-    # bucket's output (StackedLinear layout): weight is (out_per_bucket *
-    # num_buckets, in_features), out-major like nn.Linear always is. Bucket
-    # b's slice is rows [b*out_per_bucket : (b+1)*out_per_bucket]. Reshape
-    # splits that leading dimension into (num_buckets, out_per_bucket, in)
-    # without reordering data, then transpose to the export's input-major
-    # layout (num_buckets, in, out_per_bucket).
-    num_buckets = config.num_buckets
-    fc0_weight = (
-        model.fc0.weight.detach().cpu().numpy().reshape(num_buckets, config.l2_size, -1).transpose(0, 2, 1)
-    )
-    fc0_bias = model.fc0.bias.detach().cpu().numpy().reshape(num_buckets, config.l2_size)
-    fc1_weight = (
-        model.fc1.weight.detach().cpu().numpy().reshape(num_buckets, config.l3_size, -1).transpose(0, 2, 1)
-    )
-    fc1_bias = model.fc1.bias.detach().cpu().numpy().reshape(num_buckets, config.l3_size)
-    # fc2 has exactly 1 output per bucket, so its stacked weight (num_buckets,
-    # fc2_input_size) and bias (num_buckets,) are already the export shape.
-    fc2_weight = model.fc2.weight.detach().cpu().numpy().reshape(num_buckets, -1)
-    fc2_bias = model.fc2.bias.detach().cpu().numpy().reshape(num_buckets)
+    # nn.Linear stores weight out-major (out_features, in_features); the export
+    # format is input-major, so each dense weight is transposed on the way out.
+    fc0_weight = model.fc0.weight.detach().cpu().numpy().T
+    fc0_bias = model.fc0.bias.detach().cpu().numpy()
+    fc1_weight = model.fc1.weight.detach().cpu().numpy().T
+    fc1_bias = model.fc1.bias.detach().cpu().numpy()
+    # fc2 has exactly one output, so its weight flattens to (fc2_input_size,).
+    fc2_weight = model.fc2.weight.detach().cpu().numpy().reshape(-1)
+    fc2_bias = model.fc2.bias.detach().cpu().numpy()
     score_scale = float(config.nnue2score)
 
-    # One shared scale per layer type, fit over all buckets' weights together
-    # (not per-bucket scales).
     ft_scale = _fit_quantization_scale(
         [ft_bias, ft_weight], config.export_ft_scale, np.int16, names=["ft_bias", "ft_weight"]
     )
@@ -565,9 +538,9 @@ def _exported_network_from_model(model, config) -> ExportedNetwork:
         version=VERSION,
         num_features=config.num_features,
         ft_size=config.ft_size,
-        num_buckets=config.num_buckets,
-        l2_size=config.l2_size,
-        l3_size=config.l3_size,
+        hidden_size=config.hidden_size,
+        forward_size=config.forward_size,
+        fc1_output_size=config.fc1_output_size,
         ft_scale=ft_scale,
         fc0_scale=fc0_scale,
         fc1_scale=fc1_scale,
@@ -709,11 +682,12 @@ def _write_export(handle, exported: ExportedNetwork) -> None:
         feature_set_bytes,
         exported.num_features,
         exported.ft_size,
-        exported.num_buckets,
-        exported.l2_size,
-        exported.l3_size,
+        exported.hidden_size,
+        exported.forward_size,
+        exported.fc0_output_size,
         exported.fc0_input_size,
         exported.fc1_input_size,
+        exported.fc1_output_size,
         exported.fc2_input_size,
         OUTPUT_PERSPECTIVE_STM,
         float(exported.ft_scale),
@@ -727,15 +701,12 @@ def _write_export(handle, exported: ExportedNetwork) -> None:
     handle.write(description_bytes)
     handle.write(exported.ft_bias.astype("<i2").tobytes())
     handle.write(exported.ft_weight.astype("<i2").tobytes())
-    # Bucket-major payload: all of bucket b's dense layers are contiguous, for
-    # engine cache locality (only one bucket is read per position at runtime).
-    for bucket in range(exported.num_buckets):
-        handle.write(exported.fc0_bias[bucket].astype("<i4").tobytes())
-        handle.write(exported.fc0_weight[bucket].astype(np.int8).tobytes())
-        handle.write(exported.fc1_bias[bucket].astype("<i4").tobytes())
-        handle.write(exported.fc1_weight[bucket].astype(np.int8).tobytes())
-        handle.write(np.asarray([exported.fc2_bias[bucket]], dtype="<i4").tobytes())
-        handle.write(exported.fc2_weight[bucket].astype(np.int8).tobytes())
+    handle.write(exported.fc0_bias.astype("<i4").tobytes())
+    handle.write(exported.fc0_weight.astype(np.int8).tobytes())
+    handle.write(exported.fc1_bias.astype("<i4").tobytes())
+    handle.write(exported.fc1_weight.astype(np.int8).tobytes())
+    handle.write(exported.fc2_bias.astype("<i4").tobytes())
+    handle.write(exported.fc2_weight.astype(np.int8).tobytes())
 
 
 def _batch_arrays_from_fens(

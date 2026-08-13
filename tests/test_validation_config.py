@@ -140,9 +140,9 @@ class ValidationConfigTests(unittest.TestCase):
 
         self.assertEqual(config.features, "HalfKAv2_hm")
         self.assertEqual(config.ft_size, 1024)
-        self.assertEqual(config.l2_size, 32)
-        self.assertEqual(config.l3_size, 32)
-        self.assertEqual(config.num_buckets, 8)
+        self.assertEqual(config.hidden_size, 31)
+        self.assertEqual(config.forward_size, 1)
+        self.assertEqual(config.fc1_output_size, 32)
         self.assertEqual(config.num_features, 22_528)
         self.assertEqual(config.max_active_features, 32)
         self.assertTrue(config.filtered)
@@ -198,11 +198,11 @@ class ValidationConfigTests(unittest.TestCase):
 
     def test_production_configs_load_with_new_architecture_defaults(self) -> None:
         # configs/v1-v3.toml are the repo's real, currently-used training
-        # recipes. They don't set l2_size/l3_size/num_buckets themselves, so
-        # this is the guarantee that actually matters post-refactor: the
-        # config files still load end-to-end and pick up the new bucketed
-        # architecture's defaults, rather than silently keeping stale values
-        # or failing to parse. (v4-v6.toml were deleted in a prior commit;
+        # recipes. They don't set hidden_size/forward_size/fc1_output_size
+        # themselves, so this is the guarantee that actually matters
+        # post-refactor: the config files still load end-to-end and pick up
+        # the current architecture's defaults, rather than silently keeping
+        # stale values or failing to parse. (v4-v6.toml were deleted in a prior commit;
         # the tests that referenced them asserted specific finetune lr/gamma
         # schedules for those particular files, which no longer exist and
         # aren't reconstructable against v1-v3 without inventing new,
@@ -217,9 +217,9 @@ class ValidationConfigTests(unittest.TestCase):
                 self.assertEqual(config.num_features, 22_528)
                 self.assertEqual(config.max_active_features, 32)
                 self.assertEqual(config.ft_size, 1024)
-                self.assertEqual(config.l2_size, 32)
-                self.assertEqual(config.l3_size, 32)
-                self.assertEqual(config.num_buckets, 8)
+                self.assertEqual(config.hidden_size, 31)
+                self.assertEqual(config.forward_size, 1)
+                self.assertEqual(config.fc1_output_size, 32)
 
 
 if __name__ == "__main__":

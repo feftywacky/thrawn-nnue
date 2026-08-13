@@ -38,9 +38,9 @@ class TrainConfig:
     num_features: int = 22_528
     max_active_features: int = 32
     ft_size: int = 1024
-    l2_size: int = 32
-    l3_size: int = 32
-    num_buckets: int = 8
+    hidden_size: int = 31
+    forward_size: int = 1
+    fc1_output_size: int = 32
 
     filtered: bool = True
     wld_filtered: bool = True
@@ -87,7 +87,7 @@ class TrainConfig:
     # FtMaxVal=255 / HiddenOneVal=128 constants.
     export_ft_scale: float = 256.0
     export_dense_scale: float = 64.0
-    export_description: str = "thrawn HalfKAv2_hm 1024x2 pairwise -> 8 buckets [32 -> 32, wide head] -> 1 nnue"
+    export_description: str = "thrawn HalfKAv2_hm 1024x2 pairwise -> 31+1 -> 32 -> wide head -> 1 nnue"
 
     # Quantization-aware training: fake-quantize weights (round) and
     # activations (floor) in the forward pass with straight-through
@@ -191,12 +191,12 @@ class TrainConfig:
             raise ValueError("clip_grad_norm must be positive")
         if self.ft_size != 1024:
             raise ValueError("ft_size must be 1024")
-        if self.l2_size != 32:
-            raise ValueError("l2_size must be 32")
-        if self.l3_size != 32:
-            raise ValueError("l3_size must be 32")
-        if self.num_buckets != 8:
-            raise ValueError("num_buckets must be 8")
+        if self.hidden_size != 31:
+            raise ValueError("hidden_size must be 31")
+        if self.forward_size != 1:
+            raise ValueError("forward_size must be 1")
+        if self.fc1_output_size != 32:
+            raise ValueError("fc1_output_size must be 32")
         if self.accelerator not in {"auto", "cuda", "mps", "cpu"}:
             raise ValueError("accelerator must be one of: auto, cuda, mps, cpu")
         if self.console_mode not in {"progress", "text"}:

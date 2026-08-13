@@ -26,16 +26,16 @@ Current production shape:
 
 ```text
 HalfKAv2_hm sparse features: 22528
-feature transformer: 22528 -> 1024 per perspective       (SHARED across buckets)
+feature transformer: 22528 -> 1024 per perspective
 concat [us_acc | them_acc]: 2048
 FT activation (pairwise SqrCReLU): 2048 -> 1024
-bucket b = piece-count bucket, 0..7                       (selects the dense stack below)
-fc0[b]: 1024 -> 32       (u8 x i8)
-a0 = SqrCReLU(fc0_out) || CReLU(fc0_out) -> 64
-fc1[b]: 64 -> 32
+fc0: 1024 -> 32          (u8 x i8; 31 hidden lanes + 1 dedicated skip lane)
+hidden = fc0_out[0..30]                    (the activated lanes)
+skip   = fc0_out[31]                       (RAW pre-activation, never activated)
+a0 = SqrCReLU(hidden) || CReLU(hidden) -> 62
+fc1: 62 -> 32
 a1 = SqrCReLU(fc1_out) || CReLU(fc1_out) -> 64
-fc2[b]: concat(a0, a1) = 128 -> 1
-skip = fc0_out[30] - fc0_out[31]           (from the RAW fc0 pre-activation)
+fc2: concat(a0, a1) = 126 -> 1
 final: fc2_output + skip
 ```
 
@@ -44,12 +44,12 @@ a `u8 x i8` layer instead of the `i16 x i16` layer that a raw un-clamped
 accumulator would force (fc0 is ~60% of engine eval time). The pairwise product
 also halves the fc0 input width from `2048` to `1024`.
 
-Only the feature transformer is shared across buckets. `fc0`, `fc1`, and `fc2`
-each have 8 independent copies ("LayerStacks"), selected per-position by piece
-count (see Fast Inference Notes). There is no separate "forward lane": all 32
-`fc0` output lanes are activated identically, and the skip connection is a
-difference of two of those lanes read from the raw (pre-activation) `fc0`
-output.
+The dense stack is a single copy — there are no output buckets. `fc0`'s last
+output lane is a **dedicated** skip lane: it is excluded from the activations
+entirely (only the leading 31 lanes are activated and reach `fc1`), and its raw
+`int32` value is added straight onto `fc2`'s output. Total `fc0` output width is
+the SIMD-friendly 32; one of those lanes is spent on the skip. This mirrors
+Stockfish's own `FC_0_OUTPUTS = 15` (+1 forward lane) = 16 layout.
 
 Constants:
 
@@ -58,12 +58,13 @@ static constexpr int NumFeatures = 22528;
 static constexpr int PsNb = 11 * 64;
 static constexpr int MaxActiveFeatures = 32;
 static constexpr int FtSize = 1024;
-static constexpr int NumBuckets = 8;
-static constexpr int L2Size = 32;
-static constexpr int L3Size = 32;
+static constexpr int HiddenSize = 31;                    // activated fc0 lanes
+static constexpr int ForwardSize = 1;                    // dedicated skip lane
+static constexpr int Fc0OutputSize = HiddenSize + ForwardSize;  // 32
+static constexpr int Fc1OutputSize = 32;
 static constexpr int Fc0InputSize = FtSize;              // pairwise SqrCReLU: 2*FtSize -> FtSize
-static constexpr int Fc1InputSize = L2Size * 2;           // 64
-static constexpr int Fc2InputSize = L2Size * 2 + L3Size * 2;  // 128, widened output head
+static constexpr int Fc1InputSize = HiddenSize * 2;      // 62
+static constexpr int Fc2InputSize = HiddenSize * 2 + Fc1OutputSize * 2;  // 126, widened output head
 ```
 
 Activation definitions. Two DIFFERENT clamp ceilings are in play, because the FT
@@ -104,7 +105,8 @@ ft_activation(us, them):
     // own 127/128 ceiling, so no extra clipping loss is introduced here.
 
 // Dense-layer activation concat used after fc0 and after fc1: width 2 * N for
-// an N-wide raw pre-activation.
+// an N-wide raw pre-activation. At fc0 this is applied to the HIDDEN lanes
+// only (raw = fc0_out[0..HiddenSize-1]); the skip lane is not part of it.
 dense_activation(raw):
     return concat( sqr_crelu(raw), crelu(raw) )
 
@@ -121,17 +123,6 @@ act_quantize(x):
     return floor(x * HiddenOneVal + 1e-5) / HiddenOneVal
 ```
 
-### Bucket selection
-
-```cpp
-int piece_count = popcount of white-perspective active features;  // 2..32, includes both kings
-int bucket = std::clamp((piece_count - 1) / 4, 0, NumBuckets - 1);
-```
-
-This is Stockfish's `LayerStacks` piece-count rule: 2-4 pieces -> bucket 0,
-5-8 -> bucket 1, 9-12 -> bucket 2, 13-16 -> bucket 3, 17-20 -> bucket 4,
-21-24 -> bucket 5, 25-28 -> bucket 6, 29-32 -> bucket 7.
-
 ## File Format
 
 All values are little-endian.
@@ -140,16 +131,17 @@ Header:
 
 ```text
 char   magic[8]            = "THNNUE\0\1"
-uint32 version             = 11
+uint32 version             = 12
 char   feature_set[16]     = "HalfKAv2_hm\0..."
 uint32 num_features        = 22528
 uint32 ft_size             = 1024
-uint32 num_buckets         = 8
-uint32 l2_size             = 32
-uint32 l3_size             = 32
+uint32 hidden_size         = 31
+uint32 forward_size        = 1
+uint32 fc0_output_size     = 32      (== hidden_size + forward_size)
 uint32 fc0_input_size      = 1024    (== ft_size)
-uint32 fc1_input_size      = 64      (== l2_size * 2)
-uint32 fc2_input_size      = 128     (== l2_size * 2 + l3_size * 2)
+uint32 fc1_input_size      = 62      (== hidden_size * 2)
+uint32 fc1_output_size     = 32
+uint32 fc2_input_size      = 126     (== hidden_size * 2 + fc1_output_size * 2)
 uint32 output_perspective  = 1
 float  ft_scale
 float  fc0_scale
@@ -160,32 +152,35 @@ uint32 description_length
 uint8  description[description_length]
 ```
 
-Payload — the feature transformer once, then the dense stack (fc0, fc1, fc2)
-repeated per bucket, **bucket-major** (all of bucket `b`'s layers are
-contiguous, for engine cache locality):
+Payload:
 
 ```text
 int16  ft_bias[ft_size]
 int16  ft_weight[num_features][ft_size]
-for b in 0 .. num_buckets-1:
-    int32  fc0_bias[l2_size]
-    int8   fc0_weight[fc0_input_size][l2_size]     // input-major, as today
-    int32  fc1_bias[l3_size]
-    int8   fc1_weight[fc1_input_size][l3_size]
-    int32  fc2_bias[1]
-    int8   fc2_weight[fc2_input_size]
+int32  fc0_bias[fc0_output_size]
+int8   fc0_weight[fc0_input_size][fc0_output_size]     // input-major
+int32  fc1_bias[fc1_output_size]
+int8   fc1_weight[fc1_input_size][fc1_output_size]
+int32  fc2_bias[1]
+int8   fc2_weight[fc2_input_size]
 ```
 
 Required loader checks:
 
 - `magic == "THNNUE\0\1"`
-- `version == 11`
+- `version == 12`
 - `feature_set == "HalfKAv2_hm"`
 - all dimensions match the engine build
+- `fc0_output_size == hidden_size + forward_size`
 - `fc0_input_size == ft_size`
-- `fc1_input_size == l2_size * 2`
-- `fc2_input_size == l2_size * 2 + l3_size * 2`
+- `fc1_input_size == hidden_size * 2` (the skip lane is not activated)
+- `fc2_input_size == hidden_size * 2 + fc1_output_size * 2`
 - `output_perspective == 1`
+
+Version history: `v11` was the 8-bucket ("LayerStacks") net with a shared skip
+taken from two of `fc0`'s activated lanes. `v12` drops the buckets and restores
+the dedicated skip lane; both the header field list and the payload layout
+changed, so `v11` files cannot be read by a `v12` loader at all.
 
 ## Quantization
 
@@ -209,9 +204,7 @@ Scales:
 | `fc2_bias` | `int32` | `fc2_scale` |
 | `fc2_weight` | `int8` | `fc2_scale` |
 
-Each scale is fit once across **all 8 buckets'** weights for that layer (not
-per-bucket scales), so `fc0_scale` alone covers all 8 copies of `fc0_weight`,
-and likewise for `fc1_scale` / `fc2_scale`.
+One scale per layer, fit over that layer's whole weight tensor.
 
 The current config uses `ft_scale = 256.0` and dense scales of `64.0`, matching
 Stockfish's `FtOne`/`WeightScaleBits` constants -- chosen specifically so every
@@ -268,12 +261,12 @@ Applied to:
   above).
 - **Activations, scale = 128 (`HiddenOneVal`):** the FT pairwise-product
   output feeding `fc0`, and the `sqr_crelu`/`crelu` components at both `fc0`
-  and `fc1` (after clamping to 127/128, before concatenation). With
-  `ft_scale = 256`, this is now an EXACT renormalization (`255*255 >> 9 ==
-  127`, see Fast Inference Notes below), unlike the old `ft_scale = 255`
-  scheme's `255**2 / 512 ~= 127.002`.
-- **Not applied to the skip connection** (`fc0_out[30] - fc0_out[31]`, read
-  from the raw pre-activation `fc0_out`) -- matches upstream's
+  (hidden lanes only) and `fc1` (after clamping to 127/128, before
+  concatenation). With `ft_scale = 256`, this is now an EXACT renormalization
+  (`255*255 >> 9 == 127`, see Fast Inference Notes below), unlike the old
+  `ft_scale = 255` scheme's `255**2 / 512 ~= 127.002`.
+- **Not applied to the skip connection** (`fc0_out[HiddenSize]`, the dedicated
+  lane read from the raw pre-activation `fc0_out`) -- matches upstream's
   `fake_quantize_skip_act`, which is deliberately an identity.
 
 Config flags (`TrainConfig`, all default enabled): `use_fake_weight_quantization`,
@@ -447,17 +440,16 @@ call below is load-bearing, not optional polish:
 ```text
 x = act_quantize(ft_activation(us_acc, them_acc))    # pairwise SqrCReLU, quantized, width FtSize
 
-piece_count = count of non-negative (real) entries in white_indices  # 2..32
-b = clamp((piece_count - 1) / 4, 0, NumBuckets - 1)                  # bucket, 0..7
+fc0_out = x @ fc0_weight + fc0_bias             # RAW, pre-activation, width Fc0OutputSize (32)
+hidden  = fc0_out[0 .. HiddenSize-1]            # the 31 activated lanes
+skip    = fc0_out[HiddenSize]                   # the DEDICATED lane: raw, NOT quantized,
+                                                # NOT activated, and not part of `hidden`
+a0      = act_quantize(dense_activation(hidden))    # width 2 * HiddenSize (62), each half quantized separately
 
-fc0_out = x @ fc0_weight[b] + fc0_bias[b]              # RAW, pre-activation, width L2Size
-skip    = fc0_out[L2Size - 2] - fc0_out[L2Size - 1]    # from the RAW fc0_out, NOT quantized
-a0      = act_quantize(dense_activation(fc0_out))      # width 2 * L2Size, each half quantized separately
+fc1_out = a0 @ fc1_weight + fc1_bias                # RAW, pre-activation, width Fc1OutputSize
+a1      = act_quantize(dense_activation(fc1_out))   # width 2 * Fc1OutputSize (64), each half quantized separately
 
-fc1_out = a0 @ fc1_weight[b] + fc1_bias[b]             # RAW, pre-activation, width L3Size
-a1      = act_quantize(dense_activation(fc1_out))      # width 2 * L3Size, each half quantized separately
-
-out       = concat(a0, a1) @ fc2_weight[b] + fc2_bias[b] + skip   # scalar, skip unscaled
+out       = concat(a0, a1) @ fc2_weight + fc2_bias + skip   # scalar, skip unscaled
 score_stm = out * score_scale
 ```
 
@@ -479,8 +471,8 @@ multiply-accumulate introduces no rounding), so the float reference's plain
 matmul against dequantized weights reproduces that value exactly. The only
 lossy steps in the whole dense stack are (a) weight rounding at serialization
 and (b) `act_quantize` between layers -- there is no third source of error to
-model. Only bucket `b`'s fc0/fc1/fc2 weights are read and evaluated per
-position; the other 7 buckets are untouched.
+model. The skip lane adds none of its own: it is a raw `fc0` output added
+straight through.
 
 The repository verifier is the parity target:
 
@@ -501,30 +493,36 @@ against the engine, not a bug in the verifier.
 
 Keep feature rows contiguous and 64-byte aligned. Each feature row is `1024 * int16`, so full refresh touches predictable streaming memory and incremental updates only add/subtract changed rows. Keep white and black accumulators hot in the position state and avoid heap allocation in evaluation.
 
-### Bucketing is a memory cost, not a compute cost
+### Pad the small layers' inputs; do not special-case them
 
-Only **one** of the 8 buckets' `fc0`/`fc1`/`fc2` weights is read and evaluated
-per position — the bucket is a pure lookup (`(piece_count - 1) / 4`, clamped)
-computed once per evaluation, not a branch inside the dense math. Engine eval
-cost per position is therefore unchanged from a single-bucket net: the extra
-weight copies only cost storage (`8x` the dense-layer bytes) and, on a cold
-cache, the first touch of a given bucket's rows. Do not loop over buckets or
-evaluate more than one bucket's stack per position.
+`fc0` — the layer that matters — is fully aligned: 1024 in and 32 out both
+divide evenly by every target ISA's vector width, so fc0 runs 32 dot products
+and its 32-lane output buffer activates in full-width passes with no remainder.
+That alignment is *why* the skip lane is carved out of a 32-wide `fc0` output
+(31 hidden + 1) rather than added on top of it: spending one of the 32 lanes on
+the skip keeps the expensive layer clean.
 
-### The dimensions are all SIMD-friendly
+The cost lands instead on the two cheap layers, whose widths derive from the 31
+*activated* lanes: `fc1`'s input is `2 * 31 = 62` and `fc2`'s is `62 + 64 =
+126`. Neither is a multiple of the vector width.
 
-Every dense layer's width divides evenly by the widest vector any of the
-three target ISAs uses -- there is no tail/remainder handling anywhere in
-fc0, fc1, or fc2:
+Handle this the way Stockfish does (`ceil_to_multiple` /
+`PaddedInputDimensions` in `nnue_architecture.h` / `affine_transform.h`), not
+with tail/remainder code: **pad the activation buffers and the corresponding
+weight rows up to the next multiple of the vector width, with zeros.** The
+padding lanes contribute exactly `0` to the dot product, so the result is
+unchanged and the inner loop stays a clean sequence of full-width vectors.
+The `.nnue` file always stores the true, unpadded widths (`62`, `126`) — the
+padding is an engine-internal, load-time transform of the engine's own copy.
 
-| Layer | Input width | Output width | AVX2 (32×u8/256-bit vec) | AVX512 (64×u8/512-bit vec) | NEON (16×u8/128-bit vec) |
-|---|---:|---:|---:|---:|---:|
-| fc0 | 1024 | 32 | 32 vectors | 16 vectors | 64 vectors |
-| fc1 | 64 | 32 | 2 vectors | 1 vector | 4 vectors |
-| fc2 | 128 | 1 | 4 vectors | 2 vectors | 8 vectors |
+| Layer | Input width | Padded to (AVX2/AVX512/NEON) | Output width |
+|---|---:|---:|---:|
+| fc0 | 1024 | 1024 (already aligned) | 32 |
+| fc1 | 62 | 64 / 64 / 64 | 32 |
+| fc2 | 126 | 128 / 128 / 128 | 1 |
 
 fc0 is ~94% of the engine's dense multiply-accumulates (`1024 * 32 = 32768`
-vs `64 * 32 + 128 * 1 = 2176` for fc1 + fc2 combined), so it dominates eval
+vs `62 * 32 + 126 * 1 = 2110` for fc1 + fc2 combined), so it dominates eval
 time and is the layer worth hand-tuning hardest -- but all three use the
 identical `u8 x i8 -> i32` dot-product primitive below, just at different
 widths.
@@ -564,18 +562,26 @@ load-time bias rewrite. `fc1`/`fc2` need the identical `* 128` bias
 pre-multiply, for the same reason (their inputs are also `HiddenOneVal`-scaled
 `u8` activations) -- see "Layer output scale is exact and uniform" below.
 
-The dense tail is intentionally tiny, and it's now per-bucket: index into the
-selected bucket `b`'s `fc0_weight`/`fc0_bias`/`fc1_weight`/`fc1_bias`/`fc2_weight`/`fc2_bias`
-once at the start of evaluation, then run the fixed math below against that
-bucket's rows only. Compute `fc0` into a fixed 32-lane buffer (every lane is
-activated, there is no reserved lane); read lanes 30 and 31 of that RAW buffer
-to form `skip = fc0_out[30] - fc0_out[31]` before activating. Materialize the
-64-byte `a0` activation (`sqr_crelu(fc0_out) || crelu(fc0_out)`) in a stack
-buffer aligned to 64 bytes, run `fc1` into a 32-lane buffer, materialize the
-64-byte `a1` activation the same way, concatenate `a0 || a1` into the 128-byte
-`fc2` input, run `fc2`, then add the unscaled `skip`. The exported dense
-matrices are input-major; engines may transpose or tile them at load time for
-their SIMD kernels.
+The dense tail is intentionally tiny and fully fixed-size. Compute `fc0` into a
+32-lane `int32` buffer, then read lane 31 of that RAW buffer as the skip
+(`skip = fc0_out[HiddenSize]`) and set it aside — it is not activated and takes
+no further part until the final add. Activate only lanes 0..30, materializing
+the 62-byte `a0` (`sqr_crelu(hidden) || crelu(hidden)`) into a 64-byte
+stack buffer aligned to 64 bytes with the 2 trailing bytes ZEROED (see
+"Pad the small layers' inputs" above). Run `fc1` into a 32-lane buffer,
+materialize the 64-byte `a1` the same way, concatenate `a0 || a1` into the
+126-byte `fc2` input — again in a zero-padded 128-byte buffer — run `fc2`,
+then add the unscaled `skip`.
+
+One ordering caveat on that concatenation: the file's `fc2_weight` is 126
+entries in the order `a0` (62) then `a1` (64), **with no gap**. If an engine
+finds it more convenient to lay the `fc2` input out as `a0` padded to 64
+followed by `a1` (putting the 2 pad bytes in the *middle* rather than at the
+end), it must insert two matching zero weights at the same offset in its
+in-memory `fc2_weight` copy at load time. The exported dense matrices are
+input-major; engines may transpose, tile, or zero-pad them at load time for
+their SIMD kernels, as long as activation order and weight order stay
+consistent.
 
 ### Layer output scale is exact and uniform (`2^13`)
 
@@ -583,10 +589,12 @@ Every dense layer's raw `int32` pre-activation output sits at the SAME
 integer scale: `HiddenOneVal * dense_scale = 128 * 64 = 8192 = 2^13`. `fc0_out`
 is `sum(u8-at-128 * i8-at-64)`; `fc1_out` is the same shape (its inputs `a0`
 are `HiddenOneVal`-scaled `u8`); `fc2_out` is the same shape again, against
-`a0 || a1`. This is why `skip = fc0_out[30] - fc0_out[31]` (also at scale
-`8192`, being two raw fc0-output lanes) can be added directly to `fc2_out`
-with **no rescaling** -- both operands are already at the identical `2^13`
-scale, so the final add is a plain `int32` addition.
+`a0 || a1`. This is why `skip = fc0_out[HiddenSize]` (also at scale `8192`,
+being a raw fc0-output lane) can be added directly to `fc2_out` with **no
+rescaling** -- both operands are already at the identical `2^13` scale, so the
+final add is a plain `int32` addition. (Stockfish's own forward lane needs a
+`<< (WeightScaleBits - 1)` fixup at this point because its FT output scale
+differs; ours does not. Do not copy that shift.)
 
 `ClippedReLU` and `SqrClippedReLU` turn a `2^13`-scaled `int32` into a
 `HiddenOneVal = 128`-scaled `u8`, both by an EXACT power-of-two shift:
@@ -647,6 +655,13 @@ enable AVX2 too) does exactly this fusion; the sequences below are transcribed
 from that function and from the standalone AArch64 `ClippedReLU`/`SqrClippedReLU`
 kernels, verified against the Stockfish source rather than reconstructed from
 memory.
+
+At fc0 the vector width (32 lanes) covers all of `fc0_out`, including the skip
+lane at index 31. Running the paired activation over all 32 lanes and then
+simply not copying lane 31's two activated outputs into `a0` is fine and is
+what Stockfish does — the skip lane's *raw* value has already been read out
+before this point, and its activated value is discarded. What must not happen
+is the reverse: letting lane 31's activated value land inside `a0`.
 
 Both paths first narrow the `int32` input to `int16`: the linear path needs
 this before its `>> 6`, and the squared path needs it because `mulhi_epi16`

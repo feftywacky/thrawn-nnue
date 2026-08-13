@@ -82,7 +82,7 @@ if torch is not None:
         """Clipped ReLU: ``clamp(x, 0, ceil)``.
 
         ``ceil`` defaults to ``HIDDEN_ACT_CEIL`` (127/128) for the hidden
-        dense-layer CReLU component (``crelu(fc0_out)`` / ``crelu(fc1_out)``
+        dense-layer CReLU component (``crelu(hidden)`` / ``crelu(fc1_out)``
         in ``forward`` below). ``ft_pairwise_screlu`` calls this with
         ``ceil=FT_CRELU_CEIL`` (255/256) instead, for the feature
         transformer's own per-perspective CReLU halves -- the two ceilings
@@ -133,29 +133,21 @@ if torch is not None:
 
 
     class HalfKAv2HmNNUE(nn.Module):
-        """HalfKAv2_hm NNUE with a shared feature transformer and 8 output
-        buckets ("LayerStacks") selected per-position by piece count.
+        """HalfKAv2_hm NNUE: feature transformer + a three-layer dense tail.
 
-        Only the feature transformer (``ft`` / ``ft_bias``) is shared across
-        buckets; the three dense layers (fc0, fc1, fc2) each get ``num_buckets``
-        independent copies of their weights. The final layer sees both dense
-        layers' squared+linear activations (``2 * l2_size + 2 * l3_size`` wide),
-        not just fc1's.
+        The dense tail has one dedicated skip lane and a widened output head:
 
-        Bucketed dense layers use nnue-pytorch's "StackedLinear" shape: each
-        layer is ONE wide ``nn.Linear`` that produces every bucket's output for
-        every sample (``out_features_per_bucket * num_buckets`` wide), and the
-        active bucket's slice is selected out of that output afterwards. This
-        is deliberately not "gather this sample's bucket weight matrix, then
-        bmm": gathering per-sample weight matrices materializes a
-        ``(batch, in, out)`` tensor per layer (e.g. ``(16384, 1024, 32)`` ~2.1GB
-        of float32 for fc0 at the trainer's default batch size, retained again
-        for backward), which is a real OOM risk on unified-memory hardware like
-        Apple Silicon MPS. Computing every bucket's output via a single GEMM
-        keeps peak activation memory small (``(batch, out_features_per_bucket *
-        num_buckets)``, e.g. 16MB for fc0) at the cost of doing ``num_buckets``
-        times the FLOPs on the dense layers -- the same trade nnue-pytorch makes
-        to train real Stockfish nets at scale.
+        - ``fc0`` produces ``hidden_size + forward_size`` (31 + 1 = 32) lanes.
+          The first ``hidden_size`` lanes are the hidden activations; the last
+          ``forward_size`` lane is a DEDICATED skip lane, excluded from the
+          activations entirely and added straight onto the final output. This
+          mirrors upstream nnue-pytorch's ``nn.Linear(..., L2 + 1)`` layout
+          (and Stockfish's own ``L2 = 15`` (+1) = 16), where the total fc0
+          output width is the SIMD-friendly power of two and one of those
+          lanes is spent on the skip.
+        - The output head (``fc2``) sees BOTH dense layers' squared+linear
+          activations (``2 * hidden_size + 2 * fc1_output_size`` wide), not
+          just fc1's.
 
         Quantization-aware training (QAT): when enabled, the forward pass
         fake-quantizes weights (round) and activations (floor) with
@@ -177,9 +169,9 @@ if torch is not None:
             *,
             num_features: int = 22_528,
             ft_size: int = 1024,
-            l2_size: int = 32,
-            l3_size: int = 32,
-            num_buckets: int = 8,
+            hidden_size: int = 31,
+            forward_size: int = 1,
+            fc1_output_size: int = 32,
             export_ft_scale: float = 256.0,
             export_dense_scale: float = 64.0,
             use_fake_weight_quantization: bool = True,
@@ -187,24 +179,24 @@ if torch is not None:
             use_fake_ft_weight_quantization: bool = True,
         ):
             super().__init__()
+            if forward_size != 1:
+                raise ValueError("HalfKAv2_hm uses exactly one forward lane")
             if ft_size % 2 != 0:
                 raise ValueError("ft_size must be even for the pairwise FT activation")
-            if l2_size < 2:
-                raise ValueError("l2_size must be >= 2 (the last two lanes feed the skip connection)")
-            if num_buckets < 1:
-                raise ValueError("num_buckets must be >= 1")
 
             self.num_features = num_features
             self.ft_size = ft_size
-            self.l2_size = l2_size
-            self.l3_size = l3_size
-            self.num_buckets = num_buckets
+            self.hidden_size = hidden_size
+            self.forward_size = forward_size
+            self.fc1_output_size = fc1_output_size
+            self.fc0_output_size = hidden_size + forward_size
 
             # Pairwise SqrCReLU on the FT output halves the fc0 input from
             # ft_size * 2 (raw us||them concat) to ft_size.
             self.fc0_input_size = ft_size
-            self.fc1_input_size = l2_size * 2
-            self.fc2_input_size = l2_size * 2 + l3_size * 2
+            self.fc1_input_size = hidden_size * 2
+            # Widened output head: both dense layers' squared+linear activations.
+            self.fc2_input_size = hidden_size * 2 + fc1_output_size * 2
 
             # QAT: same scales the exporter quantizes at (export.py reads
             # these from TrainConfig), plus flags for which tensors get
@@ -220,35 +212,20 @@ if torch is not None:
 
             self.ft = nn.Embedding(num_features, ft_size)
             self.ft_bias = nn.Parameter(torch.zeros(ft_size, dtype=torch.float32))
-
-            # StackedLinear layout: bucket b's slice of the output is
-            # rows/columns [b * out_per_bucket : (b + 1) * out_per_bucket].
-            # Weight is standard nn.Linear (out_features, in_features).
-            self.fc0 = nn.Linear(self.fc0_input_size, l2_size * num_buckets)
-            self.fc1 = nn.Linear(self.fc1_input_size, l3_size * num_buckets)
-            self.fc2 = nn.Linear(self.fc2_input_size, 1 * num_buckets)
+            self.fc0 = nn.Linear(self.fc0_input_size, self.fc0_output_size)
+            self.fc1 = nn.Linear(self.fc1_input_size, fc1_output_size)
+            self.fc2 = nn.Linear(self.fc2_input_size, 1)
             self.reset_parameters()
 
         def reset_parameters(self) -> None:
             nn.init.uniform_(self.ft.weight, -0.01, 0.01)
             nn.init.zeros_(self.ft_bias)
-            self._init_stacked_layer_uniformly(self.fc0, self.l2_size)
-            self._init_stacked_layer_uniformly(self.fc1, self.l3_size)
-            self._init_stacked_layer_uniformly(self.fc2, 1)
-
-        def _init_stacked_layer_uniformly(self, layer: "nn.Linear", out_features_per_bucket: int) -> None:
-            """Initialize one bucket's weights, then repeat across every bucket.
-
-            Matches nnue-pytorch's ``StackedLinear._init_uniformly``: every
-            bucket starts from the exact same point and diverges only through
-            training, rather than each bucket starting independently and
-            having to learn from ~1/num_buckets of the data on its own.
-            """
-            template = torch.empty(out_features_per_bucket, layer.in_features)
-            nn.init.xavier_uniform_(template)
-            with torch.no_grad():
-                layer.weight.copy_(template.repeat(self.num_buckets, 1))
-                layer.bias.zero_()
+            nn.init.xavier_uniform_(self.fc0.weight)
+            nn.init.zeros_(self.fc0.bias)
+            nn.init.xavier_uniform_(self.fc1.weight)
+            nn.init.zeros_(self.fc1.bias)
+            nn.init.xavier_uniform_(self.fc2.weight)
+            nn.init.zeros_(self.fc2.bias)
 
         def _quantized_ft_weight(self) -> torch.Tensor:
             """``ft.weight``, fake-quantized at ``export_ft_scale`` if enabled.
@@ -312,44 +289,6 @@ if torch is not None:
             )
             return acc + ft_bias
 
-        def _bucket_index(self, white_indices: torch.Tensor) -> torch.Tensor:
-            """Stockfish's piece-count LayerStacks bucket rule.
-
-            ``piece_count`` counts the non-negative (real, non-padding) entries
-            in ``white_indices``. Padding is -1, so this is exactly the number
-            of active features for the white perspective, which always includes
-            both kings (range 2..32).
-            """
-            piece_count = white_indices.ge(0).sum(dim=1)
-            bucket = torch.div(piece_count - 1, 4, rounding_mode="floor")
-            return bucket.clamp(0, self.num_buckets - 1)
-
-        def _select_bucket(
-            self,
-            stacked: torch.Tensor,
-            bucket: torch.Tensor,
-            out_features_per_bucket: int,
-        ) -> torch.Tensor:
-            """Select each sample's active bucket slice out of a stacked
-            ``(batch, out_features_per_bucket * num_buckets)`` layer output.
-
-            The alternative -- sorting the batch by bucket and running
-            ``num_buckets`` variable-size matmuls -- would be more
-            FLOP-efficient, but is not implemented here; this gather is simple
-            and its memory footprint is already small since it operates on the
-            layer *output*, not a per-sample copy of the weight matrix.
-            """
-            batch = stacked.shape[0]
-            reshaped = stacked.reshape(batch * self.num_buckets, out_features_per_bucket)
-            offset = torch.arange(
-                0,
-                batch * self.num_buckets,
-                self.num_buckets,
-                device=bucket.device,
-                dtype=bucket.dtype,
-            )
-            return reshaped[bucket + offset]
-
         def forward(
             self,
             white_indices: torch.Tensor,
@@ -368,37 +307,34 @@ if torch is not None:
             # matching the engine's uint8 activation (see FT_ACT_QUANT_SCALE).
             x = self._quantize_act(x)
 
-            bucket = self._bucket_index(white_indices)
-
             fc0_weight, fc0_bias = self._quantized_dense_params(self.fc0)
-            fc0_stacked = torch.nn.functional.linear(x, fc0_weight, fc0_bias)  # [batch, l2_size * num_buckets]
-            fc0_out = self._select_bucket(fc0_stacked, bucket, self.l2_size)  # [batch, l2_size]
+            fc0_out = torch.nn.functional.linear(x, fc0_weight, fc0_bias)  # [batch, fc0_output_size]
 
-            # The skip connection comes from the RAW pre-activation fc0_out's
-            # last two lanes. Those lanes are also fed through the activations
-            # below like every other lane -- nothing is reserved/excluded. The
-            # skip is deliberately NOT quantized (upstream's
-            # fake_quantize_skip_act is an identity).
-            skip = fc0_out[:, self.l2_size - 2] - fc0_out[:, self.l2_size - 1]
+            # Dedicated-lane skip: fc0's LAST lane is reserved for the skip
+            # connection and never activated -- it bypasses fc1/fc2 entirely
+            # and is added straight onto the final output. The skip is
+            # deliberately NOT quantized (upstream's fake_quantize_skip_act is
+            # an identity), and it stays [batch, 1] so it broadcasts onto the
+            # scalar head output without a reshape.
+            hidden = fc0_out[:, : self.hidden_size]
+            skip = fc0_out[:, self.hidden_size : self.fc0_output_size]
 
             a0 = torch.cat(
-                [self._quantize_act(sqr_crelu(fc0_out)), self._quantize_act(crelu(fc0_out))], dim=1
-            )  # width 2 * l2_size
+                [self._quantize_act(sqr_crelu(hidden)), self._quantize_act(crelu(hidden))], dim=1
+            )  # width 2 * hidden_size
 
             fc1_weight, fc1_bias = self._quantized_dense_params(self.fc1)
-            fc1_stacked = torch.nn.functional.linear(a0, fc1_weight, fc1_bias)  # [batch, l3_size * num_buckets]
-            fc1_out = self._select_bucket(fc1_stacked, bucket, self.l3_size)  # [batch, l3_size]
+            fc1_out = torch.nn.functional.linear(a0, fc1_weight, fc1_bias)  # [batch, fc1_output_size]
 
             a1 = torch.cat(
                 [self._quantize_act(sqr_crelu(fc1_out)), self._quantize_act(crelu(fc1_out))], dim=1
-            )  # width 2 * l3_size
+            )  # width 2 * fc1_output_size
 
             head_in = torch.cat([a0, a1], dim=1)  # width fc2_input_size
             fc2_weight, fc2_bias = self._quantized_dense_params(self.fc2)
-            fc2_stacked = torch.nn.functional.linear(head_in, fc2_weight, fc2_bias)  # [batch, num_buckets]
-            out = self._select_bucket(fc2_stacked, bucket, 1)  # [batch, 1]
+            out = torch.nn.functional.linear(head_in, fc2_weight, fc2_bias)  # [batch, 1]
 
-            return out + skip.unsqueeze(1)
+            return out + skip
 
 else:
 

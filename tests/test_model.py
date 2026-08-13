@@ -14,83 +14,100 @@ except ModuleNotFoundError:
 
 
 @unittest.skipUnless(torch is not None, "PyTorch is required for model tests")
-class BucketIndexTests(unittest.TestCase):
+class DedicatedSkipLaneTests(unittest.TestCase):
+    """fc0's last lane is a DEDICATED skip lane: it bypasses the activations
+    and fc1/fc2 entirely and is added straight onto the head output.
+
+    All weight values below are chosen on the dense quantization grid
+    (multiples of 1/64) so QAT's weight rounding, which is on by default, is a
+    no-op and the arithmetic stays exactly hand-checkable.
+    """
+
     def setUp(self) -> None:
         from thrawn_nnue.model import HalfKAv2HmNNUE
 
-        self.model = HalfKAv2HmNNUE(num_buckets=8)
+        self.model = HalfKAv2HmNNUE()
+        self.white = self._white_indices_for_piece_count(6)
+        self.black = self._white_indices_for_piece_count(6)
+        self.stm = torch.tensor([[1.0]], dtype=torch.float32)
 
     def _white_indices_for_piece_count(self, piece_count: int) -> "torch.Tensor":
         max_active_features = 32
         row = [0] * piece_count + [-1] * (max_active_features - piece_count)
         return torch.tensor([row], dtype=torch.long)
 
-    def test_bucket_index_derivation_matches_stockfish_layerstacks_rule(self) -> None:
-        # bucket = clamp((piece_count - 1) // 4, 0, num_buckets - 1); both kings
-        # are always present so piece_count ranges 2..32.
-        expectations = {
-            2: 0,
-            4: 0,
-            5: 1,
-            8: 1,
-            9: 2,
-            12: 2,
-            13: 3,
-            28: 6,
-            29: 7,
-            30: 7,
-            31: 7,
-            32: 7,
-        }
-        for piece_count, expected_bucket in expectations.items():
-            with self.subTest(piece_count=piece_count):
-                white_indices = self._white_indices_for_piece_count(piece_count)
-                bucket = self.model._bucket_index(white_indices)
-                self.assertEqual(int(bucket.item()), expected_bucket)
+    def test_fc0_reserves_exactly_one_lane_beyond_the_hidden_lanes(self) -> None:
+        model = self.model
+        self.assertEqual(model.fc0_output_size, model.hidden_size + model.forward_size)
+        self.assertEqual(model.fc0.out_features, model.fc0_output_size)
+        # Only the hidden lanes are activated, so fc1's input is 2 *
+        # hidden_size -- not 2 * fc0_output_size.
+        self.assertEqual(model.fc1.in_features, model.hidden_size * 2)
 
-    def test_bucket_index_two_and_thirty_two_piece_edges(self) -> None:
-        # The two edges the spec calls out explicitly: the minimum legal piece
-        # count (both kings, nothing else) and the maximum (a full board).
-        min_bucket = self.model._bucket_index(self._white_indices_for_piece_count(2))
-        max_bucket = self.model._bucket_index(self._white_indices_for_piece_count(32))
-        self.assertEqual(int(min_bucket.item()), 0)
-        self.assertEqual(int(max_bucket.item()), self.model.num_buckets - 1)
-
-    def test_different_piece_counts_route_to_different_buckets_and_outputs(self) -> None:
-        # Two positions with different piece counts must (a) select different
-        # buckets and (b) actually produce different scores once the buckets'
-        # weights differ -- i.e. the bucket selection is really wired into the
-        # forward pass, not just computed and discarded.
-        max_active_features = 32
-        few_pieces = 3  # -> bucket 0
-        many_pieces = 32  # -> bucket 7
-        white_few = self._white_indices_for_piece_count(few_pieces)
-        white_many = self._white_indices_for_piece_count(many_pieces)
-        black = torch.tensor([[0] + [-1] * (max_active_features - 1)], dtype=torch.long)
-        stm = torch.tensor([[1.0]], dtype=torch.float32)
-
-        bucket_few = int(self.model._bucket_index(white_few).item())
-        bucket_many = int(self.model._bucket_index(white_many).item())
-        self.assertNotEqual(bucket_few, bucket_many)
+    def test_skip_lane_reaches_the_output_unactivated(self) -> None:
+        # A NEGATIVE skip value is the point: if the lane were fed through
+        # crelu/sqr_crelu like the hidden lanes, it could not arrive at the
+        # output as a negative number.
+        model = self.model
+        with torch.no_grad():
+            model.fc0.weight.zero_()
+            model.fc0.bias.zero_()
+            model.fc0.bias[model.hidden_size] = -0.5
+            model.fc2.weight.zero_()
+            model.fc2.bias.zero_()
+        model.eval()
 
         with torch.no_grad():
-            # Force every bucket's dense stack to be distinguishable. Biases
-            # are stored StackedLinear-style: one flat vector of width
-            # out_features_per_bucket * num_buckets, bucket b's slice is
-            # rows [b*out : (b+1)*out] -- reshape to (num_buckets, out) to
-            # address it per-bucket without hardcoding the stride.
-            fc0_bias = self.model.fc0.bias.view(self.model.num_buckets, self.model.l2_size)
-            fc1_bias = self.model.fc1.bias.view(self.model.num_buckets, self.model.l3_size)
-            fc2_bias = self.model.fc2.bias.view(self.model.num_buckets, 1)
-            for bucket in range(self.model.num_buckets):
-                fc0_bias[bucket].fill_(float(bucket) * 0.1)
-                fc1_bias[bucket].fill_(float(bucket) * 0.1)
-                fc2_bias[bucket].fill_(float(bucket) * 0.1)
+            out = model(self.white, self.black, self.stm)
 
-            score_few = self.model(white_few, black, stm)
-            score_many = self.model(white_many, black, stm)
+        self.assertAlmostEqual(float(out.item()), -0.5, places=6)
 
-        self.assertNotAlmostEqual(float(score_few.item()), float(score_many.item()), places=4)
+    def test_skip_lane_is_excluded_from_the_activation_path(self) -> None:
+        # With the head live (non-zero fc2), perturbing ONLY the skip lane must
+        # move the output by exactly that perturbation. If the lane also fed
+        # a0 -- i.e. it were a shared lane rather than a dedicated one -- the
+        # activation path would contribute an extra, different delta.
+        model = self.model
+        with torch.no_grad():
+            model.fc0.weight.zero_()
+            model.fc0.bias.fill_(0.5)
+            model.fc0.bias[model.hidden_size] = 0.0
+            model.fc2.weight.fill_(0.25)
+            model.fc2.bias.zero_()
+        model.eval()
+
+        with torch.no_grad():
+            baseline = float(model(self.white, self.black, self.stm).item())
+            model.fc0.bias[model.hidden_size] = 0.25
+            perturbed = float(model(self.white, self.black, self.stm).item())
+
+        self.assertAlmostEqual(perturbed - baseline, 0.25, places=6)
+
+    def test_output_head_sees_fc0s_activations_directly_not_just_fc1s(self) -> None:
+        # The widened head takes concat(a0, a1). Zeroing the a1 half of fc2's
+        # weights must still leave a live path from fc0's activations to the
+        # output -- that path is what "wide head" means.
+        model = self.model
+        a0_width = model.hidden_size * 2
+        self.assertEqual(model.fc2.in_features, a0_width + model.fc1_output_size * 2)
+
+        with torch.no_grad():
+            model.fc0.weight.zero_()
+            model.fc0.bias.fill_(0.5)
+            model.fc0.bias[model.hidden_size] = 0.0  # skip lane contributes nothing
+            model.fc1.weight.zero_()
+            model.fc1.bias.zero_()
+            model.fc2.bias.zero_()
+            model.fc2.weight.zero_()
+        model.eval()
+
+        with torch.no_grad():
+            head_silent = float(model(self.white, self.black, self.stm).item())
+            model.fc2.weight[:, :a0_width] = 0.25  # a0 half only; a1 half stays zero
+            a0_only = float(model(self.white, self.black, self.stm).item())
+
+        self.assertAlmostEqual(head_silent, 0.0, places=6)
+        self.assertNotAlmostEqual(a0_only, 0.0, places=4)
 
 
 @unittest.skipUnless(torch is not None, "PyTorch is required for model tests")

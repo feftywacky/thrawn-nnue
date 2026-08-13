@@ -58,4 +58,4 @@ out_offset = 270.0
 out_scaling = 380.0
 pow_exp = 2.5
 
-export_description = "thrawn HalfKAv2_hm 1024x2 pairwise -> 8 buckets [32 -> 32, wide head] -> 1 nodes5000pv2 UHO 200ep lambda1.0"
+export_description = "thrawn HalfKAv2_hm 1024x2 pairwise -> 31+1 -> 32 -> wide head -> 1 nodes5000pv2 UHO 200ep lambda1.0"
